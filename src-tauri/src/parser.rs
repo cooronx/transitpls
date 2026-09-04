@@ -1,6 +1,7 @@
 use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
+use quick_xml::escape::unescape;
 use quick_xml::events::Event;
-use quick_xml::Reader;
+use quick_xml::{Reader, XmlVersion};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs::File;
@@ -266,7 +267,7 @@ fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => {
-                let name = String::from_utf8_lossy(event.name().as_ref()).to_ascii_lowercase();
+                let name = event.name().as_ref().to_ascii_lowercase();
                 if let Some(kind) = block_kind(&name) {
                     current = Some((ordinal, kind, String::new()));
                     ordinal += 1;
@@ -274,8 +275,7 @@ fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
             }
             Ok(Event::Text(event)) => {
                 if let Some((_, _, text)) = current.as_mut() {
-                    let value = event
-                        .unescape()
+                    let value = unescape(event.as_ref())
                         .map(|value| value.into_owned())
                         .unwrap_or_default();
                     if should_separate_text(text, &value) {
@@ -285,7 +285,7 @@ fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
                 }
             }
             Ok(Event::End(event)) => {
-                let name = String::from_utf8_lossy(event.name().as_ref()).to_ascii_lowercase();
+                let name = event.name().as_ref().to_ascii_lowercase();
                 if block_kind(&name).is_some() {
                     if let Some(block) = current.take() {
                         blocks.push(block);
@@ -359,8 +359,8 @@ fn block_kind(name: &str) -> Option<SegmentKind> {
     }
 }
 
-fn local_name(value: &[u8]) -> String {
-    String::from_utf8_lossy(value)
+fn local_name(value: &str) -> String {
+    value
         .rsplit(':')
         .next()
         .unwrap_or_default()
@@ -377,9 +377,9 @@ fn parse_rootfile_path(xml: &str) -> Result<String, String> {
                 if local_name(event.name().as_ref()) == "rootfile" =>
             {
                 for attribute in event.attributes().flatten() {
-                    if attribute.key.as_ref() == b"full-path" {
+                    if attribute.key.as_ref() == "full-path" {
                         return attribute
-                            .unescape_value()
+                            .normalized_value(XmlVersion::Implicit1_0)
                             .map(|value| value.into_owned())
                             .map_err(|error| format!("invalid container path: {error}"));
                     }
@@ -412,12 +412,23 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                     let mut media_type = None;
                     for attribute in event.attributes().flatten() {
                         match attribute.key.as_ref() {
-                            b"id" => id = attribute.unescape_value().ok().map(|v| v.into_owned()),
-                            b"href" => {
-                                href = attribute.unescape_value().ok().map(|v| v.into_owned())
+                            "id" => {
+                                id = attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
                             }
-                            b"media-type" => {
-                                media_type = attribute.unescape_value().ok().map(|v| v.into_owned())
+                            "href" => {
+                                href = attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            }
+                            "media-type" => {
+                                media_type = attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
                             }
                             _ => {}
                         }
@@ -429,8 +440,8 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                     }
                 } else if current_element == "itemref" {
                     for attribute in event.attributes().flatten() {
-                        if attribute.key.as_ref() == b"idref" {
-                            if let Ok(value) = attribute.unescape_value() {
+                        if attribute.key.as_ref() == "idref" {
+                            if let Ok(value) = attribute.normalized_value(XmlVersion::Implicit1_0) {
                                 spine.push(value.into_owned());
                             }
                         }
@@ -438,7 +449,9 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                 }
             }
             Ok(Event::Text(event)) if current_element == "title" => {
-                title = event.unescape().ok().map(|value| value.into_owned());
+                title = unescape(event.as_ref())
+                    .ok()
+                    .map(|value| value.into_owned());
             }
             Ok(Event::End(_)) => current_element.clear(),
             Ok(Event::Eof) => break,
@@ -507,7 +520,11 @@ fn normalize_source(value: &str) -> String {
 fn hash_text(value: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(value.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]

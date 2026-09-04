@@ -1,6 +1,6 @@
 use crate::model::{Document, Segment, SegmentKind};
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 use rig_core::client::CompletionClient;
 use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message};
 use rig_core::http_client::ReqwestClient;
