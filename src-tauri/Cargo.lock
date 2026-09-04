@@ -4998,6 +4998,7 @@ dependencies = [
  "chrono",
  "clap",
  "quick-xml 0.37.5",
+ "rand 0.9.5",
  "rig-core",
  "serde",
  "serde_json",

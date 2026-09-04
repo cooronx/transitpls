@@ -27,6 +27,7 @@ chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 quick-xml = "0.37"
 rig-core = "0.42"
+rand = "0.9"
 sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 toml = "0.8"

@@ -1,5 +1,6 @@
-use crate::model::Segment;
+use crate::model::{Document, Segment, SegmentKind};
 use async_trait::async_trait;
+use rand::Rng;
 use rig_core::client::CompletionClient;
 use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message};
 use rig_core::http_client::ReqwestClient;
@@ -7,6 +8,8 @@ use std::time::Duration;
 
 pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
 pub const DEFAULT_MAX_RETRIES: usize = 3;
+pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
+pub const LANGUAGE_SAMPLE_CHARS: usize = 1_000;
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AppConfig {
@@ -30,7 +33,13 @@ pub struct MockClient;
 
 #[async_trait]
 impl TranslationClient for MockClient {
-    async fn complete(&self, _system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+        if system_prompt.contains("language identification") {
+            return Ok(serde_json::json!({
+                "language": mock_language(user_prompt),
+            })
+            .to_string());
+        }
         let request: BatchPrompt = serde_json::from_str(user_prompt)
             .map_err(|error| format!("mock client received invalid prompt: {error}"))?;
         Ok(serde_json::json!({
@@ -167,6 +176,111 @@ struct PromptSegment {
     source: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LanguageResponse {
+    language: String,
+}
+
+pub fn sample_language_texts(document: &Document) -> Result<Vec<String>, String> {
+    let mut corpus = document
+        .chapters
+        .iter()
+        .flat_map(|chapter| chapter.segments.iter())
+        .filter(|segment| matches!(segment.kind, SegmentKind::Paragraph | SegmentKind::Quote))
+        .map(|segment| segment.source.trim())
+        .filter(|source| !source.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if corpus.is_empty() {
+        corpus = document
+            .chapters
+            .iter()
+            .flat_map(|chapter| chapter.segments.iter())
+            .map(|segment| segment.source.trim())
+            .filter(|source| !source.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let chars = corpus.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return Err("cannot detect language from an empty document".to_string());
+    }
+    let sample_len = chars.len().min(LANGUAGE_SAMPLE_CHARS);
+    let max_start = chars.len() - sample_len;
+    let mut rng = rand::rng();
+    Ok((0..LANGUAGE_SAMPLE_COUNT)
+        .map(|_| {
+            let start = if max_start == 0 {
+                0
+            } else {
+                rng.random_range(0..=max_start)
+            };
+            chars[start..start + sample_len].iter().collect()
+        })
+        .collect())
+}
+
+pub fn validate_language_response(raw: &str) -> Result<String, String> {
+    let response: LanguageResponse = serde_json::from_str(raw)
+        .map_err(|error| format!("language response is not valid JSON: {error}"))?;
+    let language = response.language.trim().to_ascii_lowercase();
+    if language.len() != 2 || !language.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Err(format!(
+            "language response must contain an ISO 639-1 code, got '{language}'"
+        ));
+    }
+    Ok(language)
+}
+
+pub async fn detect_source_language<C: TranslationClient + ?Sized>(
+    client: &C,
+    document: &Document,
+) -> Result<String, String> {
+    let samples = sample_language_texts(document)?;
+    let system = "You are a language identification classifier. Identify the primary natural language of the provided text. Return only valid JSON in the exact form {\"language\":\"<ISO 639-1>\"}. Do not translate or explain.";
+    let mut detected = Vec::with_capacity(samples.len());
+    for (index, sample) in samples.iter().enumerate() {
+        let raw = client
+            .complete(system, sample)
+            .await
+            .map_err(|error| format!("language detection sample {} failed: {error}", index + 1))?;
+        let language = validate_language_response(&raw).map_err(|error| {
+            format!(
+                "language detection sample {} returned invalid output: {error}",
+                index + 1
+            )
+        })?;
+        detected.push(language);
+    }
+    let Some(first) = detected.first() else {
+        return Err("language detection produced no samples".to_string());
+    };
+    if detected.iter().all(|language| language == first) {
+        Ok(first.clone())
+    } else {
+        Err(format!(
+            "language detection failed: samples disagree ({})",
+            detected.join(", ")
+        ))
+    }
+}
+
+fn mock_language(text: &str) -> &'static str {
+    if text.chars().any(|value| {
+        ('\u{3040}'..='\u{30ff}').contains(&value) || ('\u{ff66}'..='\u{ff9d}').contains(&value)
+    }) {
+        "ja"
+    } else if text
+        .chars()
+        .any(|value| ('\u{4e00}'..='\u{9fff}').contains(&value))
+    {
+        "zh"
+    } else {
+        "en"
+    }
+}
+
 pub fn build_prompts(
     segments: &[Segment],
     source_language: &str,
@@ -280,7 +394,65 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_response;
+    use super::{
+        detect_source_language, sample_language_texts, validate_language_response,
+        validate_response, TranslationClient,
+    };
+    use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
+    use async_trait::async_trait;
+    use std::sync::{Arc, Mutex};
+
+    fn document_with_source(source: &str) -> Document {
+        Document {
+            metadata: DocumentMetadata {
+                title: "Test".to_string(),
+                source_language: "auto".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![Chapter {
+                id: "chapter-1".to_string(),
+                title: "Chapter 1".to_string(),
+                status: ItemStatus::Pending,
+                segments: vec![Segment {
+                    id: "segment-1".to_string(),
+                    ordinal: 0,
+                    source: source.to_string(),
+                    target: None,
+                    kind: SegmentKind::Paragraph,
+                    status: ItemStatus::Pending,
+                    source_hash: "hash".to_string(),
+                    meta: serde_json::json!({}),
+                }],
+            }],
+        }
+    }
+
+    struct SequenceClient {
+        responses: Arc<Mutex<Vec<Result<String, String>>>>,
+    }
+
+    impl SequenceClient {
+        fn new(responses: Vec<Result<String, String>>) -> Self {
+            Self {
+                responses: Arc::new(Mutex::new(responses)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TranslationClient for SequenceClient {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> Result<String, String> {
+            self.responses
+                .lock()
+                .expect("sequence client mutex")
+                .remove(0)
+        }
+    }
 
     #[test]
     fn validates_order_and_rejects_empty_translation() {
@@ -294,5 +466,53 @@ mod tests {
         let empty =
             r#"{"translations":[{"id":"a","translation":" "},{"id":"b","translation":"乙"}]}"#;
         assert!(validate_response(empty, &ids).is_err());
+    }
+
+    #[test]
+    fn samples_three_random_excerpts_with_unicode_character_limit() {
+        let document = document_with_source(&"あ".repeat(2_500));
+        let samples = sample_language_texts(&document).expect("samples");
+        assert_eq!(samples.len(), 3);
+        assert!(samples.iter().all(|sample| sample.chars().count() == 1_000));
+    }
+
+    #[tokio::test]
+    async fn accepts_language_only_when_all_three_samples_agree() {
+        let client = SequenceClient::new(vec![
+            Ok(r#"{"language":"ja"}"#.to_string()),
+            Ok(r#"{"language":"ja"}"#.to_string()),
+            Ok(r#"{"language":"JA"}"#.to_string()),
+        ]);
+        let document = document_with_source(&"日本語の文章です。".repeat(150));
+        assert_eq!(
+            detect_source_language(&client, &document)
+                .await
+                .expect("language detection"),
+            "ja"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_language_when_samples_disagree() {
+        let client = SequenceClient::new(vec![
+            Ok(r#"{"language":"ja"}"#.to_string()),
+            Ok(r#"{"language":"en"}"#.to_string()),
+            Ok(r#"{"language":"ja"}"#.to_string()),
+        ]);
+        let document = document_with_source(&"sample text ".repeat(200));
+        let error = detect_source_language(&client, &document)
+            .await
+            .expect_err("disagreement must fail");
+        assert!(error.contains("samples disagree"));
+    }
+
+    #[test]
+    fn validates_strict_iso_language_response() {
+        assert_eq!(
+            validate_language_response(r#"{"language":" JA "}"#).expect("valid code"),
+            "ja"
+        );
+        assert!(validate_language_response(r#"{"language":"jpn"}"#).is_err());
+        assert!(validate_language_response(r#"{"language":"ja","extra":true}"#).is_err());
     }
 }

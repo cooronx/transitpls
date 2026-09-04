@@ -36,6 +36,8 @@ struct InitArgs {
     source_language: Option<String>,
     #[arg(long, default_value_t = 2_000)]
     max_segment_chars: usize,
+    #[arg(long)]
+    mock: bool,
 }
 
 #[derive(Debug, Args)]
@@ -77,11 +79,25 @@ async fn execute(cli: Cli) -> Result<i32, String> {
                     args.input.display()
                 ));
             }
-            let document = parser::parse_document(
-                &args.input,
-                args.source_language.as_deref(),
-                args.max_segment_chars,
-            )?;
+            if let Ok(project) = state::load_for_source(&args.input) {
+                state::append_log(&project, "init_exists", serde_json::json!({}))?;
+                println!(
+                    "already initialized project {} ({} chapters, source language {}, target language {})",
+                    project.id,
+                    project.chapters_total,
+                    project.source_language,
+                    project.target_language
+                );
+                return Ok(0);
+            }
+            let requested_language = args.source_language.as_deref().or(Some("auto"));
+            let mut document =
+                parser::parse_document(&args.input, requested_language, args.max_segment_chars)?;
+            if args.source_language.is_none() {
+                let client = build_client(&cli.config, args.mock)?;
+                document.metadata.source_language =
+                    llm::detect_source_language(client.as_ref(), &document).await?;
+            }
             let initialized = state::initialize(&args.input, &document, args.max_segment_chars)?;
             println!(
                 "{} project {} ({} chapters, source language {}, target language {})",
@@ -133,12 +149,7 @@ async fn execute(cli: Cli) -> Result<i32, String> {
 async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String> {
     let mut project = state::load_for_source(&args.input)?;
     let mut chapters = state::load_chapters(&project)?;
-    let client: Box<dyn TranslationClient> = if args.mock {
-        Box::new(MockClient)
-    } else {
-        let config = llm::load_config(&config_path)?;
-        Box::new(RigClient::from_config(&config.llm)?)
-    };
+    let client = build_client(&config_path, args.mock)?;
     state::append_log(
         &project,
         "transit_started",
@@ -209,6 +220,18 @@ async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String>
             .sum::<usize>()
     );
     Ok(0)
+}
+
+fn build_client(
+    config_path: &std::path::Path,
+    mock: bool,
+) -> Result<Box<dyn TranslationClient>, String> {
+    if mock {
+        Ok(Box::new(MockClient))
+    } else {
+        let config = llm::load_config(config_path)?;
+        Ok(Box::new(RigClient::from_config(&config.llm)?))
+    }
 }
 
 fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {

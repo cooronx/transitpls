@@ -35,7 +35,7 @@ pub fn parse_document(
     };
     let language = source_language
         .map(str::to_string)
-        .unwrap_or_else(|| detect_source_language(&chapters));
+        .unwrap_or_else(|| "auto".to_string());
     Ok(Document {
         metadata: DocumentMetadata {
             title,
@@ -498,28 +498,6 @@ fn is_chapter_heading(value: &str) -> bool {
                 .filter(|character| character.is_alphabetic())
                 .all(char::is_uppercase)
             && !value.contains(['.', ',', ';', '。', '，', '；']))
-}
-
-fn detect_source_language(chapters: &[Chapter]) -> String {
-    let sample: String = chapters
-        .iter()
-        .flat_map(|chapter| {
-            chapter
-                .segments
-                .iter()
-                .map(|segment| segment.source.as_str())
-        })
-        .take(20)
-        .collect::<Vec<_>>()
-        .join(" ");
-    if sample
-        .chars()
-        .any(|value| ('\u{4e00}'..='\u{9fff}').contains(&value))
-    {
-        "zh-CN".to_string()
-    } else {
-        "en".to_string()
-    }
 }
 
 fn normalize_source(value: &str) -> String {
