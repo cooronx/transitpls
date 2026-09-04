@@ -22,6 +22,15 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+clap = { version = "4", features = ["derive"] }
+quick-xml = "0.37"
+rig-core = "0.42"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+toml = "0.8"
+zip = "2"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration
