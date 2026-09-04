@@ -6,26 +6,23 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const PROJECTS_DIR: &str = "projects";
-
 pub struct InitializedProject {
     pub project: ProjectState,
     pub created: bool,
 }
 
 pub fn initialize(
+    state_dir: &Path,
     input: &Path,
     document: &Document,
     max_segment_chars: usize,
 ) -> Result<InitializedProject, String> {
     let source_hash = hash_file(input)?;
-    let project_dir = project_dir(&source_hash);
-    fs::create_dir_all(project_dir.join("chapters"))
-        .map_err(|error| format!("failed to create project directory: {error}"))?;
+    let project_dir = project_dir(state_dir, &source_hash);
     let project_path = project_dir.join("project.json");
     if project_path.exists() {
         let project: ProjectState = read_json(&project_path)?;
-        append_log(&project, "init_exists", serde_json::json!({}))?;
+        append_log(state_dir, &project, "init_exists", serde_json::json!({}))?;
         return Ok(InitializedProject {
             project,
             created: false,
@@ -41,7 +38,7 @@ pub fn initialize(
             .unwrap_or_else(|_| input.to_path_buf())
             .to_string_lossy()
             .to_string(),
-        source_hash,
+        source_hash: source_hash.clone(),
         source_language: document.metadata.source_language.clone(),
         target_language: document.metadata.target_language.clone(),
         status: ProjectStatus::Initialized,
@@ -51,34 +48,58 @@ pub fn initialize(
         updated_at: now,
         max_segment_chars,
     };
-    write_json_atomic(&project_path, &project)?;
+    let creating_dir = state_dir.join(".creating");
+    fs::create_dir_all(&creating_dir)
+        .map_err(|error| format!("failed to create initialization directory: {error}"))?;
+    let temporary_dir = creating_dir.join(format!("{}-{}", source_hash, std::process::id()));
+    fs::create_dir(&temporary_dir).map_err(|error| {
+        format!(
+            "failed to create temporary project {}: {error}; remove stale directory and retry",
+            temporary_dir.display()
+        )
+    })?;
+    fs::create_dir(temporary_dir.join("chapters"))
+        .map_err(|error| format!("failed to create temporary chapters directory: {error}"))?;
+    write_json_atomic(&temporary_dir.join("project.json"), &project)?;
     for chapter in &document.chapters {
-        write_chapter(&project, chapter)?;
+        write_chapter_at(&temporary_dir, chapter)?;
     }
-    append_log(
-        &project,
+    append_log_at(
+        &temporary_dir.join("logs.txt"),
         "initialized",
         serde_json::json!({ "chapters": project.chapters_total }),
     )?;
+    fs::rename(&temporary_dir, &project_dir).map_err(|error| {
+        format!(
+            "failed to publish initialized project {}: {error}",
+            project_dir.display()
+        )
+    })?;
     Ok(InitializedProject {
         project,
         created: true,
     })
 }
 
-pub fn load_for_source(input: &Path) -> Result<ProjectState, String> {
+pub fn load_for_source(state_dir: &Path, input: &Path) -> Result<ProjectState, String> {
     let hash = hash_file(input)?;
-    let path = project_dir(&hash).join("project.json");
+    load_project(state_dir, &hash)
+}
+
+pub fn load_project(state_dir: &Path, id: &str) -> Result<ProjectState, String> {
+    if id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("project id must be a 64-character SHA-256 value".to_string());
+    }
+    let normalized_id = id.to_ascii_lowercase();
+    let path = project_dir(state_dir, &normalized_id).join("project.json");
     if !path.exists() {
-        return Err(format!(
-            "no project found for current source hash; run init first ({hash})"
-        ));
+        return Err(format!("no project found for id {id}; run init first"));
     }
     read_json(&path)
 }
 
-pub fn load_chapters(project: &ProjectState) -> Result<Vec<Chapter>, String> {
-    let dir = project_dir(&project.id).join("chapters");
+pub fn load_chapters(state_dir: &Path, project: &ProjectState) -> Result<Vec<Chapter>, String> {
+    let dir = project_dir(state_dir, &project.id).join("chapters");
     let mut chapters = Vec::new();
     let entries =
         fs::read_dir(&dir).map_err(|error| format!("failed to read chapters: {error}"))?;
@@ -102,7 +123,11 @@ pub fn load_chapters(project: &ProjectState) -> Result<Vec<Chapter>, String> {
     Ok(chapters)
 }
 
-pub fn save_progress(project: &mut ProjectState, chapters: &mut [Chapter]) -> Result<(), String> {
+pub fn save_progress(
+    state_dir: &Path,
+    project: &mut ProjectState,
+    chapters: &mut [Chapter],
+) -> Result<(), String> {
     for chapter in chapters.iter_mut() {
         if chapter
             .segments
@@ -130,26 +155,46 @@ pub fn save_progress(project: &mut ProjectState, chapters: &mut [Chapter]) -> Re
             ProjectStatus::Translating
         };
     }
-    write_json_atomic(&project_dir(&project.id).join("project.json"), project)?;
+    write_json_atomic(
+        &project_dir(state_dir, &project.id).join("project.json"),
+        project,
+    )?;
     for chapter in chapters {
-        write_chapter(project, chapter)?;
+        write_chapter(state_dir, project, chapter)?;
     }
     Ok(())
 }
 
-pub fn mark_failed(project: &mut ProjectState, detail: &str) -> Result<(), String> {
+pub fn mark_failed(
+    state_dir: &Path,
+    project: &mut ProjectState,
+    detail: &str,
+) -> Result<(), String> {
     project.status = ProjectStatus::Failed;
     project.updated_at = timestamp();
-    write_json_atomic(&project_dir(&project.id).join("project.json"), project)?;
-    append_log(project, "failed", serde_json::json!({ "error": detail }))
+    write_json_atomic(
+        &project_dir(state_dir, &project.id).join("project.json"),
+        project,
+    )?;
+    append_log(
+        state_dir,
+        project,
+        "failed",
+        serde_json::json!({ "error": detail }),
+    )
 }
 
 pub fn append_log(
+    state_dir: &Path,
     project: &ProjectState,
     event: &str,
     details: serde_json::Value,
 ) -> Result<(), String> {
-    let path = project_dir(&project.id).join("logs.txt");
+    let path = project_dir(state_dir, &project.id).join("logs.txt");
+    append_log_at(&path, event, details)
+}
+
+fn append_log_at(path: &Path, event: &str, details: serde_json::Value) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -182,13 +227,21 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         .collect())
 }
 
-fn project_dir(id: &str) -> PathBuf {
-    Path::new(PROJECTS_DIR).join(id)
+pub fn project_dir(state_dir: &Path, id: &str) -> PathBuf {
+    state_dir.join(id)
 }
 
-fn write_chapter(project: &ProjectState, chapter: &Chapter) -> Result<(), String> {
+pub fn write_chapter(
+    state_dir: &Path,
+    project: &ProjectState,
+    chapter: &Chapter,
+) -> Result<(), String> {
+    write_chapter_at(&project_dir(state_dir, &project.id), chapter)
+}
+
+fn write_chapter_at(project_dir: &Path, chapter: &Chapter) -> Result<(), String> {
     write_json_atomic(
-        &project_dir(&project.id)
+        &project_dir
             .join("chapters")
             .join(format!("{}.json", chapter.id)),
         chapter,
@@ -248,4 +301,78 @@ fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), 
 
 fn timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{hash_file, initialize};
+    use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "transitpls-state-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).expect("temp directory should be created");
+        path
+    }
+
+    fn document() -> Document {
+        Document {
+            metadata: DocumentMetadata {
+                title: "Book".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![Chapter {
+                id: "chapter-1-test".to_string(),
+                title: "Chapter 1".to_string(),
+                status: ItemStatus::Pending,
+                segments: Vec::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn hashes_source_bytes_with_sha256() {
+        let dir = temp_dir("hash");
+        let source = dir.join("book.txt");
+        fs::write(&source, b"abc").expect("source should be written");
+        assert_eq!(
+            hash_file(&source).expect("hash should be generated"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn publishes_complete_project_from_creating_directory() {
+        let dir = temp_dir("initialize");
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, b"content").expect("source should be written");
+
+        let initialized =
+            initialize(&state_dir, &source, &document(), 1_200).expect("init should succeed");
+        let project_dir = state_dir.join(&initialized.project.id);
+        assert!(project_dir.join("project.json").is_file());
+        assert!(project_dir.join("chapters/chapter-1-test.json").is_file());
+        assert!(project_dir.join("logs.txt").is_file());
+        assert!(state_dir.join(".creating").is_dir());
+        assert_eq!(
+            fs::read_dir(state_dir.join(".creating"))
+                .expect("creating directory should be readable")
+                .count(),
+            0
+        );
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
 }

@@ -1,3 +1,4 @@
+use crate::config::LlmConfig;
 use crate::model::{Document, Segment, SegmentKind};
 use async_trait::async_trait;
 use rand::RngExt;
@@ -6,23 +7,8 @@ use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message};
 use rig_core::http_client::ReqwestClient;
 use std::time::Duration;
 
-pub const DEFAULT_TIMEOUT_SECS: u64 = 60;
-pub const DEFAULT_MAX_RETRIES: usize = 3;
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
 pub const LANGUAGE_SAMPLE_CHARS: usize = 1_000;
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct AppConfig {
-    pub llm: LlmConfig,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct LlmConfig {
-    pub provider: String,
-    pub model: String,
-    pub base_url: Option<String>,
-    pub api_key: String,
-}
 
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
@@ -67,15 +53,16 @@ pub struct RigClient {
 impl RigClient {
     pub fn from_config(config: &LlmConfig) -> Result<Self, String> {
         let http_client = ReqwestClient::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|error| format!("failed to build HTTP client: {error}"))?;
         let provider = config.provider.to_ascii_lowercase();
+        let api_key = config.api_key()?;
         let model = match provider.as_str() {
             "openai-chat" => {
                 let base_url = normalize_openai_url(config.base_url.as_deref(), "chat/completions");
                 let client = rig_core::providers::openai::CompletionsClient::builder()
-                    .api_key(config.api_key.clone())
+                    .api_key(api_key.clone())
                     .base_url(base_url)
                     .http_client(http_client)
                     .build()
@@ -85,7 +72,7 @@ impl RigClient {
             "openai-responses" => {
                 let base_url = normalize_openai_url(config.base_url.as_deref(), "responses");
                 let client = rig_core::providers::openai::Client::builder()
-                    .api_key(config.api_key.clone())
+                    .api_key(api_key.clone())
                     .base_url(base_url)
                     .http_client(http_client)
                     .build()
@@ -101,7 +88,7 @@ impl RigClient {
                     .unwrap_or("https://api.anthropic.com")
                     .to_string();
                 let client = rig_core::providers::anthropic::Client::builder()
-                    .api_key(config.api_key.clone())
+                    .api_key(api_key)
                     .base_url(base_url)
                     .http_client(http_client)
                     .build()
@@ -356,17 +343,12 @@ fn normalize_openai_url(base_url: Option<&str>, suffix: &str) -> String {
     }
 }
 
-pub fn load_config(path: &std::path::Path) -> Result<AppConfig, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read config {}: {error}", path.display()))?;
-    toml::from_str(&text).map_err(|error| format!("invalid TOML config: {error}"))
-}
-
 pub async fn translate_batch<C: TranslationClient + ?Sized>(
     client: &C,
     segments: &[Segment],
     source_language: &str,
     target_language: &str,
+    max_retries: usize,
 ) -> Result<Vec<String>, String> {
     let expected_ids = segments
         .iter()
@@ -374,7 +356,7 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
         .collect::<Vec<_>>();
     let (system, user) = build_prompts(segments, source_language, target_language);
     let mut last_error = String::new();
-    for attempt in 0..=DEFAULT_MAX_RETRIES {
+    for attempt in 0..=max_retries {
         match client.complete(&system, &user).await {
             Ok(raw) => match validate_response(&raw, &expected_ids) {
                 Ok(translations) => return Ok(translations),
@@ -382,13 +364,13 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
             },
             Err(error) => last_error = error,
         }
-        if attempt < DEFAULT_MAX_RETRIES {
+        if attempt < max_retries {
             tokio::time::sleep(Duration::from_secs(1_u64 << attempt)).await;
         }
     }
     Err(format!(
         "batch failed after {} retries: {last_error}",
-        DEFAULT_MAX_RETRIES
+        max_retries
     ))
 }
 

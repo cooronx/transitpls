@@ -1,5 +1,21 @@
+[language]
+source = "auto"
+target = "zh-CN"
+
 [llm]
 provider = "openai-chat"
-model = "gpt-4o-mini"
 base_url = "https://api.openai.com/v1"
-api_key = "replace-with-your-api-key"
+model = "gpt-4o-mini"
+api_key_env = "OPENAI_API_KEY"
+timeout_secs = 60
+max_retries = 3
+
+[segment]
+max_chars_per_segment = 1200
+max_chars_per_batch = 1800
+
+[paths]
+state_dir = "projects"
+
+[analysis]
+full_book = true

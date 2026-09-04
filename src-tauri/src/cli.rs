@@ -1,3 +1,4 @@
+use crate::config::{self, AppConfig};
 use crate::llm::{self, MockClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, ProjectStatus};
 use crate::parser;
@@ -14,8 +15,8 @@ const BATCH_SIZE: usize = 20;
     about = "Long-form document translation workflow"
 )]
 pub struct Cli {
-    #[arg(long, global = true, default_value = "transitpls.toml")]
-    config: PathBuf,
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -26,7 +27,7 @@ enum Command {
     Transit(TransitArgs),
     Review(InputArgs),
     Export(ExportArgs),
-    Status(InputArgs),
+    Status(ProjectArgs),
 }
 
 #[derive(Debug, Args)]
@@ -34,8 +35,8 @@ struct InitArgs {
     input: PathBuf,
     #[arg(long)]
     source_language: Option<String>,
-    #[arg(long, default_value_t = 2_000)]
-    max_segment_chars: usize,
+    #[arg(long)]
+    max_segment_chars: Option<usize>,
     #[arg(long)]
     mock: bool,
 }
@@ -50,6 +51,14 @@ struct TransitArgs {
 #[derive(Debug, Args)]
 struct InputArgs {
     input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct ProjectArgs {
+    #[arg(value_name = "INPUT", required_unless_present = "project")]
+    input: Option<PathBuf>,
+    #[arg(long, value_name = "SHA256", required_unless_present = "input")]
+    project: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -71,6 +80,9 @@ pub async fn run() -> i32 {
 }
 
 async fn execute(cli: Cli) -> Result<i32, String> {
+    let loaded = config::load(cli.config.as_deref())?;
+    let state_dir = loaded.state_dir;
+    let config = loaded.value;
     match cli.command {
         Command::Init(args) => {
             if !args.input.is_file() {
@@ -79,8 +91,8 @@ async fn execute(cli: Cli) -> Result<i32, String> {
                     args.input.display()
                 ));
             }
-            if let Ok(project) = state::load_for_source(&args.input) {
-                state::append_log(&project, "init_exists", serde_json::json!({}))?;
+            if let Ok(project) = state::load_for_source(&state_dir, &args.input) {
+                state::append_log(&state_dir, &project, "init_exists", serde_json::json!({}))?;
                 println!(
                     "already initialized project {} ({} chapters, source language {}, target language {})",
                     project.id,
@@ -90,15 +102,23 @@ async fn execute(cli: Cli) -> Result<i32, String> {
                 );
                 return Ok(0);
             }
-            let requested_language = args.source_language.as_deref().or(Some("auto"));
+            let requested_language = args
+                .source_language
+                .as_deref()
+                .unwrap_or(&config.language.source);
+            let max_segment_chars = args
+                .max_segment_chars
+                .unwrap_or(config.segment.max_chars_per_segment);
             let mut document =
-                parser::parse_document(&args.input, requested_language, args.max_segment_chars)?;
-            if args.source_language.is_none() {
-                let client = build_client(&cli.config, args.mock)?;
+                parser::parse_document(&args.input, Some(requested_language), max_segment_chars)?;
+            if requested_language == "auto" {
+                let client = build_client(&config, args.mock)?;
                 document.metadata.source_language =
                     llm::detect_source_language(client.as_ref(), &document).await?;
             }
-            let initialized = state::initialize(&args.input, &document, args.max_segment_chars)?;
+            document.metadata.target_language = config.language.target.clone();
+            let initialized =
+                state::initialize(&state_dir, &args.input, &document, max_segment_chars)?;
             println!(
                 "{} project {} ({} chapters, source language {}, target language {})",
                 if initialized.created {
@@ -114,16 +134,26 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             Ok(0)
         }
         Command::Status(args) => {
-            let project = state::load_for_source(&args.input)?;
-            let chapters = state::load_chapters(&project)?;
-            state::append_log(&project, "status_requested", serde_json::json!({}))?;
+            let project = load_project_args(&state_dir, &args)?;
+            let chapters = state::load_chapters(&state_dir, &project)?;
+            state::append_log(
+                &state_dir,
+                &project,
+                "status_requested",
+                serde_json::json!({}),
+            )?;
             print_status(&project, &chapters);
             Ok(0)
         }
-        Command::Transit(args) => transit(args, cli.config).await,
+        Command::Transit(args) => transit(args, &state_dir, &config).await,
         Command::Review(args) => {
-            let project = state::load_for_source(&args.input)?;
-            state::append_log(&project, "review_requested", serde_json::json!({}))?;
+            let project = state::load_for_source(&state_dir, &args.input)?;
+            state::append_log(
+                &state_dir,
+                &project,
+                "review_requested",
+                serde_json::json!({}),
+            )?;
             eprintln!(
                 "review is not implemented in this stage (project {})",
                 project.id
@@ -131,8 +161,9 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             Ok(2)
         }
         Command::Export(args) => {
-            let project = state::load_for_source(&args.input)?;
+            let project = state::load_for_source(&state_dir, &args.input)?;
             state::append_log(
+                &state_dir,
                 &project,
                 "export_requested",
                 serde_json::json!({ "format": args.format }),
@@ -146,17 +177,22 @@ async fn execute(cli: Cli) -> Result<i32, String> {
     }
 }
 
-async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String> {
-    let mut project = state::load_for_source(&args.input)?;
-    let mut chapters = state::load_chapters(&project)?;
-    let client = build_client(&config_path, args.mock)?;
+async fn transit(
+    args: TransitArgs,
+    state_dir: &std::path::Path,
+    config: &AppConfig,
+) -> Result<i32, String> {
+    let mut project = state::load_for_source(state_dir, &args.input)?;
+    let mut chapters = state::load_chapters(state_dir, &project)?;
+    let client = build_client(config, args.mock)?;
     state::append_log(
+        state_dir,
         &project,
         "transit_started",
         serde_json::json!({ "mock": args.mock }),
     )?;
     project.status = ProjectStatus::Translating;
-    state::save_progress(&mut project, &mut chapters)?;
+    state::save_progress(state_dir, &mut project, &mut chapters)?;
 
     for chapter_index in 0..chapters.len() {
         let pending = chapters[chapter_index]
@@ -171,6 +207,7 @@ async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String>
                 batch,
                 &project.source_language,
                 &project.target_language,
+                config.llm.max_retries,
             )
             .await
             {
@@ -181,8 +218,8 @@ async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String>
                             segment.status = ItemStatus::Failed;
                         }
                     }
-                    state::save_progress(&mut project, &mut chapters)?;
-                    state::mark_failed(&mut project, &error)?;
+                    state::save_progress(state_dir, &mut project, &mut chapters)?;
+                    state::mark_failed(state_dir, &mut project, &error)?;
                     return Err(error);
                 }
             };
@@ -203,10 +240,11 @@ async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String>
             {
                 chapters[chapter_index].status = ItemStatus::Translated;
             }
-            state::save_progress(&mut project, &mut chapters)?;
+            state::save_progress(state_dir, &mut project, &mut chapters)?;
         }
     }
     state::append_log(
+        state_dir,
         &project,
         "transit_completed",
         serde_json::json!({ "chapters": project.chapters_completed }),
@@ -222,15 +260,22 @@ async fn transit(args: TransitArgs, config_path: PathBuf) -> Result<i32, String>
     Ok(0)
 }
 
-fn build_client(
-    config_path: &std::path::Path,
-    mock: bool,
-) -> Result<Box<dyn TranslationClient>, String> {
+fn build_client(config: &AppConfig, mock: bool) -> Result<Box<dyn TranslationClient>, String> {
     if mock {
         Ok(Box::new(MockClient))
     } else {
-        let config = llm::load_config(config_path)?;
         Ok(Box::new(RigClient::from_config(&config.llm)?))
+    }
+}
+
+fn load_project_args(
+    state_dir: &std::path::Path,
+    args: &ProjectArgs,
+) -> Result<crate::model::ProjectState, String> {
+    match (&args.input, &args.project) {
+        (Some(input), None) => state::load_for_source(state_dir, input),
+        (None, Some(id)) => state::load_project(state_dir, id),
+        _ => Err("provide either an input file or --project <sha256>".to_string()),
     }
 }
 
@@ -261,5 +306,26 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
             translated,
             chapter.segments.len()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+    use std::path::PathBuf;
+
+    #[test]
+    fn accepts_explicit_config_and_project_id() {
+        let cli = Cli::try_parse_from([
+            "transitpls-cli",
+            "--config",
+            "custom.toml",
+            "status",
+            "--project",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ])
+        .expect("CLI arguments should parse");
+        assert_eq!(cli.config, Some(PathBuf::from("custom.toml")));
     }
 }
