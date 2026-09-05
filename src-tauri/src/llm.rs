@@ -4,8 +4,9 @@ use crate::terms::Term;
 use async_trait::async_trait;
 use rand::RngExt;
 use rig_core::client::CompletionClient;
-use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message};
+use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message, Usage};
 use rig_core::http_client::ReqwestClient;
+use serde::Serialize;
 use std::time::Duration;
 
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
@@ -13,71 +14,93 @@ pub const LANGUAGE_SAMPLE_CHARS: usize = 1_000;
 
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, String>;
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String>;
+}
+
+#[derive(Debug, Clone)]
+pub struct CompletionOutput {
+    pub text: String,
+    pub usage: Usage,
 }
 
 pub struct MockClient;
 
 #[async_trait]
 impl TranslationClient for MockClient {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
         if system_prompt.contains("language identification") {
-            return Ok(serde_json::json!({
-                "language": mock_language(user_prompt),
-            })
-            .to_string());
+            return Ok(mock_output(
+                serde_json::json!({
+                    "language": mock_language(user_prompt),
+                })
+                .to_string(),
+            ));
         }
         if system_prompt.contains("TASK:BOOK_STYLE_ANALYSIS") {
-            return Ok(serde_json::json!({
-                "genre": "mock fiction",
-                "tone": "consistent mock tone",
-                "style_guide": [
-                    "Use natural Simplified Chinese",
-                    "Keep names and forms of address consistent"
-                ],
-                "narration": "mock third-person narration",
-                "pacing": "balanced",
-                "register": "neutral",
-                "dialogue_style": "concise",
-                "rhetoric": "plain",
-                "characters": [{
-                    "source": "Alice",
-                    "target": "爱丽丝",
-                    "reading": null,
-                    "type": "person",
-                    "gender": null,
-                    "aliases": [],
-                    "first_chapter": 0,
-                    "note": "stable mock character"
-                }],
-                "terms": [{
-                    "source": "city",
-                    "target": "城市",
-                    "reading": null,
-                    "type": "place",
-                    "gender": null,
-                    "aliases": [],
-                    "first_chapter": 0,
-                    "note": "stable mock term"
-                }],
-                "book_synopsis": null
-            })
-            .to_string());
+            return Ok(mock_output(
+                serde_json::json!({
+                    "genre": "mock fiction",
+                    "tone": "consistent mock tone",
+                    "style_guide": [
+                        "Use natural Simplified Chinese",
+                        "Keep names and forms of address consistent"
+                    ],
+                    "narration": "mock third-person narration",
+                    "pacing": "balanced",
+                    "register": "neutral",
+                    "dialogue_style": "concise",
+                    "rhetoric": "plain",
+                    "characters": [{
+                        "source": "Alice",
+                        "target": "爱丽丝",
+                        "reading": null,
+                        "type": "person",
+                        "gender": null,
+                        "aliases": [],
+                        "first_chapter": 0,
+                        "note": "stable mock character"
+                    }],
+                    "terms": [{
+                        "source": "city",
+                        "target": "城市",
+                        "reading": null,
+                        "type": "place",
+                        "gender": null,
+                        "aliases": [],
+                        "first_chapter": 0,
+                        "note": "stable mock term"
+                    }],
+                    "book_synopsis": null
+                })
+                .to_string(),
+            ));
         }
         if system_prompt.contains("TASK:CHAPTER_DIGEST") {
             let request: serde_json::Value = serde_json::from_str(user_prompt)
                 .map_err(|error| format!("mock client received invalid digest prompt: {error}"))?;
             let title = request["title"].as_str().unwrap_or("Untitled");
-            return Ok(serde_json::json!({
-                "source_digest": format!("Mock digest for {title}"),
-            })
-            .to_string());
+            return Ok(mock_output(
+                serde_json::json!({
+                    "source_digest": format!("Mock digest for {title}"),
+                })
+                .to_string(),
+            ));
         }
         if system_prompt.contains("TASK:BOOK_SYNOPSIS") {
-            return Ok(serde_json::json!({
-                "book_synopsis": "Stable mock whole-book synopsis"
-            })
-            .to_string());
+            return Ok(mock_output(
+                serde_json::json!({
+                    "book_synopsis": "Stable mock whole-book synopsis"
+                })
+                .to_string(),
+            ));
         }
         if system_prompt.contains("TASK:TERM_EXTRACTION") {
             let request: serde_json::Value =
@@ -101,17 +124,57 @@ impl TranslationClient for MockClient {
             } else {
                 Vec::new()
             };
-            return Ok(serde_json::json!({ "terms": terms }).to_string());
+            return Ok(mock_output(
+                serde_json::json!({ "terms": terms }).to_string(),
+            ));
+        }
+        if system_prompt.contains("TASK:POLISH") {
+            let request: PolishPrompt = serde_json::from_str(user_prompt)
+                .map_err(|error| format!("mock client received invalid polish prompt: {error}"))?;
+            return Ok(mock_output(
+                serde_json::json!({
+                    "translations": request.segments.into_iter().map(|segment| serde_json::json!({
+                        "number": segment.number,
+                        "id": segment.id,
+                        "translation": format!("[mock polished zh-CN] {}", segment.translation),
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+            ));
+        }
+        if system_prompt.contains("TASK:TITLE_TRANSLATION") {
+            let request: BatchPrompt = serde_json::from_str(user_prompt)
+                .map_err(|error| format!("mock client received invalid title prompt: {error}"))?;
+            return Ok(mock_output(
+                serde_json::json!({
+                    "translations": request.segments.into_iter().map(|segment| serde_json::json!({
+                        "number": segment.number,
+                        "id": segment.id,
+                        "translation": format!("[mock title zh-CN] {}", segment.source),
+                    })).collect::<Vec<_>>()
+                })
+                .to_string(),
+            ));
         }
         let request: BatchPrompt = serde_json::from_str(user_prompt)
             .map_err(|error| format!("mock client received invalid prompt: {error}"))?;
-        Ok(serde_json::json!({
-            "translations": request.segments.into_iter().map(|segment| serde_json::json!({
-                "id": segment.id,
-                "translation": format!("[mock zh-CN] {}", segment.source),
-            })).collect::<Vec<_>>()
-        })
-        .to_string())
+        Ok(mock_output(
+            serde_json::json!({
+                "translations": request.segments.into_iter().map(|segment| serde_json::json!({
+                    "number": segment.number,
+                    "id": segment.id,
+                    "translation": format!("[mock zh-CN] {}", segment.source),
+                })).collect::<Vec<_>>()
+            })
+            .to_string(),
+        ))
+    }
+}
+
+fn mock_output(text: String) -> CompletionOutput {
+    CompletionOutput {
+        text,
+        usage: Usage::default(),
     }
 }
 
@@ -125,6 +188,51 @@ enum RigModel {
 
 pub struct RigClient {
     model: RigModel,
+}
+
+pub struct RecordingClient {
+    inner: Box<dyn TranslationClient>,
+    recorder: crate::usage::UsageRecorder,
+}
+
+impl RecordingClient {
+    pub fn new(inner: Box<dyn TranslationClient>, recorder: crate::usage::UsageRecorder) -> Self {
+        Self { inner, recorder }
+    }
+}
+
+#[async_trait]
+impl TranslationClient for RecordingClient {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        let output = self.inner.complete(system_prompt, user_prompt).await?;
+        self.recorder
+            .record(stage_from_prompt(system_prompt), output.usage)?;
+        Ok(output)
+    }
+}
+
+fn stage_from_prompt(system_prompt: &str) -> &'static str {
+    if system_prompt.contains("language identification") {
+        "language_identification"
+    } else if system_prompt.contains("TASK:BOOK_STYLE_ANALYSIS") {
+        "book_style_analysis"
+    } else if system_prompt.contains("TASK:CHAPTER_DIGEST") {
+        "chapter_digest"
+    } else if system_prompt.contains("TASK:BOOK_SYNOPSIS") {
+        "book_synopsis"
+    } else if system_prompt.contains("TASK:TERM_EXTRACTION") {
+        "term_extraction"
+    } else if system_prompt.contains("TASK:POLISH") {
+        "polish"
+    } else if system_prompt.contains("TASK:TITLE_TRANSLATION") {
+        "title_translation"
+    } else {
+        "translation"
+    }
 }
 
 impl RigClient {
@@ -185,7 +293,11 @@ impl RigClient {
 
 #[async_trait]
 impl TranslationClient for RigClient {
-    async fn complete(&self, system_prompt: &str, user_prompt: &str) -> Result<String, String> {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
         let response = match &self.model {
             RigModel::OpenAiChat(model) => {
                 CompletionRequestBuilder::new(model.clone(), Message::user(user_prompt))
@@ -213,6 +325,7 @@ impl TranslationClient for RigClient {
             }
         }
         .map_err(|error| format!("LLM request failed: {error}"))?;
+        let usage = response.usage;
         let text = response
             .choice
             .into_iter()
@@ -221,11 +334,7 @@ impl TranslationClient for RigClient {
                 _ => None,
             })
             .collect::<String>();
-        if text.trim().is_empty() {
-            Err("LLM returned an empty completion".to_string())
-        } else {
-            Ok(text)
-        }
+        Ok(CompletionOutput { text, usage })
     }
 }
 
@@ -236,8 +345,21 @@ struct BatchPrompt {
 
 #[derive(Debug, serde::Deserialize)]
 struct PromptSegment {
+    number: usize,
     id: String,
     source: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PolishPrompt {
+    segments: Vec<PolishPromptSegment>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PolishPromptSegment {
+    number: usize,
+    id: String,
+    translation: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -310,7 +432,7 @@ pub async fn detect_source_language<C: TranslationClient + ?Sized>(
         let mut last_error = String::new();
         for attempt in 0..=max_retries {
             match client.complete(system, sample).await {
-                Ok(raw) => match validate_language_response(&raw) {
+                Ok(output) => match validate_language_response(&output.text) {
                     Ok(value) => {
                         language = Some(value);
                         break;
@@ -359,23 +481,64 @@ fn mock_language(text: &str) -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct RecentTarget {
+    pub chapter_id: String,
+    pub segment_id: String,
+    pub target: String,
+}
+
+pub struct TranslationContext<'a> {
+    pub style_guide: &'a [String],
+    pub book_synopsis: Option<&'a str>,
+    pub chapter_digest: Option<&'a str>,
+    pub terms: &'a [Term],
+    pub recent_targets: &'a [RecentTarget],
+}
+
+#[derive(Serialize)]
+struct TranslationPrompt<'a> {
+    style: &'a [String],
+    book_synopsis: Option<&'a str>,
+    chapter_digest: Option<&'a str>,
+    terms: &'a [Term],
+    recent_targets: &'a [RecentTarget],
+    segments: Vec<NumberedSource<'a>>,
+}
+
+#[derive(Serialize)]
+struct NumberedSource<'a> {
+    number: usize,
+    id: &'a str,
+    source: &'a str,
+}
+
 pub fn build_prompts(
     segments: &[Segment],
     source_language: &str,
     target_language: &str,
-    terms: &[Term],
+    context: &TranslationContext<'_>,
 ) -> (String, String) {
     let system = format!(
-        "You are a professional literary translator. Translate from {source_language} to {target_language}. Preserve meaning, tone, formatting markers, and paragraph boundaries. Apply the provided relevant terminology consistently; resolved terms are authoritative. Return only valid JSON in the exact form {{\"translations\":[{{\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in input order and never omit an item."
+        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in numbered input order and never omit an item."
     );
-    let user = serde_json::json!({
-        "terms": terms,
-        "segments": segments.iter().map(|segment| serde_json::json!({
-            "id": segment.id,
-            "source": segment.source,
-        })).collect::<Vec<_>>()
+    let user = serde_json::to_string(&TranslationPrompt {
+        style: context.style_guide,
+        book_synopsis: context.book_synopsis,
+        chapter_digest: context.chapter_digest,
+        terms: context.terms,
+        recent_targets: context.recent_targets,
+        segments: segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| NumberedSource {
+                number: index + 1,
+                id: &segment.id,
+                source: &segment.source,
+            })
+            .collect(),
     })
-    .to_string();
+    .expect("translation prompt fields are serializable");
     (system, user)
 }
 
@@ -391,6 +554,13 @@ pub fn validate_response(raw: &str, expected_ids: &[String]) -> Result<Vec<Strin
     }
     let mut translations = Vec::with_capacity(response.translations.len());
     for (index, item) in response.translations.into_iter().enumerate() {
+        if item.number != index + 1 {
+            return Err(format!(
+                "translation {index} has number {}; expected {}",
+                item.number,
+                index + 1
+            ));
+        }
         if item.id != expected_ids[index] {
             return Err(format!(
                 "translation {index} has id '{}'; expected '{}'",
@@ -412,6 +582,7 @@ struct TranslationResponse {
 
 #[derive(Debug, serde::Deserialize)]
 struct TranslationItem {
+    number: usize,
     id: String,
     translation: String,
 }
@@ -441,25 +612,25 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
     segments: &[Segment],
     source_language: &str,
     target_language: &str,
-    terms: &[Term],
+    context: &TranslationContext<'_>,
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
     let expected_ids = segments
         .iter()
         .map(|segment| segment.id.clone())
         .collect::<Vec<_>>();
-    let (system, user) = build_prompts(segments, source_language, target_language, terms);
+    let (system, user) = build_prompts(segments, source_language, target_language, context);
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(&system, &user).await {
-            Ok(raw) => match validate_response(&raw, &expected_ids) {
+            Ok(output) => match validate_response(&output.text, &expected_ids) {
                 Ok(translations) => return Ok(translations),
                 Err(error) => last_error = error,
             },
             Err(error) => last_error = error,
         }
         if attempt < max_retries {
-            tokio::time::sleep(Duration::from_secs(1_u64 << attempt)).await;
+            tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
         }
     }
     Err(format!(
@@ -468,11 +639,130 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
     ))
 }
 
+#[derive(Serialize)]
+struct PolishRequest<'a> {
+    style: &'a [String],
+    book_synopsis: Option<&'a str>,
+    chapter_digest: Option<&'a str>,
+    terms: &'a [Term],
+    recent_targets: &'a [RecentTarget],
+    segments: Vec<PolishSource<'a>>,
+}
+
+#[derive(Serialize)]
+struct PolishSource<'a> {
+    number: usize,
+    id: &'a str,
+    source: &'a str,
+    translation: &'a str,
+}
+
+pub async fn polish_batch<C: TranslationClient + ?Sized>(
+    client: &C,
+    segments: &[Segment],
+    context: &TranslationContext<'_>,
+    max_retries: usize,
+) -> Result<Vec<String>, String> {
+    let expected_ids = segments
+        .iter()
+        .map(|segment| segment.id.clone())
+        .collect::<Vec<_>>();
+    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep items in numbered input order and never omit an item.";
+    let user = serde_json::to_string(&PolishRequest {
+        style: context.style_guide,
+        book_synopsis: context.book_synopsis,
+        chapter_digest: context.chapter_digest,
+        terms: context.terms,
+        recent_targets: context.recent_targets,
+        segments: segments
+            .iter()
+            .enumerate()
+            .map(|(index, segment)| PolishSource {
+                number: index + 1,
+                id: &segment.id,
+                source: &segment.source,
+                translation: segment.target_before_polish.as_deref().unwrap_or_default(),
+            })
+            .collect(),
+    })
+    .expect("polish prompt fields are serializable");
+    call_numbered_batch(client, system, &user, &expected_ids, max_retries, "polish").await
+}
+
+pub async fn translate_titles<C: TranslationClient + ?Sized>(
+    client: &C,
+    titles: &[Segment],
+    source_language: &str,
+    target_language: &str,
+    style_guide: &[String],
+    max_retries: usize,
+) -> Result<Vec<String>, String> {
+    let expected_ids = titles
+        .iter()
+        .map(|title| title.id.clone())
+        .collect::<Vec<_>>();
+    let system = format!(
+        "TASK:TITLE_TRANSLATION Translate chapter and table-of-contents titles from {source_language} to {target_language}. Follow the style guide and keep titles concise. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"chapter-id\",\"translation\":\"...\"}}]}}. Keep items in numbered input order and never omit an item."
+    );
+    let user = serde_json::to_string(&TranslationPrompt {
+        style: style_guide,
+        book_synopsis: None,
+        chapter_digest: None,
+        terms: &[],
+        recent_targets: &[],
+        segments: titles
+            .iter()
+            .enumerate()
+            .map(|(index, title)| NumberedSource {
+                number: index + 1,
+                id: &title.id,
+                source: &title.source,
+            })
+            .collect(),
+    })
+    .expect("title prompt fields are serializable");
+    call_numbered_batch(
+        client,
+        &system,
+        &user,
+        &expected_ids,
+        max_retries,
+        "title batch",
+    )
+    .await
+}
+
+async fn call_numbered_batch<C: TranslationClient + ?Sized>(
+    client: &C,
+    system: &str,
+    user: &str,
+    expected_ids: &[String],
+    max_retries: usize,
+    label: &str,
+) -> Result<Vec<String>, String> {
+    let mut last_error = String::new();
+    for attempt in 0..=max_retries {
+        match client.complete(system, user).await {
+            Ok(output) => match validate_response(&output.text, expected_ids) {
+                Ok(translations) => return Ok(translations),
+                Err(error) => last_error = error,
+            },
+            Err(error) => last_error = error,
+        }
+        if attempt < max_retries {
+            tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
+        }
+    }
+    Err(format!(
+        "{label} failed after {max_retries} retries: {last_error}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         detect_source_language, sample_language_texts, validate_language_response,
-        validate_response, TranslationClient,
+        validate_response, CompletionOutput, TranslationClient,
     };
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
     use crate::terms::{Term, TermStatus};
@@ -522,11 +812,34 @@ mod tests {
             note: None,
             status: TermStatus::Resolved,
         };
-        let (_, user) = super::build_prompts(&[segment], "en", "zh-CN", &[term]);
+        let terms = [term];
+        let context = super::TranslationContext {
+            style_guide: &["Keep the voice".to_string()],
+            book_synopsis: Some("Book synopsis"),
+            chapter_digest: Some("Chapter digest"),
+            terms: &terms,
+            recent_targets: &[super::RecentTarget {
+                chapter_id: "chapter-0".to_string(),
+                segment_id: "segment-0".to_string(),
+                target: "最近译文".to_string(),
+            }],
+        };
+        let (_, user) = super::build_prompts(&[segment], "en", "zh-CN", &context);
         let value: serde_json::Value =
             serde_json::from_str(&user).expect("prompt should be valid JSON");
         assert_eq!(value["terms"][0]["target"], "爱丽丝");
         assert_eq!(value["terms"][0]["status"], "resolved");
+        assert_eq!(value["segments"][0]["number"], 1);
+        let positions = [
+            "\"style\"",
+            "\"book_synopsis\"",
+            "\"chapter_digest\"",
+            "\"terms\"",
+            "\"recent_targets\"",
+            "\"segments\"",
+        ]
+        .map(|field| user.find(field).expect("prompt field should exist"));
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     struct SequenceClient {
@@ -547,25 +860,24 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
-        ) -> Result<String, String> {
+        ) -> Result<CompletionOutput, String> {
             self.responses
                 .lock()
                 .expect("sequence client mutex")
                 .remove(0)
+                .map(super::mock_output)
         }
     }
 
     #[test]
     fn validates_order_and_rejects_empty_translation() {
         let ids = vec!["a".to_string(), "b".to_string()];
-        let valid =
-            r#"{"translations":[{"id":"a","translation":"甲"},{"id":"b","translation":"乙"}]}"#;
+        let valid = r#"{"translations":[{"number":1,"id":"a","translation":"甲"},{"number":2,"id":"b","translation":"乙"}]}"#;
         assert_eq!(
             validate_response(valid, &ids).expect("valid response"),
             vec!["甲", "乙"]
         );
-        let empty =
-            r#"{"translations":[{"id":"a","translation":" "},{"id":"b","translation":"乙"}]}"#;
+        let empty = r#"{"translations":[{"number":1,"id":"a","translation":" "},{"number":2,"id":"b","translation":"乙"}]}"#;
         assert!(validate_response(empty, &ids).is_err());
     }
 

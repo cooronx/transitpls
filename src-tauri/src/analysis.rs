@@ -226,7 +226,7 @@ where
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(system, user).await {
-            Ok(raw) => match serde_json::from_str(&raw) {
+            Ok(output) => match serde_json::from_str(&output.text) {
                 Ok(value) => return Ok(value),
                 Err(error) => last_error = format!("LLM response is not valid JSON: {error}"),
             },
@@ -300,7 +300,7 @@ fn sample_positions(source: &str, sample_chars: usize, count: usize) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::{prepare, sample_positions};
-    use crate::llm::{MockClient, TranslationClient};
+    use crate::llm::{CompletionOutput, MockClient, TranslationClient};
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
     use crate::state;
     use crate::terms::TermStore;
@@ -317,7 +317,7 @@ mod tests {
             &self,
             _system_prompt: &str,
             _user_prompt: &str,
-        ) -> Result<String, String> {
+        ) -> Result<CompletionOutput, String> {
             Err("cached analysis unexpectedly called the model".to_string())
         }
     }
