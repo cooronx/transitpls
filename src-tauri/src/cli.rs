@@ -244,6 +244,12 @@ fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
                     conflict.source, conflict.target, conflict.chapter
                 );
             }
+            for conflict in store.alias_conflicts()? {
+                println!(
+                    "{}\talias shared by {} and {}\t-",
+                    conflict.alias, conflict.first_source, conflict.second_source
+                );
+            }
             Ok(0)
         }
         TermsCommand::Resolve(args) => {

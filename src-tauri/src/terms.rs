@@ -1,6 +1,7 @@
 use crate::llm::TranslationClient;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
@@ -60,6 +61,13 @@ pub struct TermCandidate {
     pub chapter: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AliasConflict {
+    pub alias: String,
+    pub first_source: String,
+    pub second_source: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PendingExtraction {
     pub chapter_id: String,
@@ -108,10 +116,18 @@ impl TermStore {
         let status = match existing {
             None => {
                 write_new_term(&transaction, term)?;
+                sync_aliases(&transaction, &term.source, &term.aliases)?;
                 TermStatus::Ok
             }
             Some(existing) if existing.target == term.target => {
                 merge_term_metadata(&transaction, &existing, term)?;
+                let mut aliases = existing.aliases;
+                for alias in &term.aliases {
+                    if !aliases.contains(alias) {
+                        aliases.push(alias.clone());
+                    }
+                }
+                sync_aliases(&transaction, &term.source, &aliases)?;
                 existing.status
             }
             Some(existing) => {
@@ -135,6 +151,9 @@ impl TermStore {
                 }
             }
         };
+        let status = find_term(&transaction, &term.source)?
+            .map(|stored| stored.status)
+            .unwrap_or(status);
         transaction
             .commit()
             .map_err(|error| format!("failed to commit term transaction: {error}"))?;
@@ -201,17 +220,52 @@ impl TermStore {
     }
 
     pub fn relevant(&self, source_text: &str) -> Result<Vec<Term>, String> {
-        Ok(self
-            .list()?
+        let terms = self.list()?;
+        let direct = terms
+            .iter()
+            .filter(|term| matches_text(source_text, &term.source))
+            .map(|term| term.source.clone())
+            .collect::<HashSet<_>>();
+        let mut aliases = HashMap::<String, Vec<usize>>::new();
+        for (index, term) in terms.iter().enumerate() {
+            for alias in &term.aliases {
+                if matches_text(source_text, alias) {
+                    aliases.entry(normalize(alias)).or_default().push(index);
+                }
+            }
+        }
+        let unambiguous = aliases
+            .values()
+            .filter(|matches| matches.len() == 1)
+            .map(|matches| matches[0])
+            .collect::<HashSet<_>>();
+        Ok(terms
             .into_iter()
-            .filter(|term| {
-                matches_text(source_text, &term.source)
-                    || term
-                        .aliases
-                        .iter()
-                        .any(|alias| matches_text(source_text, alias))
-            })
+            .enumerate()
+            .filter(|(index, term)| direct.contains(&term.source) || unambiguous.contains(index))
+            .map(|(_, term)| term)
             .collect())
+    }
+
+    pub fn alias_conflicts(&self) -> Result<Vec<AliasConflict>, String> {
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT alias, first_source, second_source
+                 FROM alias_conflicts ORDER BY alias, first_source, second_source",
+            )
+            .map_err(|error| format!("failed to prepare alias conflicts: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(AliasConflict {
+                    alias: row.get(0)?,
+                    first_source: row.get(1)?,
+                    second_source: row.get(2)?,
+                })
+            })
+            .map_err(|error| format!("failed to query alias conflicts: {error}"))?;
+        rows.map(|row| row.map_err(|error| format!("failed to read alias conflict: {error}")))
+            .collect()
     }
 
     pub fn queue_extraction(&self, extraction: &PendingExtraction) -> Result<(), String> {
@@ -337,6 +391,18 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
                  source_text TEXT NOT NULL,
                  target_text TEXT NOT NULL,
                  PRIMARY KEY(chapter_id, batch_key)
+             );
+             CREATE TABLE IF NOT EXISTS term_aliases (
+                 alias_normalized TEXT NOT NULL,
+                 alias TEXT NOT NULL,
+                 source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
+                 PRIMARY KEY(alias_normalized, source)
+             );
+             CREATE TABLE IF NOT EXISTS alias_conflicts (
+                 alias TEXT NOT NULL,
+                 first_source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
+                 second_source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
+                 UNIQUE(alias, first_source, second_source)
              );",
         )
         .map_err(|error| format!("failed to initialize terms database: {error}"))
@@ -430,6 +496,60 @@ fn record_candidate(
             params![source, target, chapter],
         )
         .map_err(|error| format!("failed to record term candidate: {error}"))?;
+    Ok(())
+}
+
+fn sync_aliases(
+    transaction: &Transaction<'_>,
+    source: &str,
+    aliases: &[String],
+) -> Result<(), String> {
+    for alias in aliases {
+        let normalized = normalize(alias);
+        if normalized.is_empty() {
+            continue;
+        }
+        let mut statement = transaction
+            .prepare(
+                "SELECT source FROM term_aliases
+                 WHERE alias_normalized = ?1 AND source != ?2",
+            )
+            .map_err(|error| format!("failed to prepare alias lookup: {error}"))?;
+        let others = statement
+            .query_map(params![normalized, source], |row| row.get::<_, String>(0))
+            .map_err(|error| format!("failed to query alias owners: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("failed to read alias owner: {error}"))?;
+        drop(statement);
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO term_aliases (alias_normalized, alias, source)
+                 VALUES (?1, ?2, ?3)",
+                params![normalized, alias, source],
+            )
+            .map_err(|error| format!("failed to store term alias: {error}"))?;
+        for other in others {
+            let (first, second) = if source < other.as_str() {
+                (source, other.as_str())
+            } else {
+                (other.as_str(), source)
+            };
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO alias_conflicts
+                     (alias, first_source, second_source) VALUES (?1, ?2, ?3)",
+                    params![alias, first, second],
+                )
+                .map_err(|error| format!("failed to record alias conflict: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE terms SET status = 'conflict'
+                     WHERE source IN (?1, ?2) AND status != 'resolved'",
+                    params![source, other],
+                )
+                .map_err(|error| format!("failed to mark alias conflict: {error}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -617,6 +737,35 @@ mod tests {
         assert_eq!(relevant.len(), 2);
         assert!(relevant.iter().any(|term| term.source == "Alice"));
         assert!(relevant.iter().any(|term| term.source == "王都"));
+        std::fs::remove_file(path).expect("database should be removed");
+    }
+
+    #[test]
+    fn records_ambiguous_aliases_and_does_not_inject_them() {
+        let (store, path) = store("alias-conflict");
+        let mut alice = term("Alice", "爱丽丝");
+        alice.aliases.push("Captain".to_string());
+        let mut bob = term("Bob", "鲍勃");
+        bob.aliases.push("captain".to_string());
+        store.insert(&alice).expect("Alice should insert");
+        assert_eq!(
+            store.insert(&bob).expect("Bob should insert"),
+            TermStatus::Conflict
+        );
+
+        assert_eq!(
+            store.alias_conflicts().expect("aliases should list").len(),
+            1
+        );
+        assert!(store
+            .relevant("The CAPTAIN entered.")
+            .expect("relevant terms should filter")
+            .is_empty());
+        assert!(store
+            .list()
+            .expect("terms should list")
+            .iter()
+            .all(|term| term.status == TermStatus::Conflict));
         std::fs::remove_file(path).expect("database should be removed");
     }
 
