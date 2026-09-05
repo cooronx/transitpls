@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
+use tauri::Emitter;
 use tokio::task::AbortHandle;
 
 #[derive(Default)]
@@ -34,7 +36,7 @@ pub struct CredentialStatus {
     last_four: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDetail {
     project: ProjectState,
@@ -45,7 +47,7 @@ pub struct ProjectDetail {
     report: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     timestamp: String,
     event: String,
@@ -136,6 +138,7 @@ pub async fn ui_initialize(
 
 #[tauri::command]
 pub async fn ui_transit(
+    app: tauri::AppHandle,
     registry: tauri::State<'_, TaskRegistry>,
     project_id: String,
     chapter: Option<usize>,
@@ -144,7 +147,7 @@ pub async fn ui_transit(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let task = tokio::spawn(crate::cli::transit_project(
+    let mut task = tokio::spawn(crate::cli::transit_project(
         None,
         PathBuf::from(&project.source_path),
         chapter,
@@ -155,7 +158,23 @@ pub async fn ui_transit(
         .lock()
         .map_err(|_| "task registry lock is poisoned".to_string())?
         .insert(task_id.clone(), task.abort_handle());
-    let result = task.await;
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_snapshot = None;
+    let result = loop {
+        tokio::select! {
+            result = &mut task => break result,
+            _ = interval.tick() => {
+                if let Ok(detail) = project_detail(&loaded.state_dir, &project_id) {
+                    let snapshot = ProgressSnapshot::from(&detail);
+                    if last_snapshot.as_ref() != Some(&snapshot) {
+                        let _ = app.emit("translation-progress", &detail);
+                        last_snapshot = Some(snapshot);
+                    }
+                }
+            }
+        }
+    };
     registry
         .tasks
         .lock()
@@ -168,7 +187,9 @@ pub async fn ui_transit(
             format!("translation task failed: {error}")
         }
     })??;
-    project_detail(&loaded.state_dir, &project.id)
+    let detail = project_detail(&loaded.state_dir, &project.id)?;
+    let _ = app.emit("translation-progress", &detail);
+    Ok(detail)
 }
 
 #[tauri::command]
@@ -299,6 +320,28 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
     })
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct ProgressSnapshot {
+    updated_at: String,
+    translated_segments: usize,
+    log_entries: usize,
+}
+
+impl From<&ProjectDetail> for ProgressSnapshot {
+    fn from(detail: &ProjectDetail) -> Self {
+        Self {
+            updated_at: detail.project.updated_at.clone(),
+            translated_segments: detail
+                .chapters
+                .iter()
+                .flat_map(|chapter| &chapter.segments)
+                .filter(|segment| segment.target.is_some())
+                .count(),
+            log_entries: detail.logs.len(),
+        }
+    }
+}
+
 fn read_logs(path: &Path) -> Result<Vec<LogEntry>, String> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -323,7 +366,7 @@ fn read_logs(path: &Path) -> Result<Vec<LogEntry>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_detail, read_logs};
+    use super::{project_detail, read_logs, ProgressSnapshot};
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
     use crate::state;
     use serde_json::Value;
@@ -386,12 +429,18 @@ mod tests {
         let initialized =
             state::initialize(&root, &input, &document, 1_200).expect("project should initialize");
 
-        let detail = project_detail(&root, &initialized.project.id)
+        let mut detail = project_detail(&root, &initialized.project.id)
             .expect("desktop bridge should load project state");
 
         assert_eq!(detail.project.title, "Book");
         assert_eq!(detail.chapters[0].segments[0].source, "Hello world");
         assert_eq!(detail.logs[0].event, "initialized");
+
+        let pending = ProgressSnapshot::from(&detail);
+        detail.chapters[0].segments[0].target = Some("你好，世界".to_string());
+        let translated = ProgressSnapshot::from(&detail);
+        assert_ne!(pending, translated);
+
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
 }
