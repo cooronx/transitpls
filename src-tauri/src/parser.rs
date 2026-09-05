@@ -223,7 +223,7 @@ fn split_txt_paragraphs(lines: &[String]) -> Vec<String> {
     paragraphs
 }
 
-fn split_long_text(text: &str, max_chars: usize) -> Vec<String> {
+pub(crate) fn split_long_text(text: &str, max_chars: usize) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= max_chars {
         return vec![text.trim().to_string()];
@@ -260,7 +260,7 @@ fn is_sentence_boundary(value: char) -> bool {
     )
 }
 
-fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
+pub(crate) fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
     let mut reader = Reader::from_str(input);
     reader.config_mut().trim_text(true);
     let mut buffer = Vec::new();
@@ -353,7 +353,7 @@ fn fallback_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
         .collect()
 }
 
-fn block_kind(name: &str) -> Option<SegmentKind> {
+pub(crate) fn block_kind(name: &str) -> Option<SegmentKind> {
     match name {
         "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "title" => Some(SegmentKind::Heading),
         "blockquote" | "q" => Some(SegmentKind::Quote),
@@ -362,7 +362,7 @@ fn block_kind(name: &str) -> Option<SegmentKind> {
     }
 }
 
-fn local_name(value: &str) -> String {
+pub(crate) fn local_name(value: &str) -> String {
     value
         .rsplit(':')
         .next()
@@ -480,7 +480,7 @@ fn read_zip_entry<R: Read + io::Seek>(
     Ok(contents)
 }
 
-fn normalize_zip_path(base: &Path, relative: &str) -> String {
+pub(crate) fn normalize_zip_path(base: &Path, relative: &str) -> String {
     let mut parts = Vec::new();
     for component in base.join(relative).components() {
         match component {
@@ -516,7 +516,7 @@ fn is_chapter_heading(value: &str) -> bool {
             && !value.contains(['.', ',', ';', '。', '，', '；']))
 }
 
-fn normalize_source(value: &str) -> String {
+pub(crate) fn normalize_source(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
