@@ -182,6 +182,7 @@ fn build_chapter_from_blocks(
                 ordinal: segment_ordinal,
                 source: chunk.clone(),
                 target: None,
+                target_before_polish: None,
                 kind: kind.clone(),
                 status: ItemStatus::Pending,
                 source_hash: hash_text(&chunk),
@@ -193,6 +194,7 @@ fn build_chapter_from_blocks(
     Chapter {
         id: chapter_id,
         title,
+        target_title: None,
         status: ItemStatus::Pending,
         meta: serde_json::json!({}),
         segments,

@@ -19,6 +19,8 @@ pub struct DocumentMetadata {
 pub struct Chapter {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub target_title: Option<String>,
     pub status: ItemStatus,
     pub meta: Value,
     pub segments: Vec<Segment>,
@@ -38,6 +40,8 @@ pub struct Segment {
     pub ordinal: usize,
     pub source: String,
     pub target: Option<String>,
+    #[serde(default)]
+    pub target_before_polish: Option<String>,
     pub kind: SegmentKind,
     pub status: ItemStatus,
     pub source_hash: String,

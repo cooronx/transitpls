@@ -6,6 +6,7 @@ pub mod model;
 pub mod parser;
 pub mod state;
 pub mod terms;
+pub mod usage;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]

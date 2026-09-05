@@ -11,6 +11,23 @@ pub struct AppConfig {
     pub segment: SegmentConfig,
     pub paths: PathsConfig,
     pub analysis: AnalysisConfig,
+    pub pipeline: PipelineConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PipelineConfig {
+    pub polish: bool,
+    pub recent_context_chars: usize,
+}
+
+impl Default for PipelineConfig {
+    fn default() -> Self {
+        Self {
+            polish: false,
+            recent_context_chars: 2_000,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -163,6 +180,9 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     if config.segment.max_chars_per_batch == 0 {
         return Err("segment.max_chars_per_batch must be greater than zero".to_string());
     }
+    if config.pipeline.recent_context_chars == 0 {
+        return Err("pipeline.recent_context_chars must be greater than zero".to_string());
+    }
     if config.llm.timeout_secs == 0 {
         return Err("llm.timeout_secs must be greater than zero".to_string());
     }
@@ -197,6 +217,8 @@ mod tests {
         assert_eq!(config.segment.max_chars_per_segment, 1_200);
         assert_eq!(config.segment.max_chars_per_batch, 1_800);
         assert!(config.analysis.full_book);
+        assert!(!config.pipeline.polish);
+        assert_eq!(config.pipeline.recent_context_chars, 2_000);
     }
 
     #[test]

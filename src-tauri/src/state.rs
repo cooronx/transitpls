@@ -1,10 +1,21 @@
 use crate::model::{Chapter, Document, ItemStatus, ProjectState, ProjectStatus};
 use chrono::{SecondsFormat, Utc};
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub struct ProjectLock {
+    file: File,
+}
+
+impl Drop for ProjectLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
 
 pub struct InitializedProject {
     pub project: ProjectState,
@@ -231,6 +242,38 @@ pub fn project_dir(state_dir: &Path, id: &str) -> PathBuf {
     state_dir.join(id)
 }
 
+pub fn acquire_project_lock(
+    state_dir: &Path,
+    project: &ProjectState,
+) -> Result<ProjectLock, String> {
+    let path = project_dir(state_dir, &project.id).join("project.lock");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|error| format!("failed to open project lock {}: {error}", path.display()))?;
+    file.try_lock_exclusive().map_err(|error| {
+        format!(
+            "project {} is already being modified by another command: {error}",
+            project.id
+        )
+    })?;
+    file.set_len(0)
+        .map_err(|error| format!("failed to reset project lock metadata: {error}"))?;
+    writeln!(
+        file,
+        "pid={} acquired_at={}",
+        std::process::id(),
+        timestamp()
+    )
+    .map_err(|error| format!("failed to write project lock metadata: {error}"))?;
+    file.sync_data()
+        .map_err(|error| format!("failed to flush project lock metadata: {error}"))?;
+    Ok(ProjectLock { file })
+}
+
 pub fn write_chapter(
     state_dir: &Path,
     project: &ProjectState,
@@ -312,7 +355,7 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{hash_file, initialize};
+    use super::{acquire_project_lock, hash_file, initialize};
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus};
     use std::fs;
     use std::path::PathBuf;
@@ -342,6 +385,7 @@ mod tests {
             chapters: vec![Chapter {
                 id: "chapter-1-test".to_string(),
                 title: "Chapter 1".to_string(),
+                target_title: None,
                 status: ItemStatus::Pending,
                 meta: serde_json::json!({}),
                 segments: Vec::new(),
@@ -381,6 +425,25 @@ mod tests {
                 .count(),
             0
         );
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn project_lock_rejects_concurrent_writer_and_releases_on_drop() {
+        let dir = temp_dir("lock");
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, b"content").expect("source should be written");
+        let initialized =
+            initialize(&state_dir, &source, &document(), 1_200).expect("init should succeed");
+
+        let first = acquire_project_lock(&state_dir, &initialized.project)
+            .expect("first writer should acquire lock");
+        assert!(acquire_project_lock(&state_dir, &initialized.project).is_err());
+        drop(first);
+        acquire_project_lock(&state_dir, &initialized.project)
+            .expect("lock should be released when writer exits");
+
         fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 }

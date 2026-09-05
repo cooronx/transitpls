@@ -490,6 +490,7 @@ mod tests {
             chapters: vec![Chapter {
                 id: "chapter-1".to_string(),
                 title: "Chapter 1".to_string(),
+                target_title: None,
                 status: ItemStatus::Pending,
                 meta: serde_json::json!({}),
                 segments: vec![Segment {
@@ -497,6 +498,7 @@ mod tests {
                     ordinal: 0,
                     source: source.to_string(),
                     target: None,
+                    target_before_polish: None,
                     kind: SegmentKind::Paragraph,
                     status: ItemStatus::Pending,
                     source_hash: "hash".to_string(),
