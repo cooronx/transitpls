@@ -28,9 +28,11 @@ clap = { version = "4", features = ["derive"] }
 quick-xml = "0.42"
 rig-core = "0.42"
 rand = "0.10"
+rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.11"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 toml = "1.0"
+unicode-normalization = "0.1"
 zip = "8.6.0"
 
 

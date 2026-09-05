@@ -3,6 +3,7 @@ use crate::llm::{self, MockClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, ProjectStatus};
 use crate::parser;
 use crate::state;
+use crate::terms::TermStore;
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -28,6 +29,7 @@ enum Command {
     Review(InputArgs),
     Export(ExportArgs),
     Status(ProjectArgs),
+    Terms(TermsArgs),
 }
 
 #[derive(Debug, Args)]
@@ -66,6 +68,27 @@ struct ExportArgs {
     #[arg(long)]
     format: String,
     input: PathBuf,
+}
+
+#[derive(Debug, Args)]
+struct TermsArgs {
+    #[command(subcommand)]
+    command: TermsCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TermsCommand {
+    List(ProjectArgs),
+    Conflicts(ProjectArgs),
+    Resolve(TermsResolveArgs),
+}
+
+#[derive(Debug, Args)]
+struct TermsResolveArgs {
+    #[arg(long, value_name = "SHA256")]
+    project: Option<String>,
+    #[arg(value_name = "INPUT SOURCE TARGET", num_args = 2..=3)]
+    values: Vec<String>,
 }
 
 pub async fn run() -> i32 {
@@ -174,7 +197,83 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             );
             Ok(2)
         }
+        Command::Terms(args) => terms(args, &state_dir),
     }
+}
+
+fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
+    match args.command {
+        TermsCommand::List(selector) => {
+            let project = load_project_args(state_dir, &selector)?;
+            let store = term_store(state_dir, &project)?;
+            println!("source\ttarget\ttype\tstatus\taliases");
+            for term in store.list()? {
+                println!(
+                    "{}\t{}\t{}\t{:?}\t{}",
+                    term.source,
+                    term.target,
+                    term.term_type,
+                    term.status,
+                    term.aliases.join(", ")
+                );
+            }
+            Ok(0)
+        }
+        TermsCommand::Conflicts(selector) => {
+            let project = load_project_args(state_dir, &selector)?;
+            let store = term_store(state_dir, &project)?;
+            println!("source\tcandidate\tchapter");
+            for conflict in store.conflicts()? {
+                println!(
+                    "{}\t{}\t{}",
+                    conflict.source, conflict.target, conflict.chapter
+                );
+            }
+            Ok(0)
+        }
+        TermsCommand::Resolve(args) => {
+            let (project, source, target) = if let Some(id) = args.project {
+                if args.values.len() != 2 {
+                    return Err(
+                        "terms resolve --project expects SOURCE and TARGET arguments".to_string(),
+                    );
+                }
+                (
+                    state::load_project(state_dir, &id)?,
+                    &args.values[0],
+                    &args.values[1],
+                )
+            } else {
+                if args.values.len() != 3 {
+                    return Err(
+                        "terms resolve expects INPUT, SOURCE, and TARGET arguments".to_string()
+                    );
+                }
+                (
+                    state::load_for_source(state_dir, std::path::Path::new(&args.values[0]))?,
+                    &args.values[1],
+                    &args.values[2],
+                )
+            };
+            let store = term_store(state_dir, &project)?;
+            store.resolve(source, target)?;
+            state::append_log(
+                state_dir,
+                &project,
+                "term_resolved",
+                serde_json::json!({ "source": source, "target": target }),
+            )?;
+            println!("resolved {source} -> {target}");
+            Ok(0)
+        }
+    }
+}
+
+fn term_store(
+    state_dir: &std::path::Path,
+    project: &crate::model::ProjectState,
+) -> Result<TermStore, String> {
+    TermStore::open(state::project_dir(state_dir, &project.id).join("terms.db"))
 }
 
 async fn transit(

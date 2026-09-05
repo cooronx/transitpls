@@ -4,6 +4,7 @@ pub mod llm;
 pub mod model;
 pub mod parser;
 pub mod state;
+pub mod terms;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
