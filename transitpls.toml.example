@@ -19,3 +19,7 @@ state_dir = "projects"
 
 [analysis]
 full_book = true
+
+[pipeline]
+polish = false
+recent_context_chars = 2000

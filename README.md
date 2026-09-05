@@ -15,6 +15,7 @@ cargo run --bin transitpls-cli -- init book.epub --mock --force-analysis
 cargo run --bin transitpls-cli -- status book.epub
 cargo run --bin transitpls-cli -- status --project <source-sha256>
 cargo run --bin transitpls-cli -- transit book.epub --mock
+cargo run --bin transitpls-cli -- transit book.epub --chapter 0 --mock
 cargo run --bin transitpls-cli -- terms list book.epub
 cargo run --bin transitpls-cli -- terms conflicts book.epub
 cargo run --bin transitpls-cli -- terms resolve book.epub "source" "fixed target"
@@ -26,7 +27,8 @@ cargo run --bin transitpls-cli -- export --format epub book.epub
 Projects are stored under `projects/<source-sha256>/` by default. Initialization is
 built under `projects/.creating/` and atomically moved into place after parsing is
 complete. Each project contains `project.json`, chapter JSON files, `logs.txt`,
-`analysis.json`, and `terms.db`.
+`analysis.json`, `terms.db`, and translation-time `context.json`, `usage.json`, and
+`project.lock` files.
 
 `init` accepts `--source-language` and `--max-segment-chars`. With source language
 set to `auto`, the configured model identifies it and reports an explicit override
@@ -35,11 +37,28 @@ and end for style analysis, optionally creates resumable chapter digests and a b
 synopsis, and seeds the terminology database. `--force-analysis` refreshes cached
 analysis. `--mock` produces deterministic offline analysis and translations.
 
+Translation batches are sized by source character count and run serially in book
+order. Prompts include the style guide, book synopsis, chapter digest, relevant
+terminology, and recent translated text. Each completed batch is saved atomically;
+rerunning the command rebuilds context without replacing completed translations.
+After a batch exhausts its retries, the CLI retries each segment individually and
+stops at the first segment that still fails. Use `--chapter <zero-based-index>` to
+translate one chapter while debugging a long book.
+
 Translation extracts terminology after every saved batch and again at chapter end.
 An extraction failure preserves the translated text and a pending extraction record;
 the next run repairs pending terminology before translating more text. Only terms
 matched in the current chapter are added to a translation prompt. Conflicting targets
 are retained for manual resolution instead of overwriting an existing translation.
+After every chapter body is complete, chapter titles are translated and matching body
+headings are synchronized for later table-of-contents export.
+
+Set `pipeline.polish = true` to polish each translated batch. The initial translation
+is retained in `target_before_polish`, while the final text is stored in `target`.
+`pipeline.recent_context_chars` controls the rolling context character budget. Model
+calls and cumulative token counts are stored in `usage.json`; pricing and cost
+estimation are intentionally not supported. An operating-system file lock prevents
+concurrent commands from modifying the same project.
 
 ## Configuration
 
