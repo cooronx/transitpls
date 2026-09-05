@@ -67,8 +67,10 @@ The CLI reads `transitpls.toml` in the current directory when present. Use globa
 resolved from the configuration file's directory. CLI options override TOML values,
 which override built-in defaults. See `transitpls.toml.example` for all fields.
 
-API keys are never read directly from TOML. `llm.api_key_env` names the environment
-variable that contains the secret, for example:
+API keys are never written to TOML or project state. Desktop users can enter and
+verify a key once under **Settings → Model & API**; it is stored in the current
+user's TransItPls configuration directory. CLI and automation users can instead
+set the environment variable named by `llm.api_key_env`, for example:
 
 ```text
 export OPENAI_API_KEY="..."
@@ -87,8 +89,8 @@ yarn tauri dev
 
 The desktop workbench reads the same project directories and configuration as the
 CLI. It can import EPUB/TXT books, display chapter and segment progress, run or
-cancel translation tasks, inspect and resolve terminology conflicts, edit the
-model configuration, and export translated TXT or EPUB files. Enable offline
+cancel translation tasks, inspect and resolve terminology conflicts, configure and
+verify model credentials, and export translated TXT or EPUB files. Enable offline
 simulation in the task inspector to exercise the workflow without an API key.
 
 The Review workspace is intentionally a non-functional placeholder until the

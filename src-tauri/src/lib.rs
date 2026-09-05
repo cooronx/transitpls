@@ -1,6 +1,7 @@
 pub mod analysis;
 pub mod cli;
 pub mod config;
+pub mod credentials;
 pub mod export;
 pub mod llm;
 pub mod model;
@@ -19,7 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             ui::ui_bootstrap,
-            ui::ui_save_config,
+            ui::ui_verify_and_save_model,
             ui::ui_project,
             ui::ui_initialize,
             ui::ui_transit,

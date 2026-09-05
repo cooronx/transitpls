@@ -1,5 +1,6 @@
 use crate::config::{self, AppConfig};
 use crate::export::{self, ExportFormat};
+use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
 use crate::state;
 use crate::terms::{Term, TermCandidate, TermStore};
@@ -19,9 +20,18 @@ pub struct TaskRegistry {
 #[serde(rename_all = "camelCase")]
 pub struct Bootstrap {
     config: AppConfig,
+    credential: CredentialStatus,
     config_path: Option<String>,
     state_dir: String,
     projects: Vec<ProjectState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatus {
+    configured: bool,
+    source: Option<&'static str>,
+    last_four: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +58,7 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
     let mut projects = list_projects(&loaded.state_dir)?;
     projects.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(Bootstrap {
+        credential: credential_status(&loaded.value)?,
         config: loaded.value,
         config_path: loaded.path.map(|path| path.to_string_lossy().into_owned()),
         state_dir: loaded.state_dir.to_string_lossy().into_owned(),
@@ -56,7 +67,26 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
-pub fn ui_save_config(value: AppConfig) -> Result<Bootstrap, String> {
+pub async fn ui_verify_and_save_model(
+    value: AppConfig,
+    api_key: Option<String>,
+) -> Result<Bootstrap, String> {
+    let supplied = api_key.filter(|key| !key.trim().is_empty());
+    let key = match supplied.as_deref() {
+        Some(key) => key.trim().to_string(),
+        None => value.llm.api_key()?,
+    };
+    let client = RigClient::from_config_with_api_key(&value.llm, key)?;
+    client
+        .complete(
+            "You are checking whether an LLM connection is available. Reply with OK only.",
+            "OK",
+        )
+        .await
+        .map_err(|error| format!("模型连接验证失败：{error}"))?;
+    if let Some(key) = supplied {
+        crate::credentials::save_api_key(&value.llm.provider, &key)?;
+    }
     config::save_default(&value)?;
     ui_bootstrap()
 }
@@ -211,6 +241,35 @@ fn list_projects(state_dir: &Path) -> Result<Vec<ProjectState>, String> {
         .filter_map(Result::ok)
         .filter_map(|entry| state::read_json(&entry.path().join("project.json")).ok())
         .collect())
+}
+
+fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
+    if let Ok(value) = std::env::var(&config.llm.api_key_env) {
+        if !value.trim().is_empty() {
+            return Ok(CredentialStatus {
+                configured: true,
+                source: Some("environment"),
+                last_four: Some(last_four(&value)),
+            });
+        }
+    }
+    let stored = crate::credentials::load_api_key(&config.llm.provider)?;
+    Ok(CredentialStatus {
+        configured: stored.is_some(),
+        source: stored.as_ref().map(|_| "desktop"),
+        last_four: stored.as_deref().map(last_four),
+    })
+}
+
+fn last_four(value: &str) -> String {
+    value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, String> {

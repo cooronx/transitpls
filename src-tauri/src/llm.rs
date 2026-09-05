@@ -238,12 +238,19 @@ fn stage_from_prompt(system_prompt: &str) -> &'static str {
 
 impl RigClient {
     pub fn from_config(config: &LlmConfig) -> Result<Self, String> {
+        Self::from_config_with_api_key(config, config.api_key()?)
+    }
+
+    pub fn from_config_with_api_key(
+        config: &LlmConfig,
+        api_key: impl Into<String>,
+    ) -> Result<Self, String> {
         let http_client = ReqwestClient::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|error| format!("failed to build HTTP client: {error}"))?;
         let provider = config.provider.to_ascii_lowercase();
-        let api_key = config.api_key()?;
+        let api_key = api_key.into();
         let model = match provider.as_str() {
             "openai-chat" => {
                 let base_url = normalize_openai_url(config.base_url.as_deref(), "chat/completions");

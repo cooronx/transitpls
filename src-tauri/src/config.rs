@@ -75,12 +75,18 @@ impl LlmConfig {
         if self.api_key_env.trim().is_empty() {
             return Err("llm.api_key_env must not be empty".to_string());
         }
-        std::env::var(&self.api_key_env).map_err(|_| {
-            format!(
-                "LLM API key environment variable '{}' is not set",
-                self.api_key_env
-            )
-        })
+        if let Ok(value) = std::env::var(&self.api_key_env) {
+            if !value.trim().is_empty() {
+                return Ok(value);
+            }
+        }
+        if let Some(value) = crate::credentials::load_api_key(&self.provider)? {
+            return Ok(value);
+        }
+        Err(format!(
+            "LLM API key is not configured; open desktop Settings or set '{}'",
+            self.api_key_env
+        ))
     }
 }
 
