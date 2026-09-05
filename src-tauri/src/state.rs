@@ -22,6 +22,13 @@ pub struct InitializedProject {
     pub created: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExportSnapshot {
+    pub project: ProjectState,
+    pub chapters: Vec<Chapter>,
+    pub source_bytes: Vec<u8>,
+}
+
 pub fn initialize(
     state_dir: &Path,
     input: &Path,
@@ -95,6 +102,73 @@ pub fn initialize(
 pub fn load_for_source(state_dir: &Path, input: &Path) -> Result<ProjectState, String> {
     let hash = hash_file(input)?;
     load_project(state_dir, &hash)
+}
+
+pub fn load_export_snapshot(state_dir: &Path, input: &Path) -> Result<ExportSnapshot, String> {
+    let input_path = fs::canonicalize(input)
+        .map_err(|error| format!("failed to resolve input file {}: {error}", input.display()))?;
+    let initial_hash = hash_file(&input_path)?;
+    let project = match load_project(state_dir, &initial_hash) {
+        Ok(project) => project,
+        Err(_) => find_project_by_source_path(state_dir, &input_path)?,
+    };
+    let _lock = acquire_project_read_lock(state_dir, &project)?;
+    let project = load_project(state_dir, &project.id)?;
+    let source_bytes = fs::read(&input_path).map_err(|error| {
+        format!(
+            "failed to read input file {}: {error}",
+            input_path.display()
+        )
+    })?;
+    let actual_hash = hash_bytes(&source_bytes);
+    if actual_hash != project.source_hash {
+        return Err(format!(
+            "source file hash changed for project {}: expected {}, got {}",
+            project.id, project.source_hash, actual_hash
+        ));
+    }
+    let chapters = load_chapters(state_dir, &project)?;
+    if chapters.len() != project.chapters_total {
+        return Err(format!(
+            "project snapshot is incomplete: project.json declares {} chapters but {} chapter files were found",
+            project.chapters_total,
+            chapters.len()
+        ));
+    }
+    Ok(ExportSnapshot {
+        project,
+        chapters,
+        source_bytes,
+    })
+}
+
+fn find_project_by_source_path(state_dir: &Path, input: &Path) -> Result<ProjectState, String> {
+    let entries = fs::read_dir(state_dir)
+        .map_err(|error| format!("failed to read state directory: {error}"))?;
+    let mut matches = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path().join("project.json");
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(project) = read_json::<ProjectState>(&path) else {
+            continue;
+        };
+        let stored = Path::new(&project.source_path);
+        let stored = fs::canonicalize(stored).unwrap_or_else(|_| stored.to_path_buf());
+        if stored == input {
+            matches.push(project);
+        }
+    }
+    matches
+        .into_iter()
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+        .ok_or_else(|| {
+            format!(
+                "no project found for source {}; run init first",
+                input.display()
+            )
+        })
 }
 
 pub fn load_project(state_dir: &Path, id: &str) -> Result<ProjectState, String> {
@@ -231,11 +305,20 @@ pub fn hash_file(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(hasher
-        .finalize()
+    Ok(format_hash(hasher.finalize()))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format_hash(hasher.finalize())
+}
+
+fn format_hash(hash: impl AsRef<[u8]>) -> String {
+    hash.as_ref()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect())
+        .collect()
 }
 
 pub fn project_dir(state_dir: &Path, id: &str) -> PathBuf {
@@ -271,6 +354,26 @@ pub fn acquire_project_lock(
     .map_err(|error| format!("failed to write project lock metadata: {error}"))?;
     file.sync_data()
         .map_err(|error| format!("failed to flush project lock metadata: {error}"))?;
+    Ok(ProjectLock { file })
+}
+
+fn acquire_project_read_lock(
+    state_dir: &Path,
+    project: &ProjectState,
+) -> Result<ProjectLock, String> {
+    let path = project_dir(state_dir, &project.id).join("project.lock");
+    let file = OpenOptions::new().read(true).open(&path).map_err(|error| {
+        format!(
+            "project lock {} is unavailable; run transit before export: {error}",
+            path.display()
+        )
+    })?;
+    FileExt::try_lock_shared(&file).map_err(|error| {
+        format!(
+            "project {} is already being modified by another command: {error}",
+            project.id
+        )
+    })?;
     Ok(ProjectLock { file })
 }
 
@@ -355,7 +458,7 @@ fn timestamp() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{acquire_project_lock, hash_file, initialize};
+    use super::{acquire_project_lock, hash_file, initialize, load_export_snapshot, save_project};
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus};
     use std::fs;
     use std::path::PathBuf;
@@ -444,6 +547,48 @@ mod tests {
         acquire_project_lock(&state_dir, &initialized.project)
             .expect("lock should be released when writer exits");
 
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn export_snapshot_reports_changed_source_hash() {
+        let dir = temp_dir("export-hash");
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, b"original").expect("source should be written");
+        let initialized =
+            initialize(&state_dir, &source, &document(), 1_200).expect("init should succeed");
+        drop(
+            acquire_project_lock(&state_dir, &initialized.project)
+                .expect("project lock should be created"),
+        );
+        fs::write(&source, b"changed").expect("source should change");
+
+        let error = load_export_snapshot(&state_dir, &source)
+            .expect_err("changed source must not be exported");
+        assert!(error.contains("source file hash changed"));
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn export_snapshot_rejects_project_chapter_count_mismatch() {
+        let dir = temp_dir("export-snapshot");
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, b"content").expect("source should be written");
+        let initialized =
+            initialize(&state_dir, &source, &document(), 1_200).expect("init should succeed");
+        drop(
+            acquire_project_lock(&state_dir, &initialized.project)
+                .expect("project lock should be created"),
+        );
+        let mut project = initialized.project;
+        project.chapters_total = 2;
+        save_project(&state_dir, &project).expect("project should be updated");
+
+        let error = load_export_snapshot(&state_dir, &source)
+            .expect_err("inconsistent snapshot must not be exported");
+        assert!(error.contains("declares 2 chapters"));
         fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 }
