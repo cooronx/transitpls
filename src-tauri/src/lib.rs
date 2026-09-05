@@ -22,6 +22,7 @@ pub fn run() {
             ui::ui_bootstrap,
             ui::ui_verify_and_save_model,
             ui::ui_project,
+            ui::ui_delete_project,
             ui::ui_initialize,
             ui::ui_transit,
             ui::ui_cancel_task,

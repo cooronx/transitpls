@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
@@ -77,6 +77,25 @@ export default function App() {
     try { setDetail(await invoke<Detail>("ui_project",{projectId:id}));setChapterIndex(0);setView("workspace"); }
     catch(error){setNotice(String(error))} finally{setBusy(null)}
   };
+  const deleteProject = async (project:Project) => {
+    if(busy)return;
+    const confirmed=await confirmDialog(`确定删除项目“${project.title}”吗？\n\n翻译进度、术语和日志将被永久删除，原始书籍文件不会受到影响。`,{title:"删除项目",kind:"warning",okLabel:"删除",cancelLabel:"取消"});
+    if(!confirmed)return;
+    setBusy("删除项目");setNotice(null);
+    try{
+      const wasCurrent=detail?.project.id===project.id;
+      const next=await invoke<Bootstrap>("ui_delete_project",{projectId:project.id});
+      setBootstrap(next);
+      if(wasCurrent){
+        setDetail(null);
+        const replacement=next.projects[0];
+        if(replacement)setDetail(await invoke<Detail>("ui_project",{projectId:replacement.id}));
+        else setDetail(null);
+        setChapterIndex(0);
+      }
+      setNotice(`项目“${project.title}”已删除，原始文件未改动`);
+    }catch(error){setNotice(String(error))}finally{setBusy(null)}
+  };
   const translate = (chapter?:number) => {
     if(busy)return;
     if(!bootstrap?.credential.configured&&!mockClient){setView("settings");setNotice("请先在设置中配置并验证 API Key");return}
@@ -102,7 +121,7 @@ export default function App() {
   const segments=useMemo(()=>{if(!chapter)return[];const q=search.trim().toLowerCase();return q?chapter.segments.filter((s)=>s.source.toLowerCase().includes(q)||s.target?.toLowerCase().includes(q)):chapter.segments},[chapter,search]);
 
   return <div className="app-shell">
-    <Header project={detail?.project} model={bootstrap?.config.llm.model??"—"} search={search} onSearch={setSearch} onTranslate={()=>translate()} busy={busy} onCancel={()=>void cancelTask()} disabled={!detail}/>
+    <Header project={detail?.project} projects={bootstrap?.projects??[]} model={bootstrap?.config.llm.model??"—"} search={search} onSearch={setSearch} onProject={(id)=>void selectProject(id)} onDelete={(project)=>void deleteProject(project)} onTranslate={()=>translate()} busy={busy} onCancel={()=>void cancelTask()} disabled={!detail}/>
     <div className="workspace-row">
       <ActivityBar view={view} onChange={setView}/>
       {view!=="settings"&&view!=="review"&&<Explorer projects={bootstrap?.projects??[]} detail={detail} chapterIndex={chapterIndex} onChapter={setChapterIndex} onProject={selectProject} onImport={importFile}/>}
@@ -122,10 +141,11 @@ export default function App() {
 }
 
 function Logo(){return <div className="logo-mark"><span>文</span><b>A</b></div>}
-function Header({project,model,search,onSearch,onTranslate,busy,onCancel,disabled}:{project?:Project;model:string;search:string;onSearch:(v:string)=>void;onTranslate:()=>void;busy:string|null;onCancel:()=>void;disabled:boolean}){
+function Header({project,projects,model,search,onSearch,onProject,onDelete,onTranslate,busy,onCancel,disabled}:{project?:Project;projects:Project[];model:string;search:string;onSearch:(v:string)=>void;onProject:(id:string)=>void;onDelete:(project:Project)=>void;onTranslate:()=>void;busy:string|null;onCancel:()=>void;disabled:boolean}){
+  const[menuOpen,setMenuOpen]=useState(false);
   const cancellable=busy==="翻译"||busy==="项目初始化";
   const translateLabel=busy==="翻译"?"◌ 正在翻译":busy==="项目初始化"?"◌ 正在初始化":"▶ 开始翻译";
-  return <header className="topbar"><div className="brand"><Logo/><strong>TransItPls</strong><i/><span>项目：</span><b>{project?.title??"未选择项目"}</b><small>⌄</small></div><label className="global-search"><span>⌕</span><input value={search} onChange={(e)=>onSearch(e.target.value)} placeholder="搜索原文或译文…"/><kbd>Ctrl K</kbd></label><div className="top-actions"><span>模型: <b>{model}</b></span><span className="local-state">● 本地状态</span><button className="primary" disabled={disabled||Boolean(busy)} onClick={onTranslate}>{translateLabel}</button>{cancellable&&<button className="cancel" onClick={onCancel}>■ 取消任务</button>}</div></header>
+  return <header className="topbar"><div className="brand"><Logo/><strong>TransItPls</strong><i/><span>项目：</span><div className="project-switcher"><button className="project-trigger" aria-expanded={menuOpen} disabled={!project||Boolean(busy)} onClick={()=>setMenuOpen(!menuOpen)}><b>{project?.title??"未选择项目"}</b><small>{menuOpen?"⌃":"⌄"}</small></button>{menuOpen&&<><button className="menu-backdrop" aria-label="关闭项目菜单" onClick={()=>setMenuOpen(false)}/><div className="project-menu"><header><b>切换项目</b><small>{projects.length} 个项目</small></header><div>{projects.map((item)=><section className={item.id===project?.id?"active":""} key={item.id}><button className="project-option" onClick={()=>{setMenuOpen(false);if(item.id!==project?.id)onProject(item.id)}}><span className="mini-cover">文</span><span><b>{item.title}</b><small>{item.chapters_completed} / {item.chapters_total} 章 · {statusText[item.status]}</small></span>{item.id===project?.id&&<em>当前</em>}</button><button className="delete-project" title={`删除 ${item.title}`} aria-label={`删除 ${item.title}`} onClick={()=>{setMenuOpen(false);onDelete(item)}}>⌫</button></section>)}</div></div></>}</div></div><label className="global-search"><span>⌕</span><input value={search} onChange={(e)=>onSearch(e.target.value)} placeholder="搜索原文或译文…"/><kbd>Ctrl K</kbd></label><div className="top-actions"><span>模型: <b>{model}</b></span><span className="local-state">● 本地状态</span><button className="primary" disabled={disabled||Boolean(busy)} onClick={onTranslate}>{translateLabel}</button>{cancellable&&<button className="cancel" onClick={onCancel}>■ 取消任务</button>}</div></header>
 }
 function ActivityBar({view,onChange}:{view:View;onChange:(v:View)=>void}){return <nav className="activity-bar"><div>{navItems.map((item)=><button key={item.id} className={view===item.id?"active":""} onClick={()=>onChange(item.id)} title={item.label}><b>{item.icon}</b><span>{item.label}</span></button>)}</div><button className={view==="settings"?"active":""} onClick={()=>onChange("settings")} title="设置"><b>⚙</b><span>设置</span></button></nav>}
 function Explorer({projects,detail,chapterIndex,onChapter,onProject,onImport}:{projects:Project[];detail:Detail|null;chapterIndex:number;onChapter:(i:number)=>void;onProject:(id:string)=>void;onImport:()=>void}){

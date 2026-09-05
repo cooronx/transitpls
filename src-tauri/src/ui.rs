@@ -100,6 +100,25 @@ pub fn ui_project(project_id: String) -> Result<ProjectDetail, String> {
 }
 
 #[tauri::command]
+pub fn ui_delete_project(
+    registry: tauri::State<'_, TaskRegistry>,
+    project_id: String,
+) -> Result<Bootstrap, String> {
+    let has_running_task = registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .contains_key(&project_id);
+    if has_running_task {
+        return Err("项目正在运行任务，请先取消任务再删除".to_string());
+    }
+
+    let loaded = config::load(None)?;
+    delete_project_at(&loaded.state_dir, &project_id)?;
+    ui_bootstrap()
+}
+
+#[tauri::command]
 pub async fn ui_initialize(
     registry: tauri::State<'_, TaskRegistry>,
     input: String,
@@ -264,6 +283,34 @@ fn list_projects(state_dir: &Path) -> Result<Vec<ProjectState>, String> {
         .collect())
 }
 
+fn delete_project_at(state_dir: &Path, project_id: &str) -> Result<(), String> {
+    let project = state::load_project(state_dir, project_id)?;
+    let normalized_id = project_id.to_ascii_lowercase();
+    if project.id != normalized_id {
+        return Err("project metadata does not match its directory".to_string());
+    }
+
+    let lock = state::acquire_project_lock(state_dir, &project)?;
+    let project_dir = state::project_dir(state_dir, &normalized_id);
+    let trash_dir = state_dir.join(".trash");
+    fs::create_dir_all(&trash_dir)
+        .map_err(|error| format!("failed to create project trash directory: {error}"))?;
+    let staged_dir = trash_dir.join(format!(
+        "{}-{}-{}",
+        normalized_id,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    fs::rename(&project_dir, &staged_dir)
+        .map_err(|error| format!("failed to stage project for deletion: {error}"))?;
+    drop(lock);
+    fs::remove_dir_all(&staged_dir)
+        .map_err(|error| format!("failed to delete project data: {error}"))
+}
+
 fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
     if let Ok(value) = std::env::var(&config.llm.api_key_env) {
         if !value.trim().is_empty() {
@@ -366,7 +413,7 @@ fn read_logs(path: &Path) -> Result<Vec<LogEntry>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{project_detail, read_logs, ProgressSnapshot};
+    use super::{delete_project_at, project_detail, read_logs, ProgressSnapshot};
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
     use crate::state;
     use serde_json::Value;
@@ -441,6 +488,42 @@ mod tests {
         let translated = ProgressSnapshot::from(&detail);
         assert_ne!(pending, translated);
 
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn deletes_project_state_without_deleting_source_book() {
+        let root = std::env::temp_dir().join(format!(
+            "transitpls-ui-delete-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::create_dir_all(&root).expect("fixture directory should be created");
+        let input = root.join("book.txt");
+        fs::write(&input, "Hello world").expect("source should be written");
+        let document = Document {
+            metadata: DocumentMetadata {
+                title: "Book".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![Chapter {
+                id: "chapter-0000-book".to_string(),
+                title: "Book".to_string(),
+                target_title: None,
+                status: ItemStatus::Pending,
+                meta: Value::Null,
+                segments: Vec::new(),
+            }],
+        };
+        let initialized =
+            state::initialize(&root, &input, &document, 1_200).expect("project should initialize");
+
+        delete_project_at(&root, &initialized.project.id).expect("project should be deleted");
+
+        assert!(!state::project_dir(&root, &initialized.project.id).exists());
+        assert!(input.exists());
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
 }
