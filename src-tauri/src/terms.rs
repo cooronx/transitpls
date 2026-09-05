@@ -346,7 +346,8 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(system, &user).await {
-            Ok(output) => match serde_json::from_str::<ExtractionResponse>(&output.text) {
+            Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
+            {
                 Ok(mut response) => {
                     let validation = response.terms.iter_mut().try_for_each(|term| {
                         term.first_chapter = chapter;

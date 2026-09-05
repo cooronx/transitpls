@@ -94,7 +94,7 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
         .to_string();
         let mut value: BookAnalysis = call_json(
             client,
-            "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. Return only JSON with genre, tone, style_guide, narration, pacing, register, dialogue_style, rhetoric, characters, terms, and book_synopsis=null. Character and term objects must contain source, target, reading, type, gender, aliases, first_chapter, and note.",
+            "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. Return only JSON with string fields genre, tone, narration, pacing, register, dialogue_style, and rhetoric; style_guide must be an array of non-empty strings; characters and terms must be arrays; book_synopsis must be null. Every character and term object must contain string source and target, nullable string reading and gender, string-array aliases, zero-based integer first_chapter, nullable string note, and type chosen from person, place, organization, term, appellation, speech, or fixed_expr.",
             &user,
             max_retries,
         )
@@ -226,7 +226,7 @@ where
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(system, user).await {
-            Ok(output) => match serde_json::from_str(&output.text) {
+            Ok(output) => match crate::llm::parse_json_response(&output.text) {
                 Ok(value) => return Ok(value),
                 Err(error) => last_error = format!("LLM response is not valid JSON: {error}"),
             },

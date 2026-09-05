@@ -6,6 +6,7 @@ use rand::RngExt;
 use rig_core::client::CompletionClient;
 use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message, Usage};
 use rig_core::http_client::ReqwestClient;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::time::Duration;
 
@@ -408,7 +409,7 @@ pub fn sample_language_texts(document: &Document) -> Result<Vec<String>, String>
 }
 
 pub fn validate_language_response(raw: &str) -> Result<String, String> {
-    let response: LanguageResponse = serde_json::from_str(raw)
+    let response: LanguageResponse = parse_json_response(raw)
         .map_err(|error| format!("language response is not valid JSON: {error}"))?;
     let language = response.language.trim().to_ascii_lowercase();
     if language.len() != 2 || !language.bytes().all(|byte| byte.is_ascii_alphabetic()) {
@@ -417,6 +418,24 @@ pub fn validate_language_response(raw: &str) -> Result<String, String> {
         ));
     }
     Ok(language)
+}
+
+pub(crate) fn parse_json_response<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
+    let trimmed = raw.trim();
+    let json = if let Some(fenced) = trimmed.strip_prefix("```json") {
+        fenced
+            .strip_suffix("```")
+            .ok_or_else(|| "JSON code fence is not closed".to_string())?
+            .trim()
+    } else if let Some(fenced) = trimmed.strip_prefix("```") {
+        fenced
+            .strip_suffix("```")
+            .ok_or_else(|| "JSON code fence is not closed".to_string())?
+            .trim()
+    } else {
+        trimmed
+    };
+    serde_json::from_str(json).map_err(|error| error.to_string())
 }
 
 pub async fn detect_source_language<C: TranslationClient + ?Sized>(
@@ -543,7 +562,7 @@ pub fn build_prompts(
 }
 
 pub fn validate_response(raw: &str, expected_ids: &[String]) -> Result<Vec<String>, String> {
-    let response: TranslationResponse = serde_json::from_str(raw)
+    let response: TranslationResponse = parse_json_response(raw)
         .map_err(|error| format!("LLM response is not valid JSON: {error}"))?;
     if response.translations.len() != expected_ids.len() {
         return Err(format!(
@@ -879,6 +898,12 @@ mod tests {
         );
         let empty = r#"{"translations":[{"number":1,"id":"a","translation":" "},{"number":2,"id":"b","translation":"乙"}]}"#;
         assert!(validate_response(empty, &ids).is_err());
+        let fenced = format!("```json\n{valid}\n```");
+        assert_eq!(
+            validate_response(&fenced, &ids).expect("fenced JSON should be accepted"),
+            vec!["甲", "乙"]
+        );
+        assert!(validate_response(&format!("Result:\n{valid}"), &ids).is_err());
     }
 
     #[test]
