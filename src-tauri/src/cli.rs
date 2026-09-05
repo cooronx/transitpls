@@ -126,62 +126,21 @@ pub async fn run() -> i32 {
 }
 
 async fn execute(cli: Cli) -> Result<i32, String> {
-    let loaded = config::load(cli.config.as_deref())?;
+    let config_path = cli.config.clone();
+    let loaded = config::load(config_path.as_deref())?;
     let state_dir = loaded.state_dir;
     let config = loaded.value;
     match cli.command {
         Command::Init(args) => {
-            if !args.input.is_file() {
-                return Err(format!(
-                    "input file does not exist: {}",
-                    args.input.display()
-                ));
-            }
-            let existing = state::load_for_source(&state_dir, &args.input).ok();
-            let (mut project, mut chapters, created) = if let Some(project) = existing {
-                let chapters = state::load_chapters(&state_dir, &project)?;
-                (project, chapters, false)
-            } else {
-                let requested_language = args
-                    .source_language
-                    .as_deref()
-                    .unwrap_or(&config.language.source);
-                let max_segment_chars = args
-                    .max_segment_chars
-                    .unwrap_or(config.segment.max_chars_per_segment);
-                let mut document = parser::parse_document(
-                    &args.input,
-                    Some(requested_language),
-                    max_segment_chars,
-                )?;
-                document.metadata.target_language = config.language.target.clone();
-                let initialized =
-                    state::initialize(&state_dir, &args.input, &document, max_segment_chars)?;
-                let chapters = state::load_chapters(&state_dir, &initialized.project)?;
-                (initialized.project, chapters, initialized.created)
-            };
-            let _lock = state::acquire_project_lock(&state_dir, &project)?;
-            if let Some(source_language) = args.source_language {
-                project.source_language = source_language;
-                state::save_project(&state_dir, &project)?;
-            }
-            let client = build_client(&config, args.mock, &state_dir, &project)?;
-            analysis::prepare(
-                client.as_ref(),
-                &state_dir,
-                &mut project,
-                &mut chapters,
-                config.analysis.full_book,
+            let (project, created) = initialize_project(
+                config_path,
+                args.input,
+                args.source_language,
+                args.max_segment_chars,
+                args.mock,
                 args.force_analysis,
-                config.llm.max_retries,
             )
             .await?;
-            state::append_log(
-                &state_dir,
-                &project,
-                "analysis_completed",
-                serde_json::json!({ "full_book": config.analysis.full_book }),
-            )?;
             println!(
                 "{} project {} ({} chapters, source language {}, target language {})",
                 if created { "initialized" } else { "prepared" },
@@ -222,6 +181,81 @@ async fn execute(cli: Cli) -> Result<i32, String> {
         Command::Export(args) => export_file(args, &state_dir),
         Command::Terms(args) => terms(args, &state_dir),
     }
+}
+
+pub async fn initialize_project(
+    config_path: Option<PathBuf>,
+    input: PathBuf,
+    source_language: Option<String>,
+    max_segment_chars: Option<usize>,
+    mock_client: bool,
+    force_analysis: bool,
+) -> Result<(crate::model::ProjectState, bool), String> {
+    if !input.is_file() {
+        return Err(format!("input file does not exist: {}", input.display()));
+    }
+    let loaded = config::load(config_path.as_deref())?;
+    let state_dir = loaded.state_dir;
+    let config = loaded.value;
+    let existing = state::load_for_source(&state_dir, &input).ok();
+    let (mut project, mut chapters, created) = if let Some(project) = existing {
+        let chapters = state::load_chapters(&state_dir, &project)?;
+        (project, chapters, false)
+    } else {
+        let requested_language = source_language
+            .as_deref()
+            .unwrap_or(&config.language.source);
+        let max_segment_chars = max_segment_chars.unwrap_or(config.segment.max_chars_per_segment);
+        let mut document =
+            parser::parse_document(&input, Some(requested_language), max_segment_chars)?;
+        document.metadata.target_language = config.language.target.clone();
+        let initialized = state::initialize(&state_dir, &input, &document, max_segment_chars)?;
+        let chapters = state::load_chapters(&state_dir, &initialized.project)?;
+        (initialized.project, chapters, initialized.created)
+    };
+    let _lock = state::acquire_project_lock(&state_dir, &project)?;
+    if let Some(source_language) = source_language {
+        project.source_language = source_language;
+        state::save_project(&state_dir, &project)?;
+    }
+    let client = build_client(&config, mock_client, &state_dir, &project)?;
+    analysis::prepare(
+        client.as_ref(),
+        &state_dir,
+        &mut project,
+        &mut chapters,
+        config.analysis.full_book,
+        force_analysis,
+        config.llm.max_retries,
+    )
+    .await?;
+    state::append_log(
+        &state_dir,
+        &project,
+        "analysis_completed",
+        serde_json::json!({ "full_book": config.analysis.full_book }),
+    )?;
+    Ok((project, created))
+}
+
+pub async fn transit_project(
+    config_path: Option<PathBuf>,
+    input: PathBuf,
+    chapter: Option<usize>,
+    mock_client: bool,
+) -> Result<crate::model::ProjectState, String> {
+    let loaded = config::load(config_path.as_deref())?;
+    transit(
+        TransitArgs {
+            input: input.clone(),
+            chapter,
+            mock: mock_client,
+        },
+        &loaded.state_dir,
+        &loaded.value,
+    )
+    .await?;
+    state::load_for_source(&loaded.state_dir, &input)
 }
 
 fn export_file(args: ExportArgs, state_dir: &std::path::Path) -> Result<i32, String> {

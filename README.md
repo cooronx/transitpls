@@ -77,4 +77,19 @@ export OPENAI_API_KEY="..."
 Supported providers are `openai-chat`, `openai-responses`, and `anthropic`.
 Configured timeouts and retry counts apply to model-backed operations.
 
-The Tauri desktop shell remains available for the future frontend implementation.
+## Desktop app
+
+Run the desktop app from the repository root:
+
+```text
+yarn tauri dev
+```
+
+The desktop workbench reads the same project directories and configuration as the
+CLI. It can import EPUB/TXT books, display chapter and segment progress, run or
+cancel translation tasks, inspect and resolve terminology conflicts, edit the
+model configuration, and export translated TXT or EPUB files. Enable offline
+simulation in the task inspector to exercise the workflow without an API key.
+
+The Review workspace is intentionally a non-functional placeholder until the
+stage 8 review and reporting core is implemented.

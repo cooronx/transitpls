@@ -12,9 +12,11 @@
   "app": {
     "windows": [
       {
-        "title": "transitpls",
-        "width": 800,
-        "height": 600
+        "title": "TransItPls 译境",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1100,
+        "minHeight": 700
       }
     ],
     "security": {

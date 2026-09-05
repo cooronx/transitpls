@@ -1,9 +1,9 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_FILE: &str = "transitpls.toml";
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
     pub language: LanguageConfig,
@@ -14,7 +14,7 @@ pub struct AppConfig {
     pub pipeline: PipelineConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PipelineConfig {
     pub polish: bool,
@@ -30,7 +30,7 @@ impl Default for PipelineConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LanguageConfig {
     pub source: String,
@@ -46,7 +46,7 @@ impl Default for LanguageConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LlmConfig {
     pub provider: String,
@@ -84,7 +84,7 @@ impl LlmConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SegmentConfig {
     pub max_chars_per_segment: usize,
@@ -100,7 +100,7 @@ impl Default for SegmentConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PathsConfig {
     pub state_dir: PathBuf,
@@ -114,7 +114,7 @@ impl Default for PathsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AnalysisConfig {
     pub full_book: bool,
@@ -187,6 +187,18 @@ fn validate(config: &AppConfig) -> Result<(), String> {
         return Err("llm.timeout_secs must be greater than zero".to_string());
     }
     Ok(())
+}
+
+pub fn save_default(config: &AppConfig) -> Result<PathBuf, String> {
+    validate(config)?;
+    let path = std::env::current_dir()
+        .map_err(|error| format!("failed to determine current directory: {error}"))?
+        .join(DEFAULT_CONFIG_FILE);
+    let text = toml::to_string_pretty(config)
+        .map_err(|error| format!("failed to serialize configuration: {error}"))?;
+    std::fs::write(&path, text)
+        .map_err(|error| format!("failed to write configuration: {error}"))?;
+    Ok(path)
 }
 
 #[cfg(test)]

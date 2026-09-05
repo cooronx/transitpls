@@ -1,51 +1,133 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
-function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+type Status = "initialized" | "translating" | "translated" | "failed";
+type ItemStatus = "pending" | "translated" | "failed";
+interface Project { id:string; title:string; source_file:string; source_path:string; source_language:string; target_language:string; status:Status; chapters_total:number; chapters_completed:number; updated_at:string }
+interface Segment { id:string; ordinal:number; source:string; target:string|null; kind:string; status:ItemStatus }
+interface Chapter { id:string; title:string; target_title?:string; status:ItemStatus; segments:Segment[] }
+interface Term { source:string; target:string; type:string; aliases:string[]; first_chapter:number; note?:string; status:"ok"|"conflict"|"resolved" }
+interface LogEntry { timestamp:string; event:string; details:unknown }
+interface Config { language:{source:string;target:string}; llm:{provider:string;model:string;api_key_env:string;base_url?:string}; segment:{max_chars_per_segment:number;max_chars_per_batch:number}; pipeline:{polish:boolean;recent_context_chars:number} }
+interface Bootstrap { config:Config; configPath?:string; stateDir:string; projects:Project[] }
+interface Detail { project:Project; chapters:Chapter[]; logs:LogEntry[]; terms:Term[]; conflicts:Array<{source:string;target:string;chapter:number}>; report?:unknown }
+type View = "workspace"|"projects"|"terms"|"model"|"review"|"history";
+type TrayName = "tasks"|"issues"|"logs";
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+const navItems:Array<{id:View;icon:string;label:string}> = [
+  {id:"workspace",icon:"文",label:"工作台"},{id:"projects",icon:"▱",label:"项目"},
+  {id:"terms",icon:"册",label:"术语库"},{id:"model",icon:"◇",label:"模型"},
+  {id:"review",icon:"✓",label:"审校"},{id:"history",icon:"↶",label:"历史"},
+];
+const statusText:Record<Status|ItemStatus,string> = {initialized:"待翻译",translating:"翻译中",translated:"已完成",failed:"失败",pending:"待处理"};
 
-  return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
+export default function App() {
+  const [bootstrap,setBootstrap] = useState<Bootstrap|null>(null);
+  const [detail,setDetail] = useState<Detail|null>(null);
+  const [chapterIndex,setChapterIndex] = useState(0);
+  const [view,setView] = useState<View>("workspace");
+  const [tray,setTray] = useState<TrayName>("tasks");
+  const [busy,setBusy] = useState<string|null>(null);
+  const [notice,setNotice] = useState<string|null>(null);
+  const [search,setSearch] = useState("");
+  const [mockClient,setMockClient] = useState(false);
 
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
-      </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
+  const reload = async (projectId?:string) => {
+    const data = await invoke<Bootstrap>("ui_bootstrap");
+    setBootstrap(data);
+    const id = projectId ?? detail?.project.id ?? data.projects[0]?.id;
+    if (!id) { setDetail(null); return; }
+    const next = await invoke<Detail>("ui_project",{projectId:id});
+    setDetail(next);
+    setChapterIndex((current)=>Math.min(current,Math.max(0,next.chapters.length-1)));
+  };
+  useEffect(()=>{ reload().catch((error)=>{
+    if(String(error).includes("invoke")) setBootstrap(browserPreview());
+    else setNotice(String(error));
+  }); },[]);
 
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
-  );
+  const run = async (label:string,action:()=>Promise<Detail|void>) => {
+    setBusy(label); setNotice(null);
+    try { const result=await action(); if(result){setDetail(result);await reload(result.project.id)} setNotice(`${label}已完成`); }
+    catch(error){setNotice(String(error))} finally{setBusy(null)}
+  };
+  const importFile = async () => {
+    const path=await open({multiple:false,filters:[{name:"电子书",extensions:["epub","txt"]}]});
+    if(path) await run("项目初始化",()=>invoke<Detail>("ui_initialize",{input:path,mockClient}));
+  };
+  const selectProject = async (id:string) => {
+    setBusy("加载项目");
+    try { setDetail(await invoke<Detail>("ui_project",{projectId:id}));setChapterIndex(0);setView("workspace"); }
+    catch(error){setNotice(String(error))} finally{setBusy(null)}
+  };
+  const translate = (chapter?:number) => {
+    if(detail) void run("翻译",()=>invoke<Detail>("ui_transit",{projectId:detail.project.id,chapter:chapter??null,mockClient}));
+  };
+  const exportBook = async (format:"txt"|"epub") => {
+    if(!detail)return; setBusy("导出");
+    try { const output=await invoke<string>("ui_export",{projectId:detail.project.id,format});setNotice(`已导出至 ${output}`);await openPath(output); }
+    catch(error){setNotice(String(error))} finally{setBusy(null)}
+  };
+  const cancelTask = async () => {
+    const taskId=busy==="项目初始化"?"initialize":detail?.project.id;
+    if(!taskId)return;
+    const cancelled=await invoke<boolean>("ui_cancel_task",{taskId});
+    if(cancelled)setNotice("正在取消任务，已完成的进度会保留");
+  };
+  const chapter=detail?.chapters[chapterIndex];
+  const segments=useMemo(()=>{if(!chapter)return[];const q=search.trim().toLowerCase();return q?chapter.segments.filter((s)=>s.source.toLowerCase().includes(q)||s.target?.toLowerCase().includes(q)):chapter.segments},[chapter,search]);
+
+  return <div className="app-shell">
+    <Header project={detail?.project} model={bootstrap?.config.llm.model??"—"} search={search} onSearch={setSearch} onTranslate={()=>translate()} busy={busy} onCancel={()=>void cancelTask()} disabled={!detail}/>
+    <div className="workspace-row">
+      <ActivityBar view={view} onChange={setView}/>
+      {view!=="model"&&view!=="review"&&<Explorer projects={bootstrap?.projects??[]} detail={detail} chapterIndex={chapterIndex} onChapter={setChapterIndex} onProject={selectProject} onImport={importFile}/>}
+      <main className="main-panel">
+        {view==="workspace"&&detail&&chapter&&<Workspace detail={detail} chapter={chapter} chapterIndex={chapterIndex} segments={segments} tray={tray} setTray={setTray} onTranslate={()=>translate(chapterIndex)} onExport={exportBook}/>}
+        {(view==="projects"||view==="history")&&<ProjectGallery projects={bootstrap?.projects??[]} onSelect={selectProject} onImport={importFile}/>}
+        {view==="terms"&&<TermsView detail={detail} onReload={()=>reload()}/>}
+        {view==="model"&&<ModelView config={bootstrap?.config} configPath={bootstrap?.configPath} onSave={async(value)=>{const next=await invoke<Bootstrap>("ui_save_config",{value});setBootstrap(next);setNotice("模型配置已保存")}}/>}
+        {view==="review"&&<ReviewPlaceholder/>}
+        {view==="workspace"&&(!detail||!chapter)&&<EmptyState onImport={importFile}/>}
+      </main>
+      {view==="workspace"&&detail&&<Inspector config={bootstrap?.config} detail={detail} mock={mockClient} onMock={setMockClient}/>}
+    </div>
+    <footer className="statusbar"><span>TransItPls v0.1.0</span><i/><span>Tauri · 跨平台</span><span className="status-spacer"/><span>{busy?`◌ ${busy}进行中…`:"就绪"}</span><i/><span>{bootstrap?.projects.length??0} 个项目</span></footer>
+    {notice&&<button className="toast" onClick={()=>setNotice(null)}>{notice}<span>×</span></button>}{busy&&<div className="busy-line"/>}
+  </div>;
 }
 
-export default App;
+function Logo(){return <div className="logo-mark"><span>文</span><b>A</b></div>}
+function Header({project,model,search,onSearch,onTranslate,busy,onCancel,disabled}:{project?:Project;model:string;search:string;onSearch:(v:string)=>void;onTranslate:()=>void;busy:string|null;onCancel:()=>void;disabled:boolean}){
+  const cancellable=busy==="翻译"||busy==="项目初始化";
+  return <header className="topbar"><div className="brand"><Logo/><strong>TransItPls</strong><i/><span>项目：</span><b>{project?.title??"未选择项目"}</b><small>⌄</small></div><label className="global-search"><span>⌕</span><input value={search} onChange={(e)=>onSearch(e.target.value)} placeholder="搜索原文或译文…"/><kbd>Ctrl K</kbd></label><div className="top-actions"><span>模型: <b>{model}</b></span><span className="local-state">● 本地状态</span>{cancellable?<button className="cancel" onClick={onCancel}>■ 取消任务</button>:<button className="primary" disabled={disabled||Boolean(busy)} onClick={onTranslate}>▶ 开始翻译</button>}</div></header>
+}
+function ActivityBar({view,onChange}:{view:View;onChange:(v:View)=>void}){return <nav className="activity-bar"><div>{navItems.map((item)=><button key={item.id} className={view===item.id?"active":""} onClick={()=>onChange(item.id)} title={item.label}><b>{item.icon}</b><span>{item.label}</span></button>)}</div><button title="设置"><b>⚙</b><span>设置</span></button></nav>}
+function Explorer({projects,detail,chapterIndex,onChapter,onProject,onImport}:{projects:Project[];detail:Detail|null;chapterIndex:number;onChapter:(i:number)=>void;onProject:(id:string)=>void;onImport:()=>void}){
+  const project=detail?.project, progress=project?Math.round(project.chapters_completed/Math.max(1,project.chapters_total)*100):0;
+  return <aside className="explorer"><div className="panel-title"><strong>项目文件</strong><button onClick={onImport}>＋ 导入文件</button></div>{project?<><div className="project-card"><div><span className="book-icon">▤</span><p><b>{project.title}</b><small>{project.chapters_total} 个章节</small></p></div><div className="progress"><i style={{width:`${progress}%`}}/></div><footer><span>{project.chapters_completed} / {project.chapters_total} 章</span><b>{progress}%</b></footer></div><div className="file-row"><span>⌄</span><b>▤</b><strong>{fileName(project.source_file)}</strong></div><div className="chapter-list">{detail?.chapters.map((chapter,index)=><button key={chapter.id} className={index===chapterIndex?"active":""} onClick={()=>onChapter(index)}><span>▧</span><b>{chapter.target_title||chapter.title}</b><em className={chapter.status}>{statusText[chapter.status]}</em></button>)}</div></>:<div className="explorer-empty">尚无项目</div>}{projects.length>1&&<div className="other-projects"><h4>其他项目</h4>{projects.filter((p)=>p.id!==project?.id).map((p)=><button key={p.id} onClick={()=>onProject(p.id)}>▱ <span>{p.title}</span></button>)}</div>}</aside>
+}
+function Workspace({detail,chapter,chapterIndex,segments,tray,setTray,onTranslate,onExport}:{detail:Detail;chapter:Chapter;chapterIndex:number;segments:Segment[];tray:TrayName;setTray:(t:TrayName)=>void;onTranslate:()=>void;onExport:(f:"txt"|"epub")=>void}){
+  return <div className="editor-layout"><div className="editor-tabs"><button className="active">▤ 对照翻译</button><button>⌘ 结构预览</button><button onClick={()=>setTray("issues")}>◈ 质量检查</button><span/><small>第 {chapterIndex+1} / {detail.chapters.length} 章</small><button className="run-chapter" onClick={onTranslate}>▶ 翻译本章</button></div><div className="breadcrumb"><span>▧</span>{fileName(detail.project.source_file)}<i>/</i><b>{chapter.target_title||chapter.title}</b><em>{chapter.segments.length} 个段落</em></div><div className="column-head"><div><b>原文</b><span>{languageName(detail.project.source_language)}</span></div><div><b>译文</b><span>{languageName(detail.project.target_language)}</span></div></div><section className="segments">{segments.length?segments.map((s)=><SegmentCard key={s.id} segment={s}/>):<div className="no-results">没有匹配的段落</div>}</section><Tray detail={detail} tray={tray} setTray={setTray} onExport={onExport}/></div>
+}
+function SegmentCard({segment}:{segment:Segment}){const words=segment.source.trim().split(/\s+/).filter(Boolean).length;return <article className={`segment-card ${segment.status}`}><div className="segment-source"><header><b>#{segment.ordinal+1}</b><span>{words} 词</span></header><p>{segment.source}</p><footer>▤ {segment.kind==="heading"?"标题":"源段落"}</footer></div><div className="segment-target"><header><span>{segment.target?.length??0} 字</span><b className={segment.status}>{statusText[segment.status]}</b></header>{segment.target?<p>{segment.target}</p>:<div className="target-empty"><span>等待翻译</span><small>运行本章翻译后将在此显示译文</small></div>}<footer><button disabled>↻ 重译</button><button disabled>✓ 采纳</button><button disabled>▢ 注释</button></footer></div></article>}
+function Tray({detail,tray,setTray,onExport}:{detail:Detail;tray:TrayName;setTray:(t:TrayName)=>void;onExport:(f:"txt"|"epub")=>void}){return <section className="tray"><header><div><button className={tray==="tasks"?"active":""} onClick={()=>setTray("tasks")}>章节任务 <b>{detail.chapters.length}</b></button><button className={tray==="issues"?"active":""} onClick={()=>setTray("issues")}>问题列表 <b>{detail.conflicts.length}</b></button><button className={tray==="logs"?"active":""} onClick={()=>setTray("logs")}>运行日志</button></div><div className="export-menu"><button onClick={()=>onExport("txt")}>⇩ TXT</button><button onClick={()=>onExport("epub")}>⇩ EPUB</button></div></header><div className="tray-content">{tray==="tasks"&&<TaskTable detail={detail}/>} {tray==="issues"&&<IssueList detail={detail}/>} {tray==="logs"&&<LogList logs={detail.logs}/>}</div></section>}
+function TaskTable({detail}:{detail:Detail}){return <table><thead><tr><th>#</th><th>章节</th><th>状态</th><th>进度</th><th>段落</th></tr></thead><tbody>{detail.chapters.map((chapter,index)=>{const done=chapter.segments.filter((s)=>s.status==="translated").length,progress=Math.round(done/Math.max(1,chapter.segments.length)*100);return <tr key={chapter.id}><td>{index+1}</td><td>{chapter.target_title||chapter.title}</td><td><em className={chapter.status}>{statusText[chapter.status]}</em></td><td><div className="table-progress"><i style={{width:`${progress}%`}}/><span>{progress}%</span></div></td><td>{done} / {chapter.segments.length}</td></tr>})}</tbody></table>}
+function IssueList({detail}:{detail:Detail}){return detail.conflicts.length?<div className="issue-list">{detail.conflicts.map((item,index)=><div key={`${item.source}-${index}`}><b>术语冲突</b><span>{item.source} → {item.target}</span><em>第 {item.chapter+1} 章</em></div>)}</div>:<div className="panel-empty">当前没有术语冲突</div>}
+function LogList({logs}:{logs:LogEntry[]}){return logs.length?<div className="log-list">{logs.map((log,index)=><div key={`${log.timestamp}-${index}`}><time>{formatDate(log.timestamp)}</time><b>{eventText(log.event)}</b><code>{JSON.stringify(log.details)}</code></div>)}</div>:<div className="panel-empty">暂无运行日志</div>}
+
+function Inspector({config,detail,mock,onMock}:{config?:Config;detail:Detail;mock:boolean;onMock:(v:boolean)=>void}){const progress=Math.round(detail.project.chapters_completed/Math.max(1,detail.project.chapters_total)*100);return <aside className="inspector"><div className="inspector-tabs"><button className="active">任务配置</button><button>术语与记忆</button></div><div className="inspector-body"><Field label="语言方向"><div className="direction"><span>{languageName(detail.project.source_language)}</span><b>→</b><span>{languageName(detail.project.target_language)}</span></div></Field><Field label="模型选择"><div className="select-like">{config?.llm.model??"—"}<span>⌄</span></div><small>提供商：{config?.llm.provider??"—"}</small></Field><Field label="分段策略"><div className="select-like">每段最多 {config?.segment.max_chars_per_segment??0} 字符</div></Field><label className="switch-row"><span>译后润色</span><i className={config?.pipeline.polish?"on":""}/></label><label className="switch-row"><span>离线模拟模式</span><button className={`toggle ${mock?"on":""}`} onClick={()=>onMock(!mock)}><i/></button></label><hr/><section className="flow"><header><b>项目进度</b><strong>{progress}%</strong></header><div className="big-progress"><i style={{width:`${progress}%`}}/></div><p className="done">✓ 已完成 {detail.project.chapters_completed} 章</p><p className={detail.project.status==="failed"?"error":"active"}>◌ {statusText[detail.project.status]}</p><p>○ 生成校对报告 <em>阶段 8 待实现</em></p></section></div></aside>}
+function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><b>{label}</b>{children}</label>}
+function ProjectGallery({projects,onSelect,onImport}:{projects:Project[];onSelect:(id:string)=>void;onImport:()=>void}){return <div className="page-view"><header><div><h1>翻译项目</h1><p>管理本机状态目录中的所有书籍。</p></div><button className="primary" onClick={onImport}>＋ 新建项目</button></header>{projects.length?<div className="project-grid">{projects.map((project)=>{const progress=Math.round(project.chapters_completed/Math.max(1,project.chapters_total)*100);return <button key={project.id} onClick={()=>onSelect(project.id)}><span className="cover">文</span><section><h3>{project.title}</h3><p>{fileName(project.source_file)}</p><div className="progress"><i style={{width:`${progress}%`}}/></div><footer><span>{project.chapters_completed} / {project.chapters_total} 章</span><em className={project.status}>{statusText[project.status]}</em></footer></section></button>})}</div>:<EmptyState onImport={onImport}/>}</div>}
+function TermsView({detail,onReload}:{detail:Detail|null;onReload:()=>Promise<void>}){const[editing,setEditing]=useState<string|null>(null),[target,setTarget]=useState("");const resolve=async(term:Term)=>{if(!detail||!target.trim())return;await invoke("ui_resolve_term",{projectId:detail.project.id,source:term.source,target});setEditing(null);await onReload()};return <div className="page-view"><header><div><h1>术语库</h1><p>{detail?`${detail.project.title} · ${detail.terms.length} 条术语`:"选择项目后查看术语"}</p></div></header>{detail&&detail.terms.length?<div className="term-table"><div className="term-row term-head"><span>原文</span><span>固定译名</span><span>类型</span><span>首次出现</span><span>状态</span><span>操作</span></div>{detail.terms.map((term)=><div className="term-row" key={term.source}><b>{term.source}</b>{editing===term.source?<input autoFocus value={target} onChange={(e)=>setTarget(e.target.value)}/>:<span>{term.target}</span>}<span>{term.type}</span><span>第 {term.first_chapter+1} 章</span><em className={term.status}>{term.status==="conflict"?"有冲突":term.status==="resolved"?"已裁定":"正常"}</em>{editing===term.source?<button onClick={()=>void resolve(term)}>保存</button>:<button onClick={()=>{setEditing(term.source);setTarget(term.target)}}>裁定</button>}</div>)}</div>:<div className="page-empty">暂无术语数据</div>}</div>}
+function ModelView({config,configPath,onSave}:{config?:Config;configPath?:string;onSave:(value:Config)=>Promise<void>}){const[draft,setDraft]=useState(config);useEffect(()=>setDraft(config),[config]);if(!draft)return <div className="page-empty">正在读取配置…</div>;const field=(key:keyof Config["llm"],value:string)=>setDraft({...draft,llm:{...draft.llm,[key]:value}});return <div className="page-view model-page"><header><div><h1>模型配置</h1><p>桌面端与 CLI 共用 transitpls.toml，密钥只从环境变量读取。</p></div><button className="primary" onClick={()=>void onSave(draft)}>保存配置</button></header><div className="settings-card"><h2>模型连接</h2><Field label="提供商"><select value={draft.llm.provider} onChange={(e)=>field("provider",e.target.value)}><option value="openai-chat">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic">Anthropic</option></select></Field><Field label="模型"><input value={draft.llm.model} onChange={(e)=>field("model",e.target.value)}/></Field><Field label="接口地址"><input value={draft.llm.base_url??""} onChange={(e)=>field("base_url",e.target.value)}/></Field><Field label="密钥环境变量"><input className="mono" value={draft.llm.api_key_env} onChange={(e)=>field("api_key_env",e.target.value)}/><small>这里只保存变量名，不会显示或写入 API Key 本身。</small></Field><footer>配置文件：<code>{configPath??"保存后创建 transitpls.toml"}</code></footer></div></div>}
+function ReviewPlaceholder(){return <div className="review-placeholder"><div className="review-icon">✓</div><h1>审校工作区</h1><p>界面已经就位。按照当前开发安排，阶段 8 的 Review 与报告能力暂不接入。</p><button disabled>运行只读审校</button><small>不会对译文执行自动写回</small></div>}
+function EmptyState({onImport}:{onImport:()=>void}){return <div className="empty-state"><Logo/><h1>开始第一个翻译项目</h1><p>导入 EPUB 或 TXT 文件，TransItPls 会沿用 CLI 的项目状态与断点续跑能力。</p><button className="primary" onClick={onImport}>＋ 选择书籍文件</button><small>暂不支持 PDF、DOCX 和字幕文件</small></div>}
+function fileName(path:string){return path.split(/[\\/]/).pop()??path}
+function languageName(code:string){return ({auto:"自动检测",en:"English","zh-CN":"中文（简体）",ja:"日本語"} as Record<string,string>)[code]??code}
+function formatDate(value:string){try{return new Intl.DateTimeFormat("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(new Date(value))}catch{return value}}
+function eventText(event:string){return ({initialized:"项目已创建",analysis_completed:"译前分析完成",transit_started:"开始翻译",transit_completed:"翻译完成",term_resolved:"术语已裁定",exported:"成品已导出",failed:"任务失败"} as Record<string,string>)[event]??event}
+function browserPreview():Bootstrap{return {stateDir:"projects",projects:[],config:{language:{source:"auto",target:"zh-CN"},llm:{provider:"openai-chat",model:"gpt-4o-mini",api_key_env:"OPENAI_API_KEY",base_url:"https://api.openai.com/v1"},segment:{max_chars_per_segment:1200,max_chars_per_batch:1800},pipeline:{polish:false,recent_context_chars:2000}}}}
