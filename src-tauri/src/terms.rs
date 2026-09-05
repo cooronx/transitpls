@@ -131,6 +131,14 @@ impl TermStore {
                 existing.status
             }
             Some(existing) => {
+                merge_term_metadata(&transaction, &existing, term)?;
+                let mut aliases = existing.aliases.clone();
+                for alias in &term.aliases {
+                    if !aliases.contains(alias) {
+                        aliases.push(alias.clone());
+                    }
+                }
+                sync_aliases(&transaction, &term.source, &aliases)?;
                 record_candidate(
                     &transaction,
                     &existing.source,
