@@ -4,7 +4,7 @@ use crate::llm::{self, MockClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, ProjectStatus};
 use crate::parser;
 use crate::state;
-use crate::terms::TermStore;
+use crate::terms::{self, PendingExtraction, TermStore};
 use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -224,7 +224,7 @@ fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
             println!("source\ttarget\ttype\tstatus\taliases");
             for term in store.list()? {
                 println!(
-                    "{}\t{}\t{}\t{:?}\t{}",
+                    "{}\t{}\t{}\t{}\t{}",
                     term.source,
                     term.target,
                     term.term_type,
@@ -299,6 +299,20 @@ async fn transit(
     let mut project = state::load_for_source(state_dir, &args.input)?;
     let mut chapters = state::load_chapters(state_dir, &project)?;
     let client = build_client(config, args.mock)?;
+    let store = term_store(state_dir, &project)?;
+    if let Err(error) = retry_pending_extractions(
+        client.as_ref(),
+        &store,
+        state_dir,
+        &project,
+        &mut chapters,
+        config.llm.max_retries,
+    )
+    .await
+    {
+        state::mark_failed(state_dir, &mut project, &error)?;
+        return Err(error);
+    }
     state::append_log(
         state_dir,
         &project,
@@ -316,11 +330,19 @@ async fn transit(
             .cloned()
             .collect::<Vec<_>>();
         for batch in pending.chunks(BATCH_SIZE) {
+            let chapter_source = chapters[chapter_index]
+                .segments
+                .iter()
+                .map(|segment| segment.source.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let relevant_terms = store.relevant(&chapter_source)?;
             let translations = match llm::translate_batch(
                 client.as_ref(),
                 batch,
                 &project.source_language,
                 &project.target_language,
+                &relevant_terms,
                 config.llm.max_retries,
             )
             .await
@@ -337,6 +359,7 @@ async fn transit(
                     return Err(error);
                 }
             };
+            let target_text = translations.join("\n");
             for (segment, translation) in batch.iter().zip(translations) {
                 if let Some(stored) = chapters[chapter_index]
                     .segments
@@ -354,7 +377,84 @@ async fn transit(
             {
                 chapters[chapter_index].status = ItemStatus::Translated;
             }
+            let extraction = PendingExtraction {
+                chapter_id: chapters[chapter_index].id.clone(),
+                batch_key: batch
+                    .iter()
+                    .map(|segment| segment.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join("|"),
+                source_text: batch
+                    .iter()
+                    .map(|segment| segment.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                target_text,
+            };
+            record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
             state::save_progress(state_dir, &mut project, &mut chapters)?;
+            if let Err(error) = store.queue_extraction(&extraction) {
+                state::mark_failed(state_dir, &mut project, &error)?;
+                return Err(error);
+            }
+            if let Err(error) = process_extraction(
+                client.as_ref(),
+                &store,
+                &extraction,
+                chapter_index,
+                config.llm.max_retries,
+            )
+            .await
+            {
+                state::mark_failed(state_dir, &mut project, &error)?;
+                return Err(error);
+            }
+            clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+            state::write_chapter(state_dir, &project, &chapters[chapter_index])?;
+        }
+        if chapters[chapter_index]
+            .segments
+            .iter()
+            .all(|segment| segment.status == ItemStatus::Translated)
+            && chapters[chapter_index].meta["terms_extracted"] != serde_json::Value::Bool(true)
+        {
+            let extraction = PendingExtraction {
+                chapter_id: chapters[chapter_index].id.clone(),
+                batch_key: "__chapter__".to_string(),
+                source_text: chapters[chapter_index]
+                    .segments
+                    .iter()
+                    .map(|segment| segment.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                target_text: chapters[chapter_index]
+                    .segments
+                    .iter()
+                    .filter_map(|segment| segment.target.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            };
+            record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
+            state::write_chapter(state_dir, &project, &chapters[chapter_index])?;
+            if let Err(error) = store.queue_extraction(&extraction) {
+                state::mark_failed(state_dir, &mut project, &error)?;
+                return Err(error);
+            }
+            if let Err(error) = process_extraction(
+                client.as_ref(),
+                &store,
+                &extraction,
+                chapter_index,
+                config.llm.max_retries,
+            )
+            .await
+            {
+                state::mark_failed(state_dir, &mut project, &error)?;
+                return Err(error);
+            }
+            clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+            chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
+            state::write_chapter(state_dir, &project, &chapters[chapter_index])?;
         }
     }
     state::append_log(
@@ -372,6 +472,108 @@ async fn transit(
             .sum::<usize>()
     );
     Ok(0)
+}
+
+async fn retry_pending_extractions<C: TranslationClient + ?Sized>(
+    client: &C,
+    store: &TermStore,
+    state_dir: &std::path::Path,
+    project: &crate::model::ProjectState,
+    chapters: &mut [Chapter],
+    max_retries: usize,
+) -> Result<(), String> {
+    for chapter in chapters.iter() {
+        if let Some(pending) = chapter
+            .meta
+            .get("pending_term_extractions")
+            .and_then(serde_json::Value::as_object)
+        {
+            for value in pending.values() {
+                let extraction: PendingExtraction = serde_json::from_value(value.clone())
+                    .map_err(|error| format!("invalid pending term extraction state: {error}"))?;
+                store.queue_extraction(&extraction)?;
+            }
+        }
+    }
+    for extraction in store.pending_extractions()? {
+        let chapter_index = chapters
+            .iter()
+            .position(|chapter| chapter.id == extraction.chapter_id)
+            .ok_or_else(|| {
+                format!(
+                    "pending term extraction references missing chapter {}",
+                    extraction.chapter_id
+                )
+            })?;
+        process_extraction(client, store, &extraction, chapter_index, max_retries).await?;
+        clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+        if extraction.batch_key == "__chapter__" {
+            chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
+        }
+        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+    }
+    Ok(())
+}
+
+fn record_pending_extraction(
+    chapter: &mut Chapter,
+    extraction: &PendingExtraction,
+) -> Result<(), String> {
+    if !chapter.meta.is_object() {
+        chapter.meta = serde_json::json!({});
+    }
+    let pending = chapter
+        .meta
+        .as_object_mut()
+        .expect("chapter meta was normalized to an object")
+        .entry("pending_term_extractions")
+        .or_insert_with(|| serde_json::json!({}));
+    let object = pending
+        .as_object_mut()
+        .ok_or_else(|| "chapter pending_term_extractions must be an object".to_string())?;
+    object.insert(
+        extraction.batch_key.clone(),
+        serde_json::to_value(extraction)
+            .map_err(|error| format!("failed to store pending extraction: {error}"))?,
+    );
+    Ok(())
+}
+
+fn clear_pending_extraction(chapter: &mut Chapter, batch_key: &str) {
+    let Some(meta) = chapter.meta.as_object_mut() else {
+        return;
+    };
+    let should_remove = meta
+        .get_mut("pending_term_extractions")
+        .and_then(serde_json::Value::as_object_mut)
+        .is_some_and(|pending| {
+            pending.remove(batch_key);
+            pending.is_empty()
+        });
+    if should_remove {
+        meta.remove("pending_term_extractions");
+    }
+}
+
+async fn process_extraction<C: TranslationClient + ?Sized>(
+    client: &C,
+    store: &TermStore,
+    extraction: &PendingExtraction,
+    chapter_index: usize,
+    max_retries: usize,
+) -> Result<(), String> {
+    let extracted = terms::extract_terms(
+        client,
+        &extraction.source_text,
+        &extraction.target_text,
+        chapter_index,
+        max_retries,
+    )
+    .await?;
+    for term in extracted {
+        store.insert(&term)?;
+    }
+    store.complete_extraction(&extraction.chapter_id, &extraction.batch_key)
 }
 
 fn build_client(config: &AppConfig, mock: bool) -> Result<Box<dyn TranslationClient>, String> {
@@ -425,9 +627,25 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 
 #[cfg(test)]
 mod tests {
-    use super::Cli;
+    use super::{transit, Cli, TransitArgs};
+    use crate::config::AppConfig;
+    use crate::terms::TermStore;
+    use crate::{parser, state};
     use clap::Parser;
+    use std::fs;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir() -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("transitpls-cli-{}-{nonce}", std::process::id()));
+        fs::create_dir_all(&path).expect("temp directory should be created");
+        path
+    }
 
     #[test]
     fn accepts_explicit_config_and_project_id() {
@@ -441,5 +659,55 @@ mod tests {
         ])
         .expect("CLI arguments should parse");
         assert_eq!(cli.config, Some(PathBuf::from("custom.toml")));
+    }
+
+    #[tokio::test]
+    async fn mock_transit_extracts_terms_after_saving_translation() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, "Chapter 1\n\nAlice entered the city.")
+            .expect("source should be written");
+        let document =
+            parser::parse_document(&source, Some("en"), 1_200).expect("document should parse");
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+            .expect("project should initialize");
+
+        transit(
+            TransitArgs {
+                input: source.clone(),
+                mock: true,
+            },
+            &state_dir,
+            &AppConfig::default(),
+        )
+        .await
+        .expect("mock transit should complete");
+
+        let chapters =
+            state::load_chapters(&state_dir, &initialized.project).expect("chapters should load");
+        assert!(chapters[0]
+            .segments
+            .iter()
+            .all(|segment| segment.target.is_some()));
+        assert_eq!(
+            chapters[0].meta["terms_extracted"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(chapters[0].meta.get("pending_term_extractions").is_none());
+        let store = TermStore::open(
+            state::project_dir(&state_dir, &initialized.project.id).join("terms.db"),
+        )
+        .expect("term store should open");
+        assert!(store
+            .list()
+            .expect("terms should list")
+            .iter()
+            .any(|term| term.source == "Alice"));
+        assert!(store
+            .pending_extractions()
+            .expect("pending extractions should list")
+            .is_empty());
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 }

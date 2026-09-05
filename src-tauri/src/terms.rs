@@ -1,6 +1,8 @@
+use crate::llm::TranslationClient;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -45,11 +47,31 @@ impl TermStatus {
     }
 }
 
+impl std::fmt::Display for TermStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TermCandidate {
     pub source: String,
     pub target: String,
     pub chapter: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingExtraction {
+    pub chapter_id: String,
+    pub batch_key: String,
+    pub source_text: String,
+    pub target_text: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExtractionResponse {
+    terms: Vec<Term>,
 }
 
 #[derive(Debug, Clone)]
@@ -191,6 +213,100 @@ impl TermStore {
             })
             .collect())
     }
+
+    pub fn queue_extraction(&self, extraction: &PendingExtraction) -> Result<(), String> {
+        let connection = self.connect()?;
+        connection
+            .execute(
+                "INSERT OR REPLACE INTO pending_term_extractions
+                 (chapter_id, batch_key, source_text, target_text)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    extraction.chapter_id,
+                    extraction.batch_key,
+                    extraction.source_text,
+                    extraction.target_text,
+                ],
+            )
+            .map_err(|error| format!("failed to queue term extraction: {error}"))?;
+        Ok(())
+    }
+
+    pub fn pending_extractions(&self) -> Result<Vec<PendingExtraction>, String> {
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT chapter_id, batch_key, source_text, target_text
+                 FROM pending_term_extractions ORDER BY chapter_id, batch_key",
+            )
+            .map_err(|error| format!("failed to prepare pending extractions: {error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(PendingExtraction {
+                    chapter_id: row.get(0)?,
+                    batch_key: row.get(1)?,
+                    source_text: row.get(2)?,
+                    target_text: row.get(3)?,
+                })
+            })
+            .map_err(|error| format!("failed to query pending extractions: {error}"))?;
+        rows.map(|row| row.map_err(|error| format!("failed to read pending extraction: {error}")))
+            .collect()
+    }
+
+    pub fn complete_extraction(&self, chapter_id: &str, batch_key: &str) -> Result<(), String> {
+        let connection = self.connect()?;
+        connection
+            .execute(
+                "DELETE FROM pending_term_extractions
+                 WHERE chapter_id = ?1 AND batch_key = ?2",
+                params![chapter_id, batch_key],
+            )
+            .map_err(|error| format!("failed to complete term extraction: {error}"))?;
+        Ok(())
+    }
+}
+
+pub async fn extract_terms<C: TranslationClient + ?Sized>(
+    client: &C,
+    source_text: &str,
+    target_text: &str,
+    chapter: usize,
+    max_retries: usize,
+) -> Result<Vec<Term>, String> {
+    let user = serde_json::json!({
+        "chapter": chapter,
+        "source": source_text,
+        "target": target_text,
+    })
+    .to_string();
+    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain source, target, reading, type, gender, aliases, first_chapter, note, and status=\"ok\". Return an empty array when nothing qualifies.";
+    let mut last_error = String::new();
+    for attempt in 0..=max_retries {
+        match client.complete(system, &user).await {
+            Ok(raw) => match serde_json::from_str::<ExtractionResponse>(&raw) {
+                Ok(mut response) => {
+                    let validation = response.terms.iter_mut().try_for_each(|term| {
+                        term.first_chapter = chapter;
+                        term.status = TermStatus::Ok;
+                        validate_term(term)
+                    });
+                    match validation {
+                        Ok(()) => return Ok(response.terms),
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(error) => last_error = format!("invalid term extraction JSON: {error}"),
+            },
+            Err(error) => last_error = error,
+        }
+        if attempt < max_retries {
+            tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
+        }
+    }
+    Err(format!(
+        "term extraction failed after {max_retries} retries: {last_error}"
+    ))
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), String> {
@@ -400,7 +516,8 @@ fn is_cjk(value: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{Term, TermStatus, TermStore};
+    use super::{extract_terms, PendingExtraction, Term, TermStatus, TermStore};
+    use crate::llm::MockClient;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -501,5 +618,43 @@ mod tests {
         assert!(relevant.iter().any(|term| term.source == "Alice"));
         assert!(relevant.iter().any(|term| term.source == "王都"));
         std::fs::remove_file(path).expect("database should be removed");
+    }
+
+    #[test]
+    fn persists_pending_extractions_until_completed() {
+        let (store, path) = store("pending");
+        let extraction = PendingExtraction {
+            chapter_id: "chapter-1".to_string(),
+            batch_key: "batch-1".to_string(),
+            source_text: "Alice".to_string(),
+            target_text: "爱丽丝".to_string(),
+        };
+        store
+            .queue_extraction(&extraction)
+            .expect("extraction should queue");
+        assert_eq!(
+            store
+                .pending_extractions()
+                .expect("pending extraction should list"),
+            vec![extraction]
+        );
+        store
+            .complete_extraction("chapter-1", "batch-1")
+            .expect("extraction should complete");
+        assert!(store
+            .pending_extractions()
+            .expect("pending extraction should list")
+            .is_empty());
+        std::fs::remove_file(path).expect("database should be removed");
+    }
+
+    #[tokio::test]
+    async fn extracts_stable_terms_with_mock_client() {
+        let terms = extract_terms(&MockClient, "Alice arrived.", "爱丽丝到了。", 2, 0)
+            .await
+            .expect("mock extraction should work");
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].source, "Alice");
+        assert_eq!(terms[0].first_chapter, 2);
     }
 }

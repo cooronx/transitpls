@@ -1,5 +1,6 @@
 use crate::config::LlmConfig;
 use crate::model::{Document, Segment, SegmentKind};
+use crate::terms::Term;
 use async_trait::async_trait;
 use rand::RngExt;
 use rig_core::client::CompletionClient;
@@ -77,6 +78,30 @@ impl TranslationClient for MockClient {
                 "book_synopsis": "Stable mock whole-book synopsis"
             })
             .to_string());
+        }
+        if system_prompt.contains("TASK:TERM_EXTRACTION") {
+            let request: serde_json::Value =
+                serde_json::from_str(user_prompt).map_err(|error| {
+                    format!("mock client received invalid term extraction prompt: {error}")
+                })?;
+            let source = request["source"].as_str().unwrap_or_default();
+            let chapter = request["chapter"].as_u64().unwrap_or_default();
+            let terms = if source.contains("Alice") {
+                vec![serde_json::json!({
+                    "source": "Alice",
+                    "target": "爱丽丝",
+                    "reading": null,
+                    "type": "person",
+                    "gender": null,
+                    "aliases": [],
+                    "first_chapter": chapter,
+                    "note": "stable mock extraction",
+                    "status": "ok"
+                })]
+            } else {
+                Vec::new()
+            };
+            return Ok(serde_json::json!({ "terms": terms }).to_string());
         }
         let request: BatchPrompt = serde_json::from_str(user_prompt)
             .map_err(|error| format!("mock client received invalid prompt: {error}"))?;
@@ -338,11 +363,13 @@ pub fn build_prompts(
     segments: &[Segment],
     source_language: &str,
     target_language: &str,
+    terms: &[Term],
 ) -> (String, String) {
     let system = format!(
-        "You are a professional literary translator. Translate from {source_language} to {target_language}. Preserve meaning, tone, formatting markers, and paragraph boundaries. Return only valid JSON in the exact form {{\"translations\":[{{\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in input order and never omit an item."
+        "You are a professional literary translator. Translate from {source_language} to {target_language}. Preserve meaning, tone, formatting markers, and paragraph boundaries. Apply the provided relevant terminology consistently; resolved terms are authoritative. Return only valid JSON in the exact form {{\"translations\":[{{\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in input order and never omit an item."
     );
     let user = serde_json::json!({
+        "terms": terms,
         "segments": segments.iter().map(|segment| serde_json::json!({
             "id": segment.id,
             "source": segment.source,
@@ -414,13 +441,14 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
     segments: &[Segment],
     source_language: &str,
     target_language: &str,
+    terms: &[Term],
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
     let expected_ids = segments
         .iter()
         .map(|segment| segment.id.clone())
         .collect::<Vec<_>>();
-    let (system, user) = build_prompts(segments, source_language, target_language);
+    let (system, user) = build_prompts(segments, source_language, target_language, terms);
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(&system, &user).await {
@@ -447,6 +475,7 @@ mod tests {
         validate_response, TranslationClient,
     };
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
+    use crate::terms::{Term, TermStatus};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
 
@@ -475,6 +504,27 @@ mod tests {
                 }],
             }],
         }
+    }
+
+    #[test]
+    fn translation_prompt_includes_relevant_terms() {
+        let segment = document_with_source("Alice arrived.").chapters[0].segments[0].clone();
+        let term = Term {
+            source: "Alice".to_string(),
+            target: "爱丽丝".to_string(),
+            reading: None,
+            term_type: "person".to_string(),
+            gender: None,
+            aliases: Vec::new(),
+            first_chapter: 0,
+            note: None,
+            status: TermStatus::Resolved,
+        };
+        let (_, user) = super::build_prompts(&[segment], "en", "zh-CN", &[term]);
+        let value: serde_json::Value =
+            serde_json::from_str(&user).expect("prompt should be valid JSON");
+        assert_eq!(value["terms"][0]["target"], "爱丽丝");
+        assert_eq!(value["terms"][0]["status"], "resolved");
     }
 
     struct SequenceClient {
