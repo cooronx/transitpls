@@ -1,5 +1,6 @@
 use crate::analysis;
 use crate::config::{self, AppConfig};
+use crate::export::{self, ExportFormat};
 use crate::llm::{self, MockClient, RecordingClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, ProjectStatus, Segment, SegmentKind};
 use crate::parser;
@@ -7,7 +8,7 @@ use crate::pipeline;
 use crate::state;
 use crate::terms::{self, PendingExtraction, TermStore};
 use crate::usage::UsageRecorder;
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -71,8 +72,25 @@ struct ProjectArgs {
 #[derive(Debug, Args)]
 struct ExportArgs {
     #[arg(long)]
-    format: String,
+    format: ExportFormatArg,
+    #[arg(long)]
+    out: Option<PathBuf>,
     input: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ExportFormatArg {
+    Txt,
+    Epub,
+}
+
+impl From<ExportFormatArg> for ExportFormat {
+    fn from(value: ExportFormatArg) -> Self {
+        match value {
+            ExportFormatArg::Txt => Self::Txt,
+            ExportFormatArg::Epub => Self::Epub,
+        }
+    }
 }
 
 #[derive(Debug, Args)]
@@ -201,22 +219,24 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             );
             Ok(2)
         }
-        Command::Export(args) => {
-            let project = state::load_for_source(&state_dir, &args.input)?;
-            state::append_log(
-                &state_dir,
-                &project,
-                "export_requested",
-                serde_json::json!({ "format": args.format }),
-            )?;
-            eprintln!(
-                "export is not implemented in this stage (project {})",
-                project.id
-            );
-            Ok(2)
-        }
+        Command::Export(args) => export_file(args, &state_dir),
         Command::Terms(args) => terms(args, &state_dir),
     }
+}
+
+fn export_file(args: ExportArgs, state_dir: &std::path::Path) -> Result<i32, String> {
+    let format = ExportFormat::from(args.format);
+    let output = args
+        .out
+        .unwrap_or_else(|| export::default_output_path(&args.input, format));
+    let snapshot = state::load_export_snapshot(state_dir, &args.input)?;
+    let bytes = match format {
+        ExportFormat::Txt => export::render_txt(&snapshot)?.into_bytes(),
+        ExportFormat::Epub => export::render_epub(&snapshot)?,
+    };
+    export::write_atomic(&output, &bytes)?;
+    println!("exported {}", output.display());
+    Ok(0)
 }
 
 fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
@@ -1275,7 +1295,9 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 
 #[cfg(test)]
 mod tests {
-    use super::{run_transit, transit, Cli, Command, TransitArgs};
+    use super::{
+        export_file, run_transit, transit, Cli, Command, ExportArgs, ExportFormatArg, TransitArgs,
+    };
     use crate::analysis::BookAnalysis;
     use crate::config::AppConfig;
     use crate::llm::{CompletionOutput, MockClient, TranslationClient};
@@ -1340,6 +1362,77 @@ mod tests {
         };
         assert_eq!(args.chapter, Some(0));
         assert!(args.mock);
+    }
+
+    #[test]
+    fn accepts_export_format_and_output_path() {
+        let cli = Cli::try_parse_from([
+            "transitpls-cli",
+            "export",
+            "--format",
+            "epub",
+            "--out",
+            "dist/book.epub",
+            "book.txt",
+        ])
+        .expect("export arguments should parse");
+        let Command::Export(args) = cli.command else {
+            panic!("export command should parse");
+        };
+        assert_eq!(args.format, ExportFormatArg::Epub);
+        assert_eq!(args.out, Some(PathBuf::from("dist/book.epub")));
+        assert_eq!(args.input, PathBuf::from("book.txt"));
+    }
+
+    #[test]
+    fn txt_export_overwrites_output_without_changing_project_log() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, "Chapter 1\n\nHello, world!").expect("source should be written");
+        let document =
+            parser::parse_document(&source, Some("en"), 1_200).expect("document should parse");
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+            .expect("project should initialize");
+        let mut project = initialized.project;
+        let mut chapters =
+            state::load_chapters(&state_dir, &project).expect("chapters should load");
+        chapters[0].target_title = Some("第一章".to_string());
+        chapters[0].segments[0].target = Some("你好, 世界!".to_string());
+        chapters[0].segments[0].status = ItemStatus::Translated;
+        let lock = state::acquire_project_lock(&state_dir, &project)
+            .expect("project lock should be created");
+        state::save_progress(&state_dir, &mut project, &mut chapters)
+            .expect("translation state should save");
+        drop(lock);
+        let project_dir = state::project_dir(&state_dir, &project.id);
+        let log_path = project_dir.join("logs.txt");
+        let log_before = fs::read(&log_path).expect("log should be readable");
+        let output = dir.join("output/book.zh.txt");
+        fs::create_dir_all(output.parent().expect("output should have parent"))
+            .expect("output directory should be created");
+        fs::write(&output, "old output").expect("old output should be written");
+
+        let result = export_file(
+            ExportArgs {
+                format: ExportFormatArg::Txt,
+                out: None,
+                input: source,
+            },
+            &state_dir,
+        )
+        .expect("TXT export should succeed");
+
+        assert_eq!(result, 0);
+        assert_eq!(
+            fs::read_to_string(output).expect("output should be readable"),
+            "第一章\n\n你好， 世界！\n"
+        );
+        assert_eq!(
+            fs::read(&log_path).expect("log should remain readable"),
+            log_before
+        );
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 
     #[tokio::test]
