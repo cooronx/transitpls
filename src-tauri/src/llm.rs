@@ -26,6 +26,58 @@ impl TranslationClient for MockClient {
             })
             .to_string());
         }
+        if system_prompt.contains("TASK:BOOK_STYLE_ANALYSIS") {
+            return Ok(serde_json::json!({
+                "genre": "mock fiction",
+                "tone": "consistent mock tone",
+                "style_guide": [
+                    "Use natural Simplified Chinese",
+                    "Keep names and forms of address consistent"
+                ],
+                "narration": "mock third-person narration",
+                "pacing": "balanced",
+                "register": "neutral",
+                "dialogue_style": "concise",
+                "rhetoric": "plain",
+                "characters": [{
+                    "source": "Alice",
+                    "target": "爱丽丝",
+                    "reading": null,
+                    "type": "person",
+                    "gender": null,
+                    "aliases": [],
+                    "first_chapter": 0,
+                    "note": "stable mock character"
+                }],
+                "terms": [{
+                    "source": "city",
+                    "target": "城市",
+                    "reading": null,
+                    "type": "place",
+                    "gender": null,
+                    "aliases": [],
+                    "first_chapter": 0,
+                    "note": "stable mock term"
+                }],
+                "book_synopsis": null
+            })
+            .to_string());
+        }
+        if system_prompt.contains("TASK:CHAPTER_DIGEST") {
+            let request: serde_json::Value = serde_json::from_str(user_prompt)
+                .map_err(|error| format!("mock client received invalid digest prompt: {error}"))?;
+            let title = request["title"].as_str().unwrap_or("Untitled");
+            return Ok(serde_json::json!({
+                "source_digest": format!("Mock digest for {title}"),
+            })
+            .to_string());
+        }
+        if system_prompt.contains("TASK:BOOK_SYNOPSIS") {
+            return Ok(serde_json::json!({
+                "book_synopsis": "Stable mock whole-book synopsis"
+            })
+            .to_string());
+        }
         let request: BatchPrompt = serde_json::from_str(user_prompt)
             .map_err(|error| format!("mock client received invalid prompt: {error}"))?;
         Ok(serde_json::json!({
@@ -223,18 +275,32 @@ pub fn validate_language_response(raw: &str) -> Result<String, String> {
 pub async fn detect_source_language<C: TranslationClient + ?Sized>(
     client: &C,
     document: &Document,
+    max_retries: usize,
 ) -> Result<String, String> {
     let samples = sample_language_texts(document)?;
     let system = "You are a language identification classifier. Identify the primary natural language of the provided text. Return only valid JSON in the exact form {\"language\":\"<ISO 639-1>\"}. Do not translate or explain.";
     let mut detected = Vec::with_capacity(samples.len());
     for (index, sample) in samples.iter().enumerate() {
-        let raw = client
-            .complete(system, sample)
-            .await
-            .map_err(|error| format!("language detection sample {} failed: {error}", index + 1))?;
-        let language = validate_language_response(&raw).map_err(|error| {
+        let mut language = None;
+        let mut last_error = String::new();
+        for attempt in 0..=max_retries {
+            match client.complete(system, sample).await {
+                Ok(raw) => match validate_language_response(&raw) {
+                    Ok(value) => {
+                        language = Some(value);
+                        break;
+                    }
+                    Err(error) => last_error = error,
+                },
+                Err(error) => last_error = error,
+            }
+            if attempt < max_retries {
+                tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
+            }
+        }
+        let language = language.ok_or_else(|| {
             format!(
-                "language detection sample {} returned invalid output: {error}",
+                "language detection sample {} failed after {max_retries} retries: {last_error}",
                 index + 1
             )
         })?;
@@ -396,6 +462,7 @@ mod tests {
                 id: "chapter-1".to_string(),
                 title: "Chapter 1".to_string(),
                 status: ItemStatus::Pending,
+                meta: serde_json::json!({}),
                 segments: vec![Segment {
                     id: "segment-1".to_string(),
                     ordinal: 0,
@@ -467,7 +534,7 @@ mod tests {
         ]);
         let document = document_with_source(&"日本語の文章です。".repeat(150));
         assert_eq!(
-            detect_source_language(&client, &document)
+            detect_source_language(&client, &document, 0)
                 .await
                 .expect("language detection"),
             "ja"
@@ -482,7 +549,7 @@ mod tests {
             Ok(r#"{"language":"ja"}"#.to_string()),
         ]);
         let document = document_with_source(&"sample text ".repeat(200));
-        let error = detect_source_language(&client, &document)
+        let error = detect_source_language(&client, &document, 0)
             .await
             .expect_err("disagreement must fail");
         assert!(error.contains("samples disagree"));

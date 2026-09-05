@@ -239,6 +239,13 @@ pub fn write_chapter(
     write_chapter_at(&project_dir(state_dir, &project.id), chapter)
 }
 
+pub fn save_project(state_dir: &Path, project: &ProjectState) -> Result<(), String> {
+    write_json_atomic(
+        &project_dir(state_dir, &project.id).join("project.json"),
+        project,
+    )
+}
+
 fn write_chapter_at(project_dir: &Path, chapter: &Chapter) -> Result<(), String> {
     write_json_atomic(
         &project_dir
@@ -248,14 +255,14 @@ fn write_chapter_at(project_dir: &Path, chapter: &Chapter) -> Result<(), String>
     )
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
     let contents = fs::read_to_string(path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     serde_json::from_str(&contents)
         .map_err(|error| format!("invalid JSON in {}: {error}", path.display()))
 }
 
-fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
+pub(crate) fn write_json_atomic<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| "state path has no parent".to_string())?;
@@ -336,6 +343,7 @@ mod tests {
                 id: "chapter-1-test".to_string(),
                 title: "Chapter 1".to_string(),
                 status: ItemStatus::Pending,
+                meta: serde_json::json!({}),
                 segments: Vec::new(),
             }],
         }

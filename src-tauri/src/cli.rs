@@ -1,3 +1,4 @@
+use crate::analysis;
 use crate::config::{self, AppConfig};
 use crate::llm::{self, MockClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, ProjectStatus};
@@ -41,6 +42,8 @@ struct InitArgs {
     max_segment_chars: Option<usize>,
     #[arg(long)]
     mock: bool,
+    #[arg(long)]
+    force_analysis: bool,
 }
 
 #[derive(Debug, Args)]
@@ -114,45 +117,57 @@ async fn execute(cli: Cli) -> Result<i32, String> {
                     args.input.display()
                 ));
             }
-            if let Ok(project) = state::load_for_source(&state_dir, &args.input) {
-                state::append_log(&state_dir, &project, "init_exists", serde_json::json!({}))?;
-                println!(
-                    "already initialized project {} ({} chapters, source language {}, target language {})",
-                    project.id,
-                    project.chapters_total,
-                    project.source_language,
-                    project.target_language
-                );
-                return Ok(0);
+            let existing = state::load_for_source(&state_dir, &args.input).ok();
+            let (mut project, mut chapters, created) = if let Some(project) = existing {
+                let chapters = state::load_chapters(&state_dir, &project)?;
+                (project, chapters, false)
+            } else {
+                let requested_language = args
+                    .source_language
+                    .as_deref()
+                    .unwrap_or(&config.language.source);
+                let max_segment_chars = args
+                    .max_segment_chars
+                    .unwrap_or(config.segment.max_chars_per_segment);
+                let mut document = parser::parse_document(
+                    &args.input,
+                    Some(requested_language),
+                    max_segment_chars,
+                )?;
+                document.metadata.target_language = config.language.target.clone();
+                let initialized =
+                    state::initialize(&state_dir, &args.input, &document, max_segment_chars)?;
+                let chapters = state::load_chapters(&state_dir, &initialized.project)?;
+                (initialized.project, chapters, initialized.created)
+            };
+            if let Some(source_language) = args.source_language {
+                project.source_language = source_language;
+                state::save_project(&state_dir, &project)?;
             }
-            let requested_language = args
-                .source_language
-                .as_deref()
-                .unwrap_or(&config.language.source);
-            let max_segment_chars = args
-                .max_segment_chars
-                .unwrap_or(config.segment.max_chars_per_segment);
-            let mut document =
-                parser::parse_document(&args.input, Some(requested_language), max_segment_chars)?;
-            if requested_language == "auto" {
-                let client = build_client(&config, args.mock)?;
-                document.metadata.source_language =
-                    llm::detect_source_language(client.as_ref(), &document).await?;
-            }
-            document.metadata.target_language = config.language.target.clone();
-            let initialized =
-                state::initialize(&state_dir, &args.input, &document, max_segment_chars)?;
+            let client = build_client(&config, args.mock)?;
+            analysis::prepare(
+                client.as_ref(),
+                &state_dir,
+                &mut project,
+                &mut chapters,
+                config.analysis.full_book,
+                args.force_analysis,
+                config.llm.max_retries,
+            )
+            .await?;
+            state::append_log(
+                &state_dir,
+                &project,
+                "analysis_completed",
+                serde_json::json!({ "full_book": config.analysis.full_book }),
+            )?;
             println!(
                 "{} project {} ({} chapters, source language {}, target language {})",
-                if initialized.created {
-                    "initialized"
-                } else {
-                    "already initialized"
-                },
-                initialized.project.id,
-                initialized.project.chapters_total,
-                initialized.project.source_language,
-                initialized.project.target_language
+                if created { "initialized" } else { "prepared" },
+                project.id,
+                project.chapters_total,
+                project.source_language,
+                project.target_language
             );
             Ok(0)
         }

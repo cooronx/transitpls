@@ -20,6 +20,7 @@ pub struct Chapter {
     pub id: String,
     pub title: String,
     pub status: ItemStatus,
+    pub meta: Value,
     pub segments: Vec<Segment>,
 }
 

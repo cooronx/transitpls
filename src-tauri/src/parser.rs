@@ -194,6 +194,7 @@ fn build_chapter_from_blocks(
         id: chapter_id,
         title,
         status: ItemStatus::Pending,
+        meta: serde_json::json!({}),
         segments,
     }
 }
