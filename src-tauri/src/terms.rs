@@ -342,7 +342,7 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
         "target": target_text,
     })
     .to_string();
-    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain source, target, reading, type, gender, aliases, first_chapter, note, and status=\"ok\". Return an empty array when nothing qualifies.";
+    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain string source and target, nullable string reading and gender, string-array aliases, integer first_chapter, nullable string note, and status=\"ok\". The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Return an empty array when nothing qualifies.";
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(system, &user).await {
