@@ -10,6 +10,7 @@ use std::path::Path;
 use zip::ZipArchive;
 
 const DEFAULT_MAX_SEGMENT_CHARS: usize = 2_000;
+const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
 
 type OpfData = (
     Option<String>,
@@ -22,6 +23,19 @@ type OpfData = (
 struct NavigationEntry {
     href: String,
     title: String,
+}
+
+#[derive(Debug)]
+pub struct EpubCover {
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct CoverManifestItem {
+    href: String,
+    media_type: String,
+    is_epub3_cover: bool,
 }
 
 pub fn parse_document(
@@ -57,6 +71,44 @@ pub fn parse_document(
         },
         chapters,
     })
+}
+
+pub fn extract_epub_cover(path: &Path) -> Result<Option<EpubCover>, String> {
+    let is_epub = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("epub"));
+    if !is_epub {
+        return Ok(None);
+    }
+
+    let file = File::open(path).map_err(|error| format!("failed to open EPUB: {error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("invalid EPUB zip: {error}"))?;
+    let container = read_zip_entry(&mut archive, "META-INF/container.xml")?;
+    let opf_path = parse_rootfile_path(&container)?;
+    let opf = read_zip_entry(&mut archive, &opf_path)?;
+    let Some((href, media_type)) = parse_cover_reference(&opf)? else {
+        return Ok(None);
+    };
+    let opf_dir = Path::new(&opf_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let cover_path = normalize_zip_path(opf_dir, href.split('#').next().unwrap_or(&href));
+    let mut entry = archive
+        .by_name(&cover_path)
+        .map_err(|error| format!("failed to read EPUB cover {cover_path}: {error}"))?;
+    if entry.size() > MAX_COVER_BYTES {
+        return Ok(None);
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("failed to read EPUB cover {cover_path}: {error}"))?;
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(EpubCover { media_type, bytes }))
 }
 
 fn parse_txt(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, String), String> {
@@ -558,6 +610,75 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
     Ok((title, manifest, spine, navigation_href))
 }
 
+fn parse_cover_reference(xml: &str) -> Result<Option<(String, String)>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut epub2_cover_id = None;
+    let mut manifest = HashMap::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                let name = local_name(event.name().as_ref());
+                let attributes = event
+                    .attributes()
+                    .flatten()
+                    .filter_map(|attribute| {
+                        let key = local_name(attribute.key.as_ref());
+                        attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .ok()
+                            .map(|value| (key, value.into_owned()))
+                    })
+                    .collect::<HashMap<_, _>>();
+                if name == "meta" && attributes.get("name").is_some_and(|value| value == "cover") {
+                    epub2_cover_id = attributes.get("content").cloned();
+                } else if name == "item" {
+                    let (Some(id), Some(href), Some(media_type)) = (
+                        attributes.get("id"),
+                        attributes.get("href"),
+                        attributes.get("media-type"),
+                    ) else {
+                        buffer.clear();
+                        continue;
+                    };
+                    if is_supported_cover_media_type(media_type) {
+                        manifest.insert(
+                            id.clone(),
+                            CoverManifestItem {
+                                href: href.clone(),
+                                media_type: media_type.clone(),
+                                is_epub3_cover: attributes.get("properties").is_some_and(|value| {
+                                    value
+                                        .split_whitespace()
+                                        .any(|property| property == "cover-image")
+                                }),
+                            },
+                        );
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("invalid EPUB package metadata: {error}")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    let item = manifest
+        .values()
+        .find(|item| item.is_epub3_cover)
+        .or_else(|| epub2_cover_id.as_ref().and_then(|id| manifest.get(id)));
+    Ok(item.map(|item| (item.href.clone(), item.media_type.clone())))
+}
+
+fn is_supported_cover_media_type(value: &str) -> bool {
+    matches!(
+        value,
+        "image/jpeg" | "image/png" | "image/gif" | "image/webp"
+    )
+}
+
 fn parse_navigation(xml: &str) -> Result<Vec<NavigationEntry>, String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -693,7 +814,10 @@ fn hash_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_document, parse_opf, parse_xhtml_blocks, split_long_text, SegmentKind};
+    use super::{
+        extract_epub_cover, parse_cover_reference, parse_document, parse_opf, parse_xhtml_blocks,
+        split_long_text, SegmentKind,
+    };
     use std::fs::{self, File};
     use std::io::Write;
     use std::path::Path;
@@ -758,6 +882,68 @@ mod tests {
         assert!(manifest.contains_key("one"));
         assert_eq!(spine, vec!["one"]);
         assert!(navigation.is_none());
+    }
+
+    #[test]
+    fn recognizes_epub2_cover_metadata() {
+        let xml = r#"
+            <package>
+              <metadata><meta name="cover" content="legacy-cover"/></metadata>
+              <manifest>
+                <item id="legacy-cover" href="images/front.png" media-type="image/png"/>
+              </manifest>
+            </package>
+        "#;
+
+        let cover = parse_cover_reference(xml)
+            .expect("valid OPF")
+            .expect("cover should be present");
+
+        assert_eq!(
+            cover,
+            ("images/front.png".to_string(), "image/png".to_string())
+        );
+    }
+
+    #[test]
+    fn extracts_epub3_cover_image() {
+        let root = std::env::temp_dir().join(format!(
+            "transitpls-parser-cover-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::create_dir_all(&root).expect("fixture directory should be created");
+        let path = root.join("book.epub");
+        let file = File::create(&path).expect("fixture EPUB should be created");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        for (name, contents) in [
+            (
+                "META-INF/container.xml",
+                br#"<container><rootfiles><rootfile full-path="OPS/package.opf"/></rootfiles></container>"#.as_slice(),
+            ),
+            (
+                "OPS/package.opf",
+                br#"<package><manifest><item id="cover" href="images/cover.jpg" media-type="image/jpeg" properties="cover-image"/></manifest></package>"#.as_slice(),
+            ),
+            ("OPS/images/cover.jpg", &[0xff, 0xd8, 0xff, 0xd9]),
+        ] {
+            writer
+                .start_file(name, options)
+                .expect("fixture entry should start");
+            writer
+                .write_all(contents)
+                .expect("fixture entry should be written");
+        }
+        writer.finish().expect("fixture EPUB should finish");
+
+        let cover = extract_epub_cover(&path)
+            .expect("EPUB should parse")
+            .expect("cover should be extracted");
+
+        assert_eq!(cover.media_type, "image/jpeg");
+        assert_eq!(cover.bytes, [0xff, 0xd8, 0xff, 0xd9]);
+        fs::remove_dir_all(root).expect("fixture should be removed");
     }
 
     #[test]

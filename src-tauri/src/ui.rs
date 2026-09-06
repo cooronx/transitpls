@@ -2,8 +2,10 @@ use crate::config::{self, AppConfig};
 use crate::export::{self, ExportFormat};
 use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
+use crate::parser;
 use crate::state;
 use crate::terms::{Term, TermCandidate, TermStore};
+use base64::Engine;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
@@ -25,7 +27,14 @@ pub struct Bootstrap {
     credential: CredentialStatus,
     config_path: Option<String>,
     state_dir: String,
-    projects: Vec<ProjectState>,
+    projects: Vec<ProjectSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectSummary {
+    #[serde(flatten)]
+    project: ProjectState,
+    cover_data_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +68,7 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
     let loaded = config::load(None)?;
     let mut projects = list_projects(&loaded.state_dir)?;
     projects.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    let projects = projects.into_iter().map(project_summary).collect();
     Ok(Bootstrap {
         credential: credential_status(&loaded.value)?,
         config: loaded.value,
@@ -66,6 +76,20 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
         state_dir: loaded.state_dir.to_string_lossy().into_owned(),
         projects,
     })
+}
+
+fn project_summary(project: ProjectState) -> ProjectSummary {
+    let cover_data_url = parser::extract_epub_cover(Path::new(&project.source_path))
+        .ok()
+        .flatten()
+        .map(|cover| {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(cover.bytes);
+            format!("data:{};base64,{encoded}", cover.media_type)
+        });
+    ProjectSummary {
+        project,
+        cover_data_url,
+    }
 }
 
 #[tauri::command]
