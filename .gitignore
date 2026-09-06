@@ -12,6 +12,7 @@ dist
 dist-ssr
 *.local
 projects/
+design/
 
 # Editor directories and files
 .vscode/*
