@@ -124,7 +124,7 @@ export default function App() {
     <Header project={detail?.project} projects={bootstrap?.projects??[]} model={bootstrap?.config.llm.model??"—"} search={search} onSearch={setSearch} onProject={(id)=>void selectProject(id)} onTranslate={()=>translate()} busy={busy} onCancel={()=>void cancelTask()} disabled={!detail}/>
     <div className="workspace-row">
       <ActivityBar view={view} onChange={setView}/>
-      {view!=="settings"&&view!=="review"&&<Explorer projects={bootstrap?.projects??[]} detail={detail} chapterIndex={chapterIndex} onChapter={setChapterIndex} onProject={selectProject} onImport={importFile}/>}
+      {view==="workspace"&&<Explorer projects={bootstrap?.projects??[]} detail={detail} chapterIndex={chapterIndex} onChapter={setChapterIndex} onProject={selectProject} onImport={importFile}/>}
       <main className="main-panel">
         {view==="workspace"&&detail&&chapter&&<Workspace detail={detail} chapter={chapter} chapterIndex={chapterIndex} segments={segments} tray={tray} setTray={setTray} translating={busy==="翻译"} onTranslate={()=>translate(chapterIndex)} onExport={exportBook}/>}
         {view==="projects"&&<ProjectGallery projects={bootstrap?.projects??[]} busy={Boolean(busy)} onSelect={selectProject} onDelete={deleteProject} onImport={importFile}/>}
