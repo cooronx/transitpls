@@ -11,7 +11,18 @@ use zip::ZipArchive;
 
 const DEFAULT_MAX_SEGMENT_CHARS: usize = 2_000;
 
-type OpfData = (Option<String>, HashMap<String, String>, Vec<String>);
+type OpfData = (
+    Option<String>,
+    HashMap<String, String>,
+    Vec<String>,
+    Option<String>,
+);
+
+#[derive(Debug)]
+struct NavigationEntry {
+    href: String,
+    title: String,
+}
 
 pub fn parse_document(
     path: &Path,
@@ -97,9 +108,24 @@ fn parse_epub(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, St
     let opf_dir = Path::new(&opf_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let (title, manifest, spine) = parse_opf(&opf)?;
-    let mut chapters = Vec::new();
-    for (ordinal, idref) in spine.into_iter().enumerate() {
+    let (title, manifest, spine, navigation_href) = parse_opf(&opf)?;
+    let navigation = if let Some(href) = navigation_href {
+        let path = normalize_zip_path(opf_dir, &href);
+        let document = read_zip_entry(&mut archive, &path)?;
+        let navigation_dir = Path::new(&path).parent().unwrap_or_else(|| Path::new(""));
+        parse_navigation(&document)?
+            .into_iter()
+            .map(|entry| {
+                let href = entry.href.split('#').next().unwrap_or(&entry.href);
+                (normalize_zip_path(navigation_dir, href), entry.title)
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
+
+    let mut documents = Vec::new();
+    for idref in spine {
         let Some(href) = manifest.get(&idref) else {
             continue;
         };
@@ -110,23 +136,30 @@ fn parse_epub(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, St
         if blocks.is_empty() {
             blocks = fallback_xhtml_blocks(&html);
         }
-        let chapter_title = blocks
-            .iter()
-            .find(|(_, kind, text)| matches!(kind, SegmentKind::Heading) && !text.is_empty())
-            .map(|(_, _, text)| text.clone())
-            .unwrap_or_else(|| format!("Chapter {}", ordinal + 1));
         let content = blocks
             .into_iter()
             .filter(|(_, _, text)| !text.trim().is_empty())
             .map(|(_, kind, text)| (kind, text))
             .collect::<Vec<_>>();
-        chapters.push(build_chapter_from_blocks(
-            ordinal,
-            chapter_title,
-            content,
-            max_chars,
-        ));
+        documents.push((entry_path, content));
     }
+
+    let chapters = if navigation.is_empty() {
+        documents
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, (_, content))| {
+                let chapter_title = content
+                    .iter()
+                    .find(|(kind, text)| matches!(kind, SegmentKind::Heading) && !text.is_empty())
+                    .map(|(_, text)| text.clone())
+                    .unwrap_or_else(|| format!("Chapter {}", ordinal + 1));
+                build_chapter_from_blocks(ordinal, chapter_title, content, max_chars)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        group_spine_by_navigation(documents, &navigation, max_chars)
+    };
     if chapters.is_empty() {
         return Err("EPUB spine contains no readable chapters".to_string());
     }
@@ -135,6 +168,52 @@ fn parse_epub(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, St
         chapters,
         "epub".to_string(),
     ))
+}
+
+fn group_spine_by_navigation(
+    documents: Vec<(String, Vec<(SegmentKind, String)>)>,
+    navigation: &HashMap<String, String>,
+    max_chars: usize,
+) -> Vec<Chapter> {
+    let mut chapters = Vec::new();
+    let mut current: Option<(String, Vec<(SegmentKind, String)>)> = None;
+    for (path, content) in documents {
+        if let Some(title) = navigation.get(&path) {
+            if let Some((title, blocks)) = current.take() {
+                chapters.push(build_chapter_from_blocks(
+                    chapters.len(),
+                    title,
+                    blocks,
+                    max_chars,
+                ));
+            }
+            current = Some((title.clone(), Vec::new()));
+        }
+        if let Some((_, blocks)) = current.as_mut() {
+            blocks.extend(content);
+        } else if !content.is_empty() {
+            let title = content
+                .iter()
+                .find(|(kind, text)| matches!(kind, SegmentKind::Heading) && !text.is_empty())
+                .map(|(_, text)| text.clone())
+                .unwrap_or_else(|| format!("Chapter {}", chapters.len() + 1));
+            chapters.push(build_chapter_from_blocks(
+                chapters.len(),
+                title,
+                content,
+                max_chars,
+            ));
+        }
+    }
+    if let Some((title, blocks)) = current {
+        chapters.push(build_chapter_from_blocks(
+            chapters.len(),
+            title,
+            blocks,
+            max_chars,
+        ));
+    }
+    chapters
 }
 
 fn build_chapter(
@@ -355,7 +434,7 @@ fn fallback_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String)> {
 
 pub(crate) fn block_kind(name: &str) -> Option<SegmentKind> {
     match name {
-        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "title" => Some(SegmentKind::Heading),
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(SegmentKind::Heading),
         "blockquote" | "q" => Some(SegmentKind::Quote),
         "p" | "li" | "pre" | "div" => Some(SegmentKind::Paragraph),
         _ => None,
@@ -404,6 +483,7 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
     let mut title = None;
     let mut manifest = HashMap::new();
     let mut spine = Vec::new();
+    let mut navigation_href = None;
     let mut current_element = String::new();
     loop {
         match reader.read_event_into(&mut buffer) {
@@ -413,6 +493,7 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                     let mut id = None;
                     let mut href = None;
                     let mut media_type = None;
+                    let mut properties = None;
                     for attribute in event.attributes().flatten() {
                         match attribute.key.as_ref() {
                             "id" => {
@@ -433,11 +514,22 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                                     .ok()
                                     .map(|v| v.into_owned())
                             }
+                            "properties" => {
+                                properties = attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            }
                             _ => {}
                         }
                     }
                     if let (Some(id), Some(href), Some(media_type)) = (id, href, media_type) {
                         if media_type == "application/xhtml+xml" || media_type == "text/html" {
+                            if properties.as_deref().is_some_and(|value| {
+                                value.split_whitespace().any(|item| item == "nav")
+                            }) {
+                                navigation_href = Some(href.clone());
+                            }
                             manifest.insert(id, href);
                         }
                     }
@@ -463,7 +555,76 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
         }
         buffer.clear();
     }
-    Ok((title, manifest, spine))
+    Ok((title, manifest, spine, navigation_href))
+}
+
+fn parse_navigation(xml: &str) -> Result<Vec<NavigationEntry>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut in_toc = false;
+    let mut current_link: Option<NavigationEntry> = None;
+    let mut entries = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref());
+                if name == "nav" {
+                    in_toc = event.attributes().flatten().any(|attribute| {
+                        local_name(attribute.key.as_ref()) == "type"
+                            && attribute
+                                .normalized_value(XmlVersion::Implicit1_0)
+                                .is_ok_and(|value| {
+                                    value.split_whitespace().any(|item| item == "toc")
+                                })
+                    });
+                } else if in_toc && name == "a" {
+                    let href = event.attributes().flatten().find_map(|attribute| {
+                        (local_name(attribute.key.as_ref()) == "href")
+                            .then(|| {
+                                attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|value| value.into_owned())
+                            })
+                            .flatten()
+                    });
+                    if let Some(href) = href {
+                        current_link = Some(NavigationEntry {
+                            href,
+                            title: String::new(),
+                        });
+                    }
+                }
+            }
+            Ok(Event::Text(event)) if current_link.is_some() => {
+                if let Some(link) = current_link.as_mut() {
+                    let value = unescape(event.as_ref())
+                        .map(|value| value.into_owned())
+                        .unwrap_or_default();
+                    if should_separate_text(&link.title, &value) {
+                        link.title.push(' ');
+                    }
+                    link.title.push_str(value.trim());
+                }
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref());
+                if name == "a" {
+                    if let Some(link) = current_link.take().filter(|link| !link.title.is_empty()) {
+                        entries.push(link);
+                    }
+                } else if name == "nav" && in_toc {
+                    in_toc = false;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("invalid EPUB navigation document: {error}")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(entries)
 }
 
 fn read_zip_entry<R: Read + io::Seek>(
@@ -532,8 +693,12 @@ fn hash_text(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_opf, parse_xhtml_blocks, split_long_text, SegmentKind};
+    use super::{parse_document, parse_opf, parse_xhtml_blocks, split_long_text, SegmentKind};
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::path::Path;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
 
     #[test]
     fn split_long_text_respects_unicode_character_limit() {
@@ -554,13 +719,14 @@ mod tests {
               <spine><itemref idref="first"/><itemref idref="second"/></spine>
             </package>
         "#;
-        let (title, manifest, spine) = parse_opf(xml).expect("valid OPF");
+        let (title, manifest, spine, navigation) = parse_opf(xml).expect("valid OPF");
         assert_eq!(title.as_deref(), Some("Book"));
         assert_eq!(
             manifest.get("first").map(String::as_str),
             Some("first.xhtml")
         );
         assert_eq!(spine, vec!["first", "second"]);
+        assert!(navigation.is_none());
     }
 
     #[test]
@@ -587,9 +753,74 @@ mod tests {
               <opf:spine><opf:itemref idref="one"/></opf:spine>
             </opf:package>
         "#;
-        let (title, manifest, spine) = parse_opf(xml).expect("valid prefixed OPF");
+        let (title, manifest, spine, navigation) = parse_opf(xml).expect("valid prefixed OPF");
         assert_eq!(title.as_deref(), Some("Book"));
         assert!(manifest.contains_key("one"));
         assert_eq!(spine, vec!["one"]);
+        assert!(navigation.is_none());
+    }
+
+    #[test]
+    fn uses_epub_navigation_to_group_spine_documents() {
+        let root = std::env::temp_dir().join(format!(
+            "transitpls-parser-nav-{}-{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        fs::create_dir_all(&root).expect("fixture directory should be created");
+        let path = root.join("book.epub");
+        let file = File::create(&path).expect("fixture EPUB should be created");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        for (name, contents) in [
+            (
+                "META-INF/container.xml",
+                r#"<container><rootfiles><rootfile full-path="OEBPS/package.opf"/></rootfiles></container>"#,
+            ),
+            (
+                "OEBPS/package.opf",
+                r#"<package xmlns:dc="http://purl.org/dc/elements/1.1/"><metadata><dc:title>Book</dc:title></metadata><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="first-start" href="first-start.xhtml" media-type="application/xhtml+xml"/><item id="first-body" href="first-body.xhtml" media-type="application/xhtml+xml"/><item id="second" href="second.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="first-start"/><itemref idref="first-body"/><itemref idref="second"/></spine></package>"#,
+            ),
+            (
+                "OEBPS/nav.xhtml",
+                r#"<html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="first-start.xhtml#one">First chapter</a></li><li><a href="second.xhtml#two">Second chapter</a></li></ol></nav></body></html>"#,
+            ),
+            (
+                "OEBPS/first-start.xhtml",
+                r#"<html><head><title>Book</title></head><body><p id="one">First opening</p></body></html>"#,
+            ),
+            (
+                "OEBPS/first-body.xhtml",
+                r#"<html><head><title>Book</title></head><body><p>First continuation</p></body></html>"#,
+            ),
+            (
+                "OEBPS/second.xhtml",
+                r#"<html><head><title>Book</title></head><body><p id="two">Second body</p></body></html>"#,
+            ),
+        ] {
+            writer
+                .start_file(name, options)
+                .expect("fixture entry should start");
+            writer
+                .write_all(contents.as_bytes())
+                .expect("fixture entry should be written");
+        }
+        writer.finish().expect("fixture EPUB should finish");
+
+        let document = parse_document(&path, Some("en"), 1_200).expect("EPUB should parse");
+
+        assert_eq!(document.chapters.len(), 2);
+        assert_eq!(document.chapters[0].title, "First chapter");
+        assert_eq!(document.chapters[1].title, "Second chapter");
+        assert!(document.chapters[0]
+            .segments
+            .iter()
+            .any(|segment| segment.source == "First continuation"));
+        assert!(document
+            .chapters
+            .iter()
+            .flat_map(|chapter| &chapter.segments)
+            .all(|segment| segment.source != "Book"));
+        fs::remove_dir_all(root).expect("fixture should be removed");
     }
 }
