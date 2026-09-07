@@ -166,18 +166,13 @@ fn parse_epub(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, St
         let path = normalize_zip_path(opf_dir, &href);
         let document = read_zip_entry(&mut archive, &path)?;
         let navigation_dir = Path::new(&path).parent().unwrap_or_else(|| Path::new(""));
-        if href.ends_with(".ncx") {
-            parse_ncx_navigation(&document)?
-        } else {
-            parse_navigation(&document)?
-        }
-        .into_iter()
-        .map(|entry| {
-            let href = entry.href.split('#').next().unwrap_or(&entry.href);
-            (normalize_zip_path(navigation_dir, href), entry.title)
-        })
-        .filter(|(_, title)| !is_contents_title(title))
-        .collect::<HashMap<_, _>>()
+        parse_chapter_navigation(&document, href.ends_with(".ncx"))?
+            .into_iter()
+            .map(|(href, title)| {
+                let href = href.split('#').next().unwrap_or(&href);
+                (normalize_zip_path(navigation_dir, href), title)
+            })
+            .collect::<HashMap<_, _>>()
     } else {
         HashMap::new()
     };
@@ -825,6 +820,22 @@ fn parse_ncx_navigation(xml: &str) -> Result<Vec<NavigationEntry>, String> {
         buffer.clear();
     }
     Ok(entries)
+}
+
+pub(crate) fn parse_chapter_navigation(
+    xml: &str,
+    is_ncx: bool,
+) -> Result<Vec<(String, String)>, String> {
+    let entries = if is_ncx {
+        parse_ncx_navigation(xml)?
+    } else {
+        parse_navigation(xml)?
+    };
+    Ok(entries
+        .into_iter()
+        .filter(|entry| !is_contents_title(&entry.title))
+        .map(|entry| (entry.href, entry.title))
+        .collect())
 }
 
 fn is_contents_title(title: &str) -> bool {

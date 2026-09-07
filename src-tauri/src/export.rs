@@ -4,7 +4,7 @@ use crate::state::ExportSnapshot;
 use quick_xml::escape::escape;
 use quick_xml::events::{BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -136,7 +136,7 @@ fn refill_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
     let opf_dir = Path::new(&package.opf_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let mut chapter_paths = Vec::new();
+    let mut document_paths = Vec::new();
     for idref in &package.spine {
         let Some(item) = package.manifest.get(idref) else {
             continue;
@@ -144,14 +144,21 @@ fn refill_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
         if !is_xhtml(item) {
             continue;
         }
-        chapter_paths.push(parser::normalize_zip_path(
+        document_paths.push(parser::normalize_zip_path(
             opf_dir,
             item.href.split('#').next().unwrap_or(&item.href),
         ));
     }
+    let chapter_starts = read_chapter_starts(&mut source, &package, opf_dir)?;
+    let document_count = document_paths.len();
+    let mut chapter_paths = group_chapter_paths(document_paths, &chapter_starts);
+    if !chapter_starts.is_empty() {
+        chapter_paths = retain_readable_groups(&mut source, chapter_paths)?;
+    }
     if chapter_paths.len() != snapshot.chapters.len() {
         return Err(format!(
-            "EPUB spine has {} readable XHTML documents but the snapshot has {} chapters",
+            "EPUB spine has {} readable XHTML documents grouped into {} chapters, but the snapshot has {} chapters",
+            document_count,
             chapter_paths.len(),
             snapshot.chapters.len()
         ));
@@ -159,25 +166,40 @@ fn refill_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
 
     let mut replacements = HashMap::<String, Vec<u8>>::new();
     let mut titles_by_path = HashMap::new();
-    for ((chapter_index, path), chapter) in chapter_paths.iter().enumerate().zip(&snapshot.chapters)
+    for ((chapter_index, paths), chapter) in
+        chapter_paths.iter().enumerate().zip(&snapshot.chapters)
     {
-        let xhtml = read_entry_string(&mut source, path)?;
-        let block_replacements = align_chapter(
-            chapter_index,
-            chapter,
-            &xhtml,
-            snapshot.project.max_segment_chars,
-        )?;
-        replacements.insert(path.clone(), rewrite_xhtml(&xhtml, &block_replacements)?);
-        titles_by_path.insert(
-            path.clone(),
-            normalize_chinese_punctuation(
-                chapter
-                    .target_title
-                    .as_deref()
-                    .expect("validated chapter title should exist"),
-            ),
-        );
+        let mut segments = chapter.segments.iter().collect::<Vec<_>>();
+        segments.sort_by_key(|segment| segment.ordinal);
+        let mut segment_index = 0;
+        for path in paths {
+            let xhtml = read_entry_string(&mut source, path)?;
+            let block_replacements = align_chapter_document(
+                chapter_index,
+                &segments,
+                &mut segment_index,
+                &xhtml,
+                snapshot.project.max_segment_chars,
+            )?;
+            replacements.insert(path.clone(), rewrite_xhtml(&xhtml, &block_replacements)?);
+        }
+        if segment_index != segments.len() {
+            return Err(format!(
+                "EPUB alignment failed in chapter {chapter_index}: {} saved segments were not matched",
+                segments.len() - segment_index
+            ));
+        }
+        if let Some(path) = paths.first() {
+            titles_by_path.insert(
+                path.clone(),
+                normalize_chinese_punctuation(
+                    chapter
+                        .target_title
+                        .as_deref()
+                        .expect("validated chapter title should exist"),
+                ),
+            );
+        }
     }
 
     for item in package.manifest.values() {
@@ -207,6 +229,101 @@ fn refill_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
         replace_element_text(&opf, "language", &snapshot.project.target_language)?,
     );
     copy_epub_with_replacements(source, &replacements)
+}
+
+fn read_chapter_starts<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    package: &EpubPackage,
+    opf_dir: &Path,
+) -> Result<HashSet<String>, String> {
+    let navigation = package
+        .manifest
+        .values()
+        .find(|item| {
+            item.properties
+                .split_whitespace()
+                .any(|property| property == "nav")
+        })
+        .or_else(|| {
+            package
+                .manifest
+                .values()
+                .find(|item| item.media_type == "application/x-dtbncx+xml")
+        });
+    let Some(navigation) = navigation else {
+        return Ok(HashSet::new());
+    };
+    let navigation_path = parser::normalize_zip_path(
+        opf_dir,
+        navigation
+            .href
+            .split('#')
+            .next()
+            .unwrap_or(&navigation.href),
+    );
+    let navigation_dir = Path::new(&navigation_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let document = read_entry_string(archive, &navigation_path)?;
+    Ok(parser::parse_chapter_navigation(
+        &document,
+        navigation.media_type == "application/x-dtbncx+xml",
+    )?
+    .into_iter()
+    .map(|(href, _)| {
+        parser::normalize_zip_path(navigation_dir, href.split('#').next().unwrap_or(&href))
+    })
+    .collect())
+}
+
+fn group_chapter_paths(
+    document_paths: Vec<String>,
+    chapter_starts: &HashSet<String>,
+) -> Vec<Vec<String>> {
+    if chapter_starts.is_empty() {
+        return document_paths.into_iter().map(|path| vec![path]).collect();
+    }
+    let mut groups = Vec::new();
+    let mut current = None::<Vec<String>>;
+    for path in document_paths {
+        if chapter_starts.contains(&path) {
+            if let Some(paths) = current.take() {
+                groups.push(paths);
+            }
+            current = Some(Vec::new());
+        }
+        if let Some(paths) = current.as_mut() {
+            paths.push(path);
+        }
+    }
+    if let Some(paths) = current {
+        groups.push(paths);
+    }
+    groups
+}
+
+fn retain_readable_groups<R: Read + std::io::Seek>(
+    archive: &mut ZipArchive<R>,
+    groups: Vec<Vec<String>>,
+) -> Result<Vec<Vec<String>>, String> {
+    let mut readable = Vec::new();
+    for group in groups {
+        let mut has_content = false;
+        for path in &group {
+            let xhtml = read_entry_string(archive, path)?;
+            if parser::parse_xhtml_blocks(&xhtml)
+                .into_iter()
+                .any(|(_, _, text)| !text.trim().is_empty())
+            {
+                has_content = true;
+                break;
+            }
+        }
+        if has_content {
+            readable.push(group);
+        }
+    }
+    Ok(readable)
 }
 
 fn read_epub_package<R: Read + std::io::Seek>(
@@ -305,24 +422,22 @@ fn is_xhtml(item: &ManifestItem) -> bool {
     item.media_type == "application/xhtml+xml" || item.media_type == "text/html"
 }
 
-fn align_chapter(
+fn align_chapter_document(
     chapter_index: usize,
-    chapter: &Chapter,
+    segments: &[&crate::model::Segment],
+    segment_index: &mut usize,
     xhtml: &str,
     max_chars: usize,
 ) -> Result<HashMap<usize, String>, String> {
     let blocks = parser::parse_xhtml_blocks(xhtml);
-    let mut segments = chapter.segments.iter().collect::<Vec<_>>();
-    segments.sort_by_key(|segment| segment.ordinal);
-    let mut segment_index = 0;
     let mut replacements = HashMap::new();
     for (block_ordinal, kind, source) in blocks
         .into_iter()
         .filter(|(_, _, source)| !source.trim().is_empty())
     {
         let chunks = parser::split_long_text(&source, max_chars);
-        let end = segment_index + chunks.len();
-        let Some(block_segments) = segments.get(segment_index..end) else {
+        let end = *segment_index + chunks.len();
+        let Some(block_segments) = segments.get(*segment_index..end) else {
             return Err(format!(
                 "EPUB alignment failed in chapter {chapter_index}: block {block_ordinal} has more source chunks than saved segments"
             ));
@@ -349,13 +464,7 @@ fn align_chapter(
             })
             .collect::<String>();
         replacements.insert(block_ordinal, translated);
-        segment_index = end;
-    }
-    if segment_index != segments.len() {
-        return Err(format!(
-            "EPUB alignment failed in chapter {chapter_index}: {} saved segments were not matched",
-            segments.len() - segment_index
-        ));
+        *segment_index = end;
     }
     Ok(replacements)
 }
@@ -1114,6 +1223,23 @@ mod tests {
         assert!(error.contains("EPUB alignment failed"));
     }
 
+    #[test]
+    fn epub_refill_handles_chapters_split_across_spine_documents() {
+        let mut snapshot = snapshot();
+        snapshot.project.source_file = "book.epub".to_string();
+        snapshot.chapters[0].segments[1].source = "Hello world!".to_string();
+        snapshot.source_bytes = grouped_source_epub();
+
+        let bytes = render_epub(&snapshot).expect("grouped EPUB should render");
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).expect("output should be a ZIP");
+        let opening = String::from_utf8(read_entry(&mut archive, "OEBPS/opening.xhtml"))
+            .expect("opening should be UTF-8");
+        let continuation = String::from_utf8(read_entry(&mut archive, "OEBPS/continuation.xhtml"))
+            .expect("continuation should be UTF-8");
+        assert!(opening.contains("<h1>第一章</h1>"));
+        assert!(continuation.contains("<p>你好， 世界！</p>"));
+    }
+
     fn source_epub() -> Vec<u8> {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer
@@ -1149,6 +1275,49 @@ mod tests {
             ),
             ("OEBPS/style.css", b"h1{}"),
             ("OEBPS/image.bin", b"image-bytes"),
+        ];
+        for (name, contents) in entries {
+            writer
+                .start_file(name, options)
+                .expect("entry should start");
+            writer.write_all(contents).expect("entry should write");
+        }
+        writer.finish().expect("EPUB should finish").into_inner()
+    }
+
+    fn grouped_source_epub() -> Vec<u8> {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "mimetype",
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .expect("mimetype should start");
+        writer
+            .write_all(b"application/epub+zip")
+            .expect("mimetype should write");
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
+        let entries: [(&str, &[u8]); 5] = [
+            (
+                "META-INF/container.xml",
+                br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>"#,
+            ),
+            (
+                "OEBPS/content.opf",
+                br#"<?xml version="1.0"?><package><manifest><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="opening" href="opening.xhtml" media-type="application/xhtml+xml"/><item id="continuation" href="continuation.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="opening"/><itemref idref="continuation"/></spine></package>"#,
+            ),
+            (
+                "OEBPS/nav.xhtml",
+                br#"<?xml version="1.0"?><html xmlns:epub="http://www.idpf.org/2007/ops"><body><nav epub:type="toc"><ol><li><a href="opening.xhtml">Chapter 1</a></li></ol></nav></body></html>"#,
+            ),
+            (
+                "OEBPS/opening.xhtml",
+                br#"<?xml version="1.0"?><html><body><h1>Chapter 1</h1></body></html>"#,
+            ),
+            (
+                "OEBPS/continuation.xhtml",
+                br#"<?xml version="1.0"?><html><body><p>Hello world!</p></body></html>"#,
+            ),
         ];
         for (name, contents) in entries {
             writer
