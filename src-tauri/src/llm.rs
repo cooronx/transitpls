@@ -109,18 +109,16 @@ impl TranslationClient for MockClient {
                     format!("mock client received invalid term extraction prompt: {error}")
                 })?;
             let source = request["source"].as_str().unwrap_or_default();
-            let chapter = request["chapter"].as_u64().unwrap_or_default();
             let terms = if source.contains("Alice") {
                 vec![serde_json::json!({
                     "source": "Alice",
-                    "target": "爱丽丝",
-                    "reading": null,
-                    "type": "person",
-                    "gender": null,
-                    "aliases": [],
-                    "first_chapter": chapter,
-                    "note": "stable mock extraction",
-                    "status": "ok"
+                    "proposed_target": if request["target"].as_str().unwrap_or_default().contains("爱丽丝") {"爱丽丝"} else {""},
+                    "category": "person",
+                    "variants": [],
+                    "evidence_count": 1,
+                    "contexts": [source],
+                    "confidence": 0.9,
+                    "reason": "stable mock extraction"
                 })]
             } else {
                 Vec::new()
@@ -527,7 +525,7 @@ struct TranslationPrompt<'a> {
     style: &'a [String],
     book_synopsis: Option<&'a str>,
     chapter_digest: Option<&'a str>,
-    terms: &'a [Term],
+    confirmed_terms: Vec<&'a Term>,
     recent_targets: &'a [RecentTarget],
     segments: Vec<NumberedSource<'a>>,
 }
@@ -546,13 +544,17 @@ pub fn build_prompts(
     context: &TranslationContext<'_>,
 ) -> (String, String) {
     let system = format!(
-        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in numbered input order and never omit an item."
+        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Preserve meaning, tone, formatting markers, and paragraph boundaries. CONFIRMED TERMINOLOGY CONSTRAINTS: confirmed_terms is a separate authoritative glossary. Always use its exact target for the source and unambiguous variants; never rewrite or replace a confirmed translation. These constraints override style preferences. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in numbered input order and never omit an item."
     );
     let user = serde_json::to_string(&TranslationPrompt {
         style: context.style_guide,
         book_synopsis: context.book_synopsis,
         chapter_digest: context.chapter_digest,
-        terms: context.terms,
+        confirmed_terms: context
+            .terms
+            .iter()
+            .filter(|t| t.status == crate::terms::TermStatus::Resolved)
+            .collect(),
         recent_targets: context.recent_targets,
         segments: segments
             .iter()
@@ -670,7 +672,7 @@ struct PolishRequest<'a> {
     style: &'a [String],
     book_synopsis: Option<&'a str>,
     chapter_digest: Option<&'a str>,
-    terms: &'a [Term],
+    confirmed_terms: Vec<&'a Term>,
     recent_targets: &'a [RecentTarget],
     segments: Vec<PolishSource<'a>>,
 }
@@ -693,12 +695,16 @@ pub async fn polish_batch<C: TranslationClient + ?Sized>(
         .iter()
         .map(|segment| segment.id.clone())
         .collect::<Vec<_>>();
-    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep items in numbered input order and never omit an item.";
+    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning and paragraph boundaries. CONFIRMED TERMINOLOGY CONSTRAINTS: confirmed_terms is authoritative. Never rewrite its exact targets, including when a source variant occurs; these constraints override style preferences. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep items in numbered input order and never omit an item.";
     let user = serde_json::to_string(&PolishRequest {
         style: context.style_guide,
         book_synopsis: context.book_synopsis,
         chapter_digest: context.chapter_digest,
-        terms: context.terms,
+        confirmed_terms: context
+            .terms
+            .iter()
+            .filter(|t| t.status == crate::terms::TermStatus::Resolved)
+            .collect(),
         recent_targets: context.recent_targets,
         segments: segments
             .iter()
@@ -721,6 +727,7 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
     source_language: &str,
     target_language: &str,
     style_guide: &[String],
+    terms: &[Term],
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
     let expected_ids = titles
@@ -728,13 +735,16 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
         .map(|title| title.id.clone())
         .collect::<Vec<_>>();
     let system = format!(
-        "TASK:TITLE_TRANSLATION Translate chapter and table-of-contents titles from {source_language} to {target_language}. Follow the style guide and keep titles concise. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"chapter-id\",\"translation\":\"...\"}}]}}. Keep items in numbered input order and never omit an item."
+        "TASK:TITLE_TRANSLATION Translate chapter and table-of-contents titles from {source_language} to {target_language}. Follow the style guide and keep titles concise. CONFIRMED TERMINOLOGY CONSTRAINTS: never rewrite or replace exact targets in confirmed_terms, including their source variants; these constraints override style preferences. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"chapter-id\",\"translation\":\"...\"}}]}}. Keep items in numbered input order and never omit an item."
     );
     let user = serde_json::to_string(&TranslationPrompt {
         style: style_guide,
         book_synopsis: None,
         chapter_digest: None,
-        terms: &[],
+        confirmed_terms: terms
+            .iter()
+            .filter(|term| term.status == crate::terms::TermStatus::Resolved)
+            .collect(),
         recent_targets: &[],
         segments: titles
             .iter()
@@ -838,7 +848,10 @@ mod tests {
             note: None,
             status: TermStatus::Resolved,
         };
-        let terms = [term];
+        let mut candidate = term.clone();
+        candidate.source = "Bob".to_string();
+        candidate.status = TermStatus::Ok;
+        let terms = [term, candidate];
         let context = super::TranslationContext {
             style_guide: &["Keep the voice".to_string()],
             book_synopsis: Some("Book synopsis"),
@@ -853,14 +866,14 @@ mod tests {
         let (_, user) = super::build_prompts(&[segment], "en", "zh-CN", &context);
         let value: serde_json::Value =
             serde_json::from_str(&user).expect("prompt should be valid JSON");
-        assert_eq!(value["terms"][0]["target"], "爱丽丝");
-        assert_eq!(value["terms"][0]["status"], "resolved");
+        assert_eq!(value["confirmed_terms"][0]["target"], "爱丽丝");
+        assert_eq!(value["confirmed_terms"].as_array().unwrap().len(), 1);
         assert_eq!(value["segments"][0]["number"], 1);
         let positions = [
             "\"style\"",
             "\"book_synopsis\"",
             "\"chapter_digest\"",
-            "\"terms\"",
+            "\"confirmed_terms\"",
             "\"recent_targets\"",
             "\"segments\"",
         ]

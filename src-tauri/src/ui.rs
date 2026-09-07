@@ -4,7 +4,7 @@ use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
 use crate::parser;
 use crate::state;
-use crate::terms::{Term, TermCandidate, TermStore};
+use crate::terms::{FullTextCandidate, ReviewStatus, Term, TermCandidate, TermStore};
 use base64::Engine;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -52,6 +52,7 @@ pub struct ProjectDetail {
     chapters: Vec<Chapter>,
     logs: Vec<LogEntry>,
     terms: Vec<Term>,
+    candidates: Vec<FullTextCandidate>,
     conflicts: Vec<TermCandidate>,
     report: Option<serde_json::Value>,
 }
@@ -270,6 +271,39 @@ pub fn ui_resolve_term(project_id: String, source: String, target: String) -> Re
 }
 
 #[tauri::command]
+pub fn ui_scan_terms(project_id: String) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    store.scan(&state::load_chapters(&loaded.state_dir, &project)?)
+}
+
+#[tauri::command]
+pub fn ui_review_candidate(
+    project_id: String,
+    normalized: String,
+    proposed_target: String,
+    status: ReviewStatus,
+    target: String,
+    drift: bool,
+) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    store.review_candidate_with_origin(&normalized, &proposed_target, status, &target, drift)?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "candidate_reviewed",
+        serde_json::json!({"normalized": normalized, "status": status, "target": target}),
+    )
+}
+
+#[tauri::command]
 pub fn ui_export(project_id: String, format: String) -> Result<String, String> {
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
@@ -369,11 +403,11 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
     let chapters = state::load_chapters(state_dir, &project)?;
     let directory = state::project_dir(state_dir, &project.id);
     let terms_path = directory.join("terms.db");
-    let (terms, conflicts) = if terms_path.exists() {
+    let (terms, conflicts, candidates) = if terms_path.exists() {
         let store = TermStore::open(terms_path)?;
-        (store.list()?, store.conflicts()?)
+        (store.list()?, store.conflicts()?, store.candidates()?)
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
     let report_path = directory.join("report.json");
     let report = if report_path.exists() {
@@ -386,6 +420,7 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
         chapters,
         logs: read_logs(&directory.join("logs.txt"))?,
         terms,
+        candidates,
         conflicts,
         report,
     })

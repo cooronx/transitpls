@@ -65,6 +65,7 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
     let project_dir = state::project_dir(state_dir, &project.id);
     let analysis_path = project_dir.join("analysis.json");
     let term_store = TermStore::open(project_dir.join("terms.db"))?;
+    term_store.scan(chapters)?;
 
     if project.source_language == "auto" {
         let document = document_from_state(project, chapters);
@@ -82,6 +83,48 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
         state::save_project(state_dir, project)?;
     }
 
+    let candidates_path = project_dir.join("analysis-candidates.json");
+    let candidates: Vec<crate::terms::FullTextCandidate> = if candidates_path.exists() && !force {
+        state::read_json(&candidates_path)?
+    } else {
+        let mut candidates = Vec::new();
+        for (index, chapter) in chapters.iter().enumerate() {
+            let source = chapter
+                .segments
+                .iter()
+                .map(|s| s.source.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let sample = sample_text(&source, CHAPTER_SAMPLE_CHARS);
+            if sample.trim().is_empty() {
+                continue;
+            }
+            let confirmed = term_store.relevant(&sample)?;
+            let extracted = crate::terms::extract_candidates_with_context(
+                client,
+                &sample,
+                "",
+                index,
+                max_retries,
+                &crate::terms::ExtractionContext {
+                    source_language: &project.source_language,
+                    target_language: &project.target_language,
+                    confirmed_terms: &confirmed,
+                },
+            )
+            .await?;
+            for candidate in &extracted {
+                term_store.discover(candidate)?;
+            }
+            candidates.extend(extracted);
+        }
+        state::write_json_atomic(&candidates_path, &candidates)?;
+        candidates
+    };
+    for candidate in &candidates {
+        term_store.discover(candidate)?;
+    }
+
     let mut analysis = if analysis_path.exists() && !force {
         state::read_json(&analysis_path)?
     } else {
@@ -94,19 +137,21 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
         .to_string();
         let mut value: BookAnalysis = call_json(
             client,
-            "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. Return only JSON with string fields genre, tone, narration, pacing, register, dialogue_style, and rhetoric; style_guide must be an array of non-empty strings; characters and terms must be arrays; book_synopsis must be null. Every character and term object must contain string source and target, nullable string reading and gender, string-array aliases, zero-based integer first_chapter, nullable string note, and type chosen from person, place, organization, term, appellation, speech, or fixed_expr.",
+            "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. Return only JSON with string fields genre, tone, narration, pacing, register, dialogue_style, and rhetoric; style_guide must be an array of non-empty strings; characters and terms must be empty arrays (terminology is extracted separately); book_synopsis must be null.",
             &user,
             max_retries,
         )
         .await?;
         value.book_synopsis = None;
+        value.characters.clear();
+        value.terms.clear();
         validate_analysis(&value)?;
         state::write_json_atomic(&analysis_path, &value)?;
         value
     };
 
     for term in analysis.characters.iter().chain(&analysis.terms) {
-        term_store.insert(&term.clone().into_term())?;
+        term_store.record_analysis_term(&term.clone().into_term())?;
     }
 
     if full_book {
@@ -412,9 +457,10 @@ mod tests {
         );
         let terms = TermStore::open(state::project_dir(&state_dir, &project.id).join("terms.db"))
             .expect("term store should open")
-            .list()
+            .candidates()
             .expect("terms should list");
-        assert_eq!(terms.len(), 2);
+        assert_eq!(terms.len(), 1);
+        assert_eq!(terms[0].status, crate::terms::ReviewStatus::Candidate);
 
         prepare(
             &RejectingClient,
