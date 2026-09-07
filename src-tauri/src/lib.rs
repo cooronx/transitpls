@@ -25,6 +25,7 @@ pub fn run() {
             ui::ui_save_pipeline,
             ui::ui_project,
             ui::ui_delete_project,
+            ui::ui_import,
             ui::ui_initialize,
             ui::ui_transit,
             ui::ui_cancel_task,

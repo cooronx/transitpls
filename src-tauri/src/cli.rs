@@ -247,6 +247,34 @@ pub async fn initialize_project(
     Ok((project, created))
 }
 
+pub fn import_project(
+    config_path: Option<PathBuf>,
+    input: PathBuf,
+) -> Result<(crate::model::ProjectState, bool), String> {
+    if !input.is_file() {
+        return Err(format!("input file does not exist: {}", input.display()));
+    }
+    let loaded = config::load(config_path.as_deref())?;
+    if let Ok(project) = state::load_for_source(&loaded.state_dir, &input) {
+        return Ok((project, false));
+    }
+
+    let config = loaded.value;
+    let mut document = parser::parse_document(
+        &input,
+        Some(&config.language.source),
+        config.segment.max_chars_per_segment,
+    )?;
+    document.metadata.target_language = config.language.target;
+    let initialized = state::initialize(
+        &loaded.state_dir,
+        &input,
+        &document,
+        config.segment.max_chars_per_segment,
+    )?;
+    Ok((initialized.project, initialized.created))
+}
+
 pub async fn transit_project(
     config_path: Option<PathBuf>,
     input: PathBuf,
@@ -1339,7 +1367,8 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_file, run_transit, transit, Cli, Command, ExportArgs, ExportFormatArg, TransitArgs,
+        export_file, import_project, run_transit, transit, Cli, Command, ExportArgs,
+        ExportFormatArg, TransitArgs,
     };
     use crate::analysis::BookAnalysis;
     use crate::config::AppConfig;
@@ -1387,6 +1416,30 @@ mod tests {
         ])
         .expect("CLI arguments should parse");
         assert_eq!(cli.config, Some(PathBuf::from("custom.toml")));
+    }
+
+    #[test]
+    fn imports_book_without_running_model_analysis() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let config_path = dir.join("transitpls.toml");
+        let state_dir = dir.join("projects");
+        fs::write(&source, "Alice arrived.").unwrap();
+        fs::write(
+            &config_path,
+            format!("[paths]\nstate_dir = {:?}\n", state_dir),
+        )
+        .unwrap();
+
+        let (project, created) = import_project(Some(config_path.clone()), source.clone()).unwrap();
+        assert!(created);
+        assert!(!state::project_dir(&state_dir, &project.id)
+            .join("analysis.json")
+            .exists());
+
+        let (_, created_again) = import_project(Some(config_path), source).unwrap();
+        assert!(!created_again);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

@@ -17,3 +17,4 @@
 .settings-card input,.settings-card select{width:100%;height:36px;border:1px solid #d9e2eb;border-radius:6px;background:#f9fbfd;padding:0 10px;outline:0;color:#334155}.settings-card input:focus,.settings-card select:focus{border-color:#60b9af;box-shadow:0 0 0 2px #d5f3ef}
 .load-more-segments{width:100%;min-height:38px;justify-content:center;border:1px solid #c8dedb;border-radius:6px;background:#fff;color:var(--teal);cursor:pointer}.load-more-segments:hover{background:#eaf8f5;border-color:#75bdb5}
 .settings-layout>nav button{display:flex;align-items:center;gap:5px}
+.initialize-task{width:100%;min-height:36px;margin:4px 0 2px}.initialize-task:disabled{background:#e8f7f4;color:var(--teal)!important;opacity:1}

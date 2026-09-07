@@ -35,6 +35,7 @@ pub struct ProjectSummary {
     #[serde(flatten)]
     project: ProjectState,
     cover_data_url: Option<String>,
+    task_initialized: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -49,6 +50,7 @@ pub struct CredentialStatus {
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDetail {
     project: ProjectState,
+    task_initialized: bool,
     chapters: Vec<Chapter>,
     logs: Vec<LogEntry>,
     terms: Vec<Term>,
@@ -68,7 +70,10 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
     let loaded = config::load(None)?;
     let mut projects = list_projects(&loaded.state_dir)?;
     projects.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    let projects = projects.into_iter().map(project_summary).collect();
+    let projects = projects
+        .into_iter()
+        .map(|project| project_summary(&loaded.state_dir, project))
+        .collect();
     Ok(Bootstrap {
         credential: credential_status(&loaded.value)?,
         config: loaded.value,
@@ -78,7 +83,7 @@ pub fn ui_bootstrap() -> Result<Bootstrap, String> {
     })
 }
 
-fn project_summary(project: ProjectState) -> ProjectSummary {
+fn project_summary(state_dir: &Path, project: ProjectState) -> ProjectSummary {
     let cover_data_url = parser::extract_epub_cover(Path::new(&project.source_path))
         .ok()
         .flatten()
@@ -87,6 +92,7 @@ fn project_summary(project: ProjectState) -> ProjectSummary {
             format!("data:{};base64,{encoded}", cover.media_type)
         });
     ProjectSummary {
+        task_initialized: initialization_completed(state_dir, &project),
         project,
         cover_data_url,
     }
@@ -159,15 +165,46 @@ pub fn ui_delete_project(
 }
 
 #[tauri::command]
-pub async fn ui_initialize(
+pub async fn ui_import(
     registry: tauri::State<'_, TaskRegistry>,
     input: String,
+) -> Result<ProjectDetail, String> {
+    let task_id = "import".to_string();
+    let task = tokio::spawn(async move { crate::cli::import_project(None, PathBuf::from(input)) });
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .insert(task_id.clone(), task.abort_handle());
+    let result = task.await;
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .remove(&task_id);
+    let (project, _) = result.map_err(|error| {
+        if error.is_cancelled() {
+            "书籍导入已取消".to_string()
+        } else {
+            format!("import task failed: {error}")
+        }
+    })??;
+    let loaded = config::load(None)?;
+    project_detail(&loaded.state_dir, &project.id)
+}
+
+#[tauri::command]
+pub async fn ui_initialize(
+    registry: tauri::State<'_, TaskRegistry>,
+    project_id: String,
     mock_client: bool,
 ) -> Result<ProjectDetail, String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = "initialize".to_string();
     let task = tokio::spawn(crate::cli::initialize_project(
         None,
-        PathBuf::from(input),
+        PathBuf::from(project.source_path),
         None,
         None,
         mock_client,
@@ -397,13 +434,25 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
     } else {
         None
     };
+    let logs = read_logs(&directory.join("logs.txt"))?;
+    let task_initialized = initialization_completed(state_dir, &project);
     Ok(ProjectDetail {
         project,
+        task_initialized,
         chapters,
-        logs: read_logs(&directory.join("logs.txt"))?,
+        logs,
         terms,
         conflicts,
         report,
+    })
+}
+
+fn initialization_completed(state_dir: &Path, project: &ProjectState) -> bool {
+    let path = state::project_dir(state_dir, &project.id).join("logs.txt");
+    fs::read_to_string(path).is_ok_and(|text| {
+        text.lines().any(|line| {
+            line.splitn(3, '\t').nth(1) == Some("analysis_completed")
+        })
     })
 }
 
@@ -522,6 +571,18 @@ mod tests {
         assert_eq!(detail.project.title, "Book");
         assert_eq!(detail.chapters[0].segments[0].source, "Hello world");
         assert_eq!(detail.logs[0].event, "initialized");
+        assert!(!detail.task_initialized);
+
+        state::append_log(
+            &root,
+            &initialized.project,
+            "analysis_completed",
+            serde_json::json!({}),
+        )
+        .expect("analysis completion should be recorded");
+        detail = project_detail(&root, &initialized.project.id)
+            .expect("desktop bridge should reload initialization state");
+        assert!(detail.task_initialized);
 
         let pending = ProgressSnapshot::from(&detail);
         detail.chapters[0].segments[0].target = Some("你好，世界".to_string());
