@@ -29,7 +29,7 @@ type TrayName = "tasks"|"issues"|"logs";
 const navItems:Array<{id:View;icon:LucideIcon;label:string}> = [
   {id:"workspace",icon:Languages,label:"工作台"},{id:"projects",icon:FolderKanban,label:"项目"},
   {id:"terms",icon:LibraryBig,label:"术语库"},
-  {id:"review",icon:BadgeCheck,label:"审校"},{id:"history",icon:History,label:"历史"},
+  // {id:"review",icon:BadgeCheck,label:"审校"},{id:"history",icon:History,label:"历史"},
 ];
 const statusText:Record<Status|ItemStatus,string> = {initialized:"待翻译",translating:"翻译中",translated:"已完成",failed:"失败",pending:"待处理"};
 const termTypeText:Record<string,string> = {person:"人名",place:"地名",organization:"组织机构",term:"术语",appellation:"称谓",speech:"语言习惯",fixed_expr:"固定表达"};
