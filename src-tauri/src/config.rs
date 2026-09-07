@@ -12,6 +12,21 @@ pub struct AppConfig {
     pub paths: PathsConfig,
     pub analysis: AnalysisConfig,
     pub pipeline: PipelineConfig,
+    pub general: GeneralConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct GeneralConfig {
+    pub visible_segments: usize,
+}
+
+impl Default for GeneralConfig {
+    fn default() -> Self {
+        Self {
+            visible_segments: 100,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -189,6 +204,9 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     if config.pipeline.recent_context_chars == 0 {
         return Err("pipeline.recent_context_chars must be greater than zero".to_string());
     }
+    if config.general.visible_segments == 0 {
+        return Err("general.visible_segments must be greater than zero".to_string());
+    }
     if config.llm.timeout_secs == 0 {
         return Err("llm.timeout_secs must be greater than zero".to_string());
     }
@@ -237,6 +255,7 @@ mod tests {
         assert!(config.analysis.full_book);
         assert!(!config.pipeline.polish);
         assert_eq!(config.pipeline.recent_context_chars, 2_000);
+        assert_eq!(config.general.visible_segments, 100);
     }
 
     #[test]

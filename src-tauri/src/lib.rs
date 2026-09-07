@@ -21,6 +21,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ui::ui_bootstrap,
             ui::ui_verify_and_save_model,
+            ui::ui_save_general,
             ui::ui_project,
             ui::ui_delete_project,
             ui::ui_initialize,

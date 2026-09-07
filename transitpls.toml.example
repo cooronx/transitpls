@@ -23,3 +23,6 @@ full_book = true
 [pipeline]
 polish = false
 recent_context_chars = 2000
+
+[general]
+visible_segments = 100

@@ -118,6 +118,14 @@ pub async fn ui_verify_and_save_model(
 }
 
 #[tauri::command]
+pub fn ui_save_general(visible_segments: usize) -> Result<Bootstrap, String> {
+    let mut loaded = config::load(None)?;
+    loaded.value.general.visible_segments = visible_segments;
+    config::save_default(&loaded.value)?;
+    ui_bootstrap()
+}
+
+#[tauri::command]
 pub fn ui_project(project_id: String) -> Result<ProjectDetail, String> {
     let loaded = config::load(None)?;
     project_detail(&loaded.state_dir, &project_id)
