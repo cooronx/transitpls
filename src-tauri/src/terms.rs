@@ -336,16 +336,15 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     chapter: usize,
     max_retries: usize,
 ) -> Result<Vec<Term>, String> {
-    let mut request = serde_json::json!({
+    let user = serde_json::json!({
         "chapter": chapter,
         "source": source_text,
         "target": target_text,
-        "required_record_fields": ["source", "target", "reading", "type", "gender", "aliases", "first_chapter", "note", "status"],
-    });
+    })
+    .to_string();
     let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain string source and target, nullable string reading and gender, string-array aliases, integer first_chapter, nullable string note, and status=\"ok\". The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Return an empty array when nothing qualifies.";
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        let user = request.to_string();
         match client.complete(system, &user).await {
             Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
             {
@@ -364,17 +363,6 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
             },
             Err(error) => last_error = error,
         }
-        client
-            .record_failure(
-                "term_extraction",
-                serde_json::json!({
-                    "chapter": chapter, "attempt": attempt + 1, "max_attempts": max_retries + 1,
-                    "error": last_error, "will_retry": attempt < max_retries,
-                }),
-            )
-            .map_err(|error| format!("{last_error}; failed to record extraction error: {error}"))?;
-        request["validation_error"] = serde_json::json!(last_error);
-        request["retry_instruction"] = serde_json::json!("The previous response failed validation. Regenerate the complete JSON using every required_record_fields key exactly. Use type rather than category, set status to ok, and correct the reported error.");
         if attempt < max_retries {
             tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
         }
@@ -826,58 +814,5 @@ mod tests {
         assert_eq!(terms.len(), 1);
         assert_eq!(terms[0].source, "Alice");
         assert_eq!(terms[0].first_chapter, 2);
-    }
-    struct RepairClient;
-
-    #[async_trait::async_trait]
-    impl crate::llm::TranslationClient for RepairClient {
-        async fn complete(
-            &self,
-            _system: &str,
-            user: &str,
-        ) -> Result<crate::llm::CompletionOutput, String> {
-            let request: serde_json::Value = serde_json::from_str(user).unwrap();
-            let record = if request["validation_error"]
-                .as_str()
-                .is_some_and(|s| s.contains("missing field `target`"))
-            {
-                serde_json::json!({
-                    "source": "Alice",
-                    "target": "爱丽丝",
-                    "reading": null,
-                    "type": "person",
-                    "gender": null,
-                    "aliases": [],
-                    "first_chapter": 2,
-                    "note": "Stable name",
-                    "status": "ok"
-                })
-            } else {
-                serde_json::json!({"source":"Alice"})
-            };
-            Ok(crate::llm::CompletionOutput {
-                text: serde_json::json!({"terms":[record]}).to_string(),
-                usage: Default::default(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn repairs_missing_target_and_logs_the_failed_attempt() {
-        let (_, path) = store("repair-log");
-        let dir = path.with_extension("logs");
-        std::fs::create_dir_all(&dir).unwrap();
-        let client = crate::llm::RecordingClient::new(
-            Box::new(RepairClient),
-            crate::usage::UsageRecorder::new(&dir, "test"),
-        );
-        let result = super::extract_terms(&client, "Alice arrived.", "爱丽丝到了。", 2, 1).await;
-        assert!(result.is_ok(), "{result:?}");
-        let log = std::fs::read_to_string(dir.join("logs.txt")).unwrap();
-        assert!(log.contains("missing field `target`"));
-        assert!(log.contains("term_extraction"));
-        assert!(log.contains("chapter"));
-        std::fs::remove_dir_all(dir).unwrap();
-        std::fs::remove_file(path).unwrap();
     }
 }
