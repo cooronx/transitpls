@@ -1289,7 +1289,7 @@ async fn process_extraction<C: TranslationClient + ?Sized>(
     chapter_index: usize,
     max_retries: usize,
 ) -> Result<(), String> {
-    let extracted = terms::extract_terms(
+    let extracted = terms::extract_terms_resilient(
         client,
         &extraction.source_text,
         &extraction.target_text,

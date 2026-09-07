@@ -82,6 +82,8 @@ struct ExtractionResponse {
     terms: Vec<Term>,
 }
 
+const EMPTY_COMPLETION_ERROR: &str = "Response contained no message or tool call (empty)";
+
 #[derive(Debug, Clone)]
 pub struct TermStore {
     path: std::path::PathBuf,
@@ -346,6 +348,9 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
         match client.complete(system, &user).await {
+            Ok(output) if output.text.trim().is_empty() => {
+                return Err(format!("term extraction failed: {EMPTY_COMPLETION_ERROR}"));
+            }
             Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
             {
                 Ok(mut response) => {
@@ -361,6 +366,9 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
                 }
                 Err(error) => last_error = format!("invalid term extraction JSON: {error}"),
             },
+            Err(error) if is_empty_completion_error(&error) => {
+                return Err(format!("term extraction failed: {error}"));
+            }
             Err(error) => last_error = error,
         }
         if attempt < max_retries {
@@ -370,6 +378,75 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     Err(format!(
         "term extraction failed after {max_retries} retries: {last_error}"
     ))
+}
+
+pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
+    client: &C,
+    source_text: &str,
+    target_text: &str,
+    chapter: usize,
+    max_retries: usize,
+) -> Result<Vec<Term>, String> {
+    let mut batches = vec![paragraph_pairs(source_text, target_text)];
+    let mut merged = Vec::new();
+
+    while let Some(batch) = batches.pop() {
+        let source = batch
+            .iter()
+            .map(|(source, _)| source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let target = batch
+            .iter()
+            .map(|(_, target)| target.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        match extract_terms(client, &source, &target, chapter, max_retries).await {
+            Ok(terms) => merged.extend(terms),
+            Err(error) if is_empty_completion_error(&error) && batch.len() > 1 => {
+                let midpoint = batch.len() / 2;
+                let mut left = batch;
+                let right = left.split_off(midpoint);
+                batches.push(right);
+                batches.push(left);
+            }
+            Err(error) if is_empty_completion_error(&error) => {
+                let _ = client.record_failure(
+                    "term_extraction",
+                    serde_json::json!({
+                        "kind": "term_extraction_skipped",
+                        "error": error,
+                        "chapter": chapter,
+                        "source_chars": source.chars().count(),
+                        "target_chars": target.chars().count(),
+                    }),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    let mut seen = HashSet::new();
+    merged.retain(|term| seen.insert((normalize(&term.source), normalize(&term.target))));
+    Ok(merged)
+}
+
+fn paragraph_pairs(source_text: &str, target_text: &str) -> Vec<(String, String)> {
+    let sources = source_text.split('\n').collect::<Vec<_>>();
+    let targets = target_text.split('\n').collect::<Vec<_>>();
+    if sources.len() == targets.len() && sources.len() > 1 {
+        sources
+            .into_iter()
+            .zip(targets)
+            .map(|(source, target)| (source.to_string(), target.to_string()))
+            .collect()
+    } else {
+        vec![(source_text.to_string(), target_text.to_string())]
+    }
+}
+
+fn is_empty_completion_error(error: &str) -> bool {
+    error.contains(EMPTY_COMPLETION_ERROR)
 }
 
 fn initialize_schema(connection: &Connection) -> Result<(), String> {
@@ -645,9 +722,14 @@ fn is_cjk(value: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_terms, PendingExtraction, Term, TermStatus, TermStore};
-    use crate::llm::MockClient;
+    use super::{
+        extract_terms, extract_terms_resilient, PendingExtraction, Term, TermStatus, TermStore,
+    };
+    use crate::llm::{CompletionOutput, MockClient, TranslationClient};
+    use async_trait::async_trait;
+    use rig_core::completion::Usage;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn store(name: &str) -> (TermStore, PathBuf) {
@@ -814,5 +896,95 @@ mod tests {
         assert_eq!(terms.len(), 1);
         assert_eq!(terms[0].source, "Alice");
         assert_eq!(terms[0].first_chapter, 2);
+    }
+
+    struct EmptyBatchClient;
+
+    #[async_trait]
+    impl TranslationClient for EmptyBatchClient {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            user_prompt: &str,
+        ) -> Result<CompletionOutput, String> {
+            let request: serde_json::Value = serde_json::from_str(user_prompt).unwrap();
+            let source = request["source"].as_str().unwrap();
+            if source.contains('\n') {
+                return Err(
+                    "ResponseError: Response contained no message or tool call (empty)".to_string(),
+                );
+            }
+            let terms = match source {
+                "Alice arrived." => vec![term("Alice", "爱丽丝")],
+                "Alice met Bob." => vec![term("Alice", "爱丽丝"), term("Bob", "鲍勃")],
+                _ => Vec::new(),
+            };
+            Ok(CompletionOutput {
+                text: serde_json::json!({ "terms": terms }).to_string(),
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_batch_response_splits_paragraphs_and_deduplicates_terms() {
+        let terms = extract_terms_resilient(
+            &EmptyBatchClient,
+            "Alice arrived.\nAlice met Bob.",
+            "爱丽丝到了。\n爱丽丝遇见了鲍勃。",
+            1,
+            0,
+        )
+        .await
+        .expect("paragraph fallback should recover the extraction");
+
+        assert_eq!(
+            terms
+                .iter()
+                .map(|term| term.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Alice", "Bob"]
+        );
+    }
+
+    struct AlwaysEmptyClient {
+        failures: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    #[async_trait]
+    impl TranslationClient for AlwaysEmptyClient {
+        fn record_failure(&self, _stage: &str, details: serde_json::Value) -> Result<(), String> {
+            self.failures.lock().unwrap().push(details);
+            Ok(())
+        }
+
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> Result<CompletionOutput, String> {
+            Err("ResponseError: Response contained no message or tool call (empty)".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_single_paragraph_is_recorded_without_blocking() {
+        let failures = Arc::new(Mutex::new(Vec::new()));
+        let terms = extract_terms_resilient(
+            &AlwaysEmptyClient {
+                failures: Arc::clone(&failures),
+            },
+            "No extractable response.",
+            "没有可提取的响应。",
+            1,
+            0,
+        )
+        .await
+        .expect("a skipped paragraph should not fail translation");
+
+        assert!(terms.is_empty());
+        let failures = failures.lock().unwrap();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0]["kind"], "term_extraction_skipped");
     }
 }
