@@ -229,41 +229,35 @@ fn group_spine_by_navigation(
 ) -> Vec<Chapter> {
     let mut chapters = Vec::new();
     let mut current: Option<(String, Vec<(SegmentKind, String)>)> = None;
+    let push_chapter =
+        |chapters: &mut Vec<Chapter>, title: String, blocks: Vec<(SegmentKind, String)>| {
+            let chapter = build_chapter_from_blocks(chapters.len(), title, blocks, max_chars);
+            // Navigation files often contain structural entries without readable text.
+            if !chapter.segments.is_empty() {
+                chapters.push(chapter);
+            }
+        };
     for (path, content) in documents {
         if let Some(title) = navigation.get(&path) {
             if let Some((title, blocks)) = current.take() {
-                chapters.push(build_chapter_from_blocks(
-                    chapters.len(),
-                    title,
-                    blocks,
-                    max_chars,
-                ));
+                push_chapter(&mut chapters, title, blocks);
             }
             current = Some((title.clone(), Vec::new()));
         }
         if let Some((_, blocks)) = current.as_mut() {
             blocks.extend(content);
         } else if !content.is_empty() {
+            let next_chapter_number = chapters.len() + 1;
             let title = content
                 .iter()
                 .find(|(kind, text)| matches!(kind, SegmentKind::Heading) && !text.is_empty())
                 .map(|(_, text)| text.clone())
-                .unwrap_or_else(|| format!("Chapter {}", chapters.len() + 1));
-            chapters.push(build_chapter_from_blocks(
-                chapters.len(),
-                title,
-                content,
-                max_chars,
-            ));
+                .unwrap_or_else(|| format!("Chapter {next_chapter_number}"));
+            push_chapter(&mut chapters, title, content);
         }
     }
     if let Some((title, blocks)) = current {
-        chapters.push(build_chapter_from_blocks(
-            chapters.len(),
-            title,
-            blocks,
-            max_chars,
-        ));
+        push_chapter(&mut chapters, title, blocks);
     }
     chapters
 }
