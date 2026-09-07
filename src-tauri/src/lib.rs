@@ -27,8 +27,6 @@ pub fn run() {
             ui::ui_transit,
             ui::ui_cancel_task,
             ui::ui_resolve_term,
-            ui::ui_scan_terms,
-            ui::ui_review_candidate,
             ui::ui_export,
         ])
         .run(tauri::generate_context!())

@@ -102,27 +102,8 @@ struct TermsArgs {
 #[derive(Debug, Subcommand)]
 enum TermsCommand {
     List(ProjectArgs),
-    Scan(ProjectArgs),
-    Candidates(ProjectArgs),
-    Review(TermsReviewArgs),
     Conflicts(ProjectArgs),
     Resolve(TermsResolveArgs),
-}
-
-#[derive(Debug, Args)]
-struct TermsReviewArgs {
-    #[arg(long)]
-    drift: bool,
-    #[command(flatten)]
-    selector: ProjectArgs,
-    #[arg(long)]
-    normalized: String,
-    #[arg(long, default_value = "")]
-    proposed_target: String,
-    #[arg(long, value_enum)]
-    status: terms::ReviewStatus,
-    #[arg(long, default_value = "")]
-    target: String,
 }
 
 #[derive(Debug, Args)]
@@ -303,35 +284,6 @@ fn export_file(args: ExportArgs, state_dir: &std::path::Path) -> Result<i32, Str
 
 fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
     match args.command {
-        TermsCommand::Scan(selector) => {
-            let project = load_project_args(state_dir, &selector)?;
-            let _lock = state::acquire_project_lock(state_dir, &project)?;
-            term_store(state_dir, &project)?.scan(&state::load_chapters(state_dir, &project)?)?;
-            println!("Full-text candidate scan completed");
-            Ok(0)
-        }
-        TermsCommand::Candidates(selector) => {
-            let project = load_project_args(state_dir, &selector)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&term_store(state_dir, &project)?.candidates()?)
-                    .map_err(|e| e.to_string())?
-            );
-            Ok(0)
-        }
-        TermsCommand::Review(args) => {
-            let project = load_project_args(state_dir, &args.selector)?;
-            let _lock = state::acquire_project_lock(state_dir, &project)?;
-            term_store(state_dir, &project)?.review_candidate_with_origin(
-                &args.normalized,
-                &args.proposed_target,
-                args.status,
-                &args.target,
-                args.drift,
-            )?;
-            println!("Candidate reviewed");
-            Ok(0)
-        }
         TermsCommand::List(selector) => {
             let project = load_project_args(state_dir, &selector)?;
             let store = term_store(state_dir, &project)?;
@@ -969,7 +921,6 @@ async fn finalize_segments<C: TranslationClient + ?Sized>(
         &extraction,
         chapter_index,
         config.llm.max_retries,
-        project,
     )
     .await?;
     clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
@@ -1022,7 +973,6 @@ async fn extract_completed_chapter<C: TranslationClient + ?Sized>(
         &extraction,
         chapter_index,
         config.llm.max_retries,
-        project,
     )
     .await?;
     clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
@@ -1038,7 +988,6 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
     analysis: &analysis::BookAnalysis,
     config: &AppConfig,
 ) -> Result<(), String> {
-    let store = term_store(state_dir, project)?;
     for chapter in chapters.iter_mut() {
         if let Some(target_title) = chapter.target_title.clone() {
             sync_heading_title(chapter, &target_title);
@@ -1073,19 +1022,12 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
             .iter()
             .map(|&index| title_segments[index].clone())
             .collect::<Vec<_>>();
-        let title_source = request
-            .iter()
-            .map(|segment| segment.source.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let confirmed = store.relevant(&title_source)?;
         match llm::translate_titles(
             client,
             &request,
             &project.source_language,
             &project.target_language,
             &analysis.style_guide,
-            &confirmed,
             config.llm.max_retries,
         )
         .await
@@ -1103,7 +1045,6 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
                         &project.source_language,
                         &project.target_language,
                         &analysis.style_guide,
-                        &confirmed,
                         config.llm.max_retries,
                     )
                     .await
@@ -1129,11 +1070,6 @@ fn apply_title(
     chapters[chapter_index].target_title = Some(translation.clone());
     sync_heading_title(&mut chapters[chapter_index], &translation);
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-    term_store(state_dir, project)?.record_drift(
-        &chapters[chapter_index].title,
-        &translation,
-        chapter_index,
-    )?;
     save_project_progress(state_dir, project, chapters)
 }
 
@@ -1268,15 +1204,7 @@ async fn retry_pending_extractions<C: TranslationClient + ?Sized>(
             before_segment,
             recent_context_chars,
         )?;
-        process_extraction(
-            client,
-            store,
-            &extraction,
-            chapter_index,
-            max_retries,
-            project,
-        )
-        .await?;
+        process_extraction(client, store, &extraction, chapter_index, max_retries).await?;
         clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
         if extraction.batch_key == "__chapter__" {
             chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
@@ -1332,29 +1260,17 @@ async fn process_extraction<C: TranslationClient + ?Sized>(
     extraction: &PendingExtraction,
     chapter_index: usize,
     max_retries: usize,
-    project: &crate::model::ProjectState,
 ) -> Result<(), String> {
-    store.record_drift(
-        &extraction.source_text,
-        &extraction.target_text,
-        chapter_index,
-    )?;
-    let confirmed = store.relevant(&extraction.source_text)?;
-    let extracted = terms::extract_candidates_with_context(
+    let extracted = terms::extract_terms(
         client,
         &extraction.source_text,
         &extraction.target_text,
         chapter_index,
         max_retries,
-        &terms::ExtractionContext {
-            source_language: &project.source_language,
-            target_language: &project.target_language,
-            confirmed_terms: &confirmed,
-        },
     )
     .await?;
-    for candidate in extracted {
-        store.record_extracted(candidate)?;
+    for term in extracted {
+        store.insert(&term)?;
     }
     store.complete_extraction(&extraction.chapter_id, &extraction.batch_key)
 }
@@ -1482,7 +1398,7 @@ mod tests {
         let document = parser::parse_document(&source, Some("en"), 1200).unwrap();
         let initialized = state::initialize(&state_dir, &source, &document, 1200).unwrap();
         let project_dir = state::project_dir(&state_dir, &initialized.project.id);
-        fs::write(project_dir.join("analysis-candidates.json"), "invalid JSON").unwrap();
+        fs::write(project_dir.join("analysis.json"), "invalid JSON").unwrap();
         let config_path = dir.join("config.toml");
         fs::write(&config_path, "[paths]\nstate_dir = 'projects'\n").unwrap();
         let error = super::initialize_project(Some(config_path), source, None, None, true, false)
@@ -1647,7 +1563,7 @@ mod tests {
         )
         .expect("term store should open");
         assert!(store
-            .candidates()
+            .list()
             .expect("terms should list")
             .iter()
             .any(|term| term.source == "Alice"));
