@@ -237,17 +237,26 @@ pub async fn initialize_project(
         project.source_language = source_language;
         state::save_project(&state_dir, &project)?;
     }
-    let client = build_client(&config, mock_client, &state_dir, &project)?;
-    analysis::prepare(
-        client.as_ref(),
-        &state_dir,
-        &mut project,
-        &mut chapters,
-        config.analysis.full_book,
-        force_analysis,
-        config.llm.max_retries,
-    )
-    .await?;
+    let result = async {
+        let client = build_client(&config, mock_client, &state_dir, &project)?;
+        analysis::prepare(
+            client.as_ref(),
+            &state_dir,
+            &mut project,
+            &mut chapters,
+            config.analysis.full_book,
+            force_analysis,
+            config.llm.max_retries,
+        )
+        .await
+    }
+    .await;
+    if let Err(error) = result {
+        state::mark_failed(&state_dir, &mut project, &error).map_err(|log_error| {
+            format!("{error}; failed to record initialization error: {log_error}")
+        })?;
+        return Err(error);
+    }
     state::append_log(
         &state_dir,
         &project,
@@ -1462,6 +1471,36 @@ mod tests {
         ])
         .expect("CLI arguments should parse");
         assert_eq!(cli.config, Some(PathBuf::from("custom.toml")));
+    }
+
+    #[tokio::test]
+    async fn initialization_analysis_failure_is_written_to_project_log() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        fs::write(&source, "Alice arrived.").unwrap();
+        let document = parser::parse_document(&source, Some("en"), 1200).unwrap();
+        let initialized = state::initialize(&state_dir, &source, &document, 1200).unwrap();
+        let project_dir = state::project_dir(&state_dir, &initialized.project.id);
+        fs::write(project_dir.join("analysis-candidates.json"), "invalid JSON").unwrap();
+        let config_path = dir.join("config.toml");
+        fs::write(&config_path, "[paths]\nstate_dir = 'projects'\n").unwrap();
+        let error = super::initialize_project(Some(config_path), source, None, None, true, false)
+            .await
+            .unwrap_err();
+        let log = fs::read_to_string(project_dir.join("logs.txt")).unwrap();
+        let entry: serde_json::Value =
+            serde_json::from_str(log.lines().last().unwrap().splitn(3, '\t').nth(2).unwrap())
+                .unwrap();
+        assert_eq!(entry["error"], error);
+        assert!(log.contains("\tfailed\t"));
+        assert_eq!(
+            state::load_project(&state_dir, &initialized.project.id)
+                .unwrap()
+                .status,
+            crate::model::ProjectStatus::Failed
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

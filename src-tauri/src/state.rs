@@ -279,7 +279,11 @@ pub fn append_log(
     append_log_at(&path, event, details)
 }
 
-fn append_log_at(path: &Path, event: &str, details: serde_json::Value) -> Result<(), String> {
+pub(crate) fn append_log_at(
+    path: &Path,
+    event: &str,
+    details: serde_json::Value,
+) -> Result<(), String> {
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)

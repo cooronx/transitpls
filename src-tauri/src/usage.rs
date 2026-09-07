@@ -63,6 +63,13 @@ pub struct UsageRecorder {
 }
 
 impl UsageRecorder {
+    pub fn record_failure(&self, stage: &str, details: serde_json::Value) -> Result<(), String> {
+        state::append_log_at(
+            &self.path.with_file_name("logs.txt"),
+            "llm_failed",
+            serde_json::json!({"stage": stage, "model": self.model, "details": details}),
+        )
+    }
     pub fn new(project_dir: &Path, model: impl Into<String>) -> Self {
         Self {
             path: project_dir.join("usage.json"),

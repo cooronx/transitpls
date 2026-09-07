@@ -15,6 +15,9 @@ pub const LANGUAGE_SAMPLE_CHARS: usize = 1_000;
 
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
+    fn record_failure(&self, _stage: &str, _details: serde_json::Value) -> Result<(), String> {
+        Ok(())
+    }
     async fn complete(
         &self,
         system_prompt: &str,
@@ -202,12 +205,27 @@ impl RecordingClient {
 
 #[async_trait]
 impl TranslationClient for RecordingClient {
+    fn record_failure(&self, stage: &str, details: serde_json::Value) -> Result<(), String> {
+        self.recorder.record_failure(stage, details)
+    }
     async fn complete(
         &self,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
-        let output = self.inner.complete(system_prompt, user_prompt).await?;
+        let output = match self.inner.complete(system_prompt, user_prompt).await {
+            Ok(output) => output,
+            Err(error) => {
+                self.record_failure(
+                    stage_from_prompt(system_prompt),
+                    serde_json::json!({"kind": "request", "error": error}),
+                )
+                .map_err(|log_error| {
+                    format!("{error}; failed to record request error: {log_error}")
+                })?;
+                return Err(error);
+            }
+        };
         self.recorder
             .record(stage_from_prompt(system_prompt), output.usage)?;
         Ok(output)

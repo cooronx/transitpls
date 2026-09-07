@@ -79,7 +79,13 @@ export default function App() {
   const importFile = async () => {
     if(!bootstrap?.credential.configured&&!mockClient){setView("settings");setNotice("请先在设置中配置并验证 API Key");return}
     const path=await open({multiple:false,filters:[{name:"电子书",extensions:["epub","txt"]}]});
-    if(path) await run("项目初始化",()=>invoke<Detail>("ui_initialize",{input:path,mockClient}));
+    if(path) await run("项目初始化",async()=>{
+      try{return await invoke<Detail>("ui_initialize",{input:path,mockClient})}
+      catch(error){
+        try{await reload()}catch(reloadError){throw new Error(`${String(error)}；刷新项目失败：${String(reloadError)}`)}
+        throw error;
+      }
+    });
   };
   const selectProject = async (id:string) => {
     setBusy("加载项目");

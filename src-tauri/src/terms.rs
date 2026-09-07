@@ -811,18 +811,19 @@ pub async fn extract_candidates_with_context<C: TranslationClient + ?Sized>(
     max_retries: usize,
     context: &ExtractionContext<'_>,
 ) -> Result<Vec<FullTextCandidate>, String> {
-    let user = serde_json::json!({
+    let mut request = serde_json::json!({
         "chapter": chapter,
         "source": source_text,
         "target": target_text,
         "source_language": context.source_language,
         "target_language": context.target_language,
         "confirmed_terms": context.confirmed_terms.iter().filter(|term| term.status == TermStatus::Resolved).collect::<Vec<_>>(),
-    })
-    .to_string();
+        "required_record_fields": ["source", "category", "variants", "evidence_count", "contexts", "proposed_target", "confidence", "reason"],
+    });
     let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions. Return only JSON as {\"terms\":[...]}. Each record must contain exactly: source (string), category (person/place/organization/term/appellation/speech/fixed_expr), variants (string array), evidence_count (positive integer), contexts (nonempty array of exact source excerpts containing the term), proposed_target (string in target_language; empty if uncertain), confidence (number 0..1), reason (nonempty string). Prefer a low-confidence candidate over omission. Candidates may be decided using context. Never invent source evidence. CONFIRMED TERMINOLOGY CONSTRAINTS: confirmed_terms is authoritative; never propose rewriting confirmed targets. When target text is supplied, report actual observed translations, including any drift, without correcting them or treating them as authoritative. Return an empty terms array if none are found.";
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
+        let user = request.to_string();
         match client.complete(system, &user).await {
             Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
             {
@@ -896,6 +897,17 @@ pub async fn extract_candidates_with_context<C: TranslationClient + ?Sized>(
             },
             Err(error) => last_error = error,
         }
+        client
+            .record_failure(
+                "term_extraction",
+                serde_json::json!({
+                    "chapter": chapter, "attempt": attempt + 1, "max_attempts": max_retries + 1,
+                    "error": last_error, "will_retry": attempt < max_retries,
+                }),
+            )
+            .map_err(|error| format!("{last_error}; failed to record extraction error: {error}"))?;
+        request["validation_error"] = serde_json::json!(last_error);
+        request["retry_instruction"] = serde_json::json!("The previous response failed validation. Regenerate the complete JSON using every required_record_fields key exactly. category is required; do not substitute type. Correct the reported error; do not omit uncertain candidates.");
         if attempt < max_retries {
             tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
         }
@@ -1482,6 +1494,51 @@ mod tests {
     }
 
     struct FixedClient(serde_json::Value);
+
+    struct RepairClient;
+
+    #[async_trait::async_trait]
+    impl crate::llm::TranslationClient for RepairClient {
+        async fn complete(
+            &self,
+            _system: &str,
+            user: &str,
+        ) -> Result<crate::llm::CompletionOutput, String> {
+            let request: serde_json::Value = serde_json::from_str(user).unwrap();
+            let record = if request["validation_error"]
+                .as_str()
+                .is_some_and(|s| s.contains("missing field `category`"))
+            {
+                serde_json::json!({"source":"Alice", "category":"person", "variants":[], "evidence_count":1,
+                    "contexts":["Alice arrived."], "proposed_target":"", "confidence":0.1, "reason":"Uncertain"})
+            } else {
+                serde_json::json!({"source":"Alice"})
+            };
+            Ok(crate::llm::CompletionOutput {
+                text: serde_json::json!({"terms":[record]}).to_string(),
+                usage: Default::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn repairs_missing_category_and_logs_the_failed_attempt() {
+        let (_, path) = store("repair-log");
+        let dir = path.with_extension("logs");
+        std::fs::create_dir_all(&dir).unwrap();
+        let client = crate::llm::RecordingClient::new(
+            Box::new(RepairClient),
+            crate::usage::UsageRecorder::new(&dir, "test"),
+        );
+        let result = super::extract_candidates(&client, "Alice arrived.", "", 2, 1).await;
+        assert!(result.is_ok(), "{result:?}");
+        let log = std::fs::read_to_string(dir.join("logs.txt")).unwrap();
+        assert!(log.contains("missing field `category`"));
+        assert!(log.contains("term_extraction"));
+        assert!(log.contains("chapter"));
+        std::fs::remove_dir_all(dir).unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[async_trait::async_trait]
     impl crate::llm::TranslationClient for FixedClient {
