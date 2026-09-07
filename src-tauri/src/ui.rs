@@ -140,6 +140,28 @@ pub fn ui_save_pipeline(polish: bool) -> Result<Bootstrap, String> {
 }
 
 #[tauri::command]
+pub fn ui_save_task_config(
+    source_language: String,
+    max_chars_per_segment: usize,
+    max_chars_per_batch: usize,
+    recent_context_chars: usize,
+    timeout_secs: u64,
+    max_retries: usize,
+    full_book: bool,
+) -> Result<Bootstrap, String> {
+    let mut loaded = config::load(None)?;
+    loaded.value.language.source = source_language;
+    loaded.value.segment.max_chars_per_segment = max_chars_per_segment;
+    loaded.value.segment.max_chars_per_batch = max_chars_per_batch;
+    loaded.value.pipeline.recent_context_chars = recent_context_chars;
+    loaded.value.llm.timeout_secs = timeout_secs;
+    loaded.value.llm.max_retries = max_retries;
+    loaded.value.analysis.full_book = full_book;
+    config::save_default(&loaded.value)?;
+    ui_bootstrap()
+}
+
+#[tauri::command]
 pub fn ui_project(project_id: String) -> Result<ProjectDetail, String> {
     let loaded = config::load(None)?;
     project_detail(&loaded.state_dir, &project_id)
@@ -201,11 +223,12 @@ pub async fn ui_initialize(
 ) -> Result<ProjectDetail, String> {
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let source_language = loaded.value.language.source;
     let task_id = "initialize".to_string();
     let task = tokio::spawn(crate::cli::initialize_project(
         None,
         PathBuf::from(project.source_path),
-        None,
+        Some(source_language),
         None,
         mock_client,
         false,
@@ -226,6 +249,46 @@ pub async fn ui_initialize(
             "项目初始化已取消".to_string()
         } else {
             format!("initialization task failed: {error}")
+        }
+    })??;
+    let loaded = config::load(None)?;
+    project_detail(&loaded.state_dir, &project.id)
+}
+
+#[tauri::command]
+pub async fn ui_reanalyze(
+    registry: tauri::State<'_, TaskRegistry>,
+    project_id: String,
+    mock_client: bool,
+) -> Result<ProjectDetail, String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let source_language = loaded.value.language.source;
+    let task_id = "initialize".to_string();
+    let task = tokio::spawn(crate::cli::initialize_project(
+        None,
+        PathBuf::from(project.source_path),
+        Some(source_language),
+        None,
+        mock_client,
+        true,
+    ));
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .insert(task_id.clone(), task.abort_handle());
+    let result = task.await;
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .remove(&task_id);
+    let (project, _) = result.map_err(|error| {
+        if error.is_cancelled() {
+            "重新分析已取消".to_string()
+        } else {
+            format!("analysis task failed: {error}")
         }
     })??;
     let loaded = config::load(None)?;
@@ -450,9 +513,8 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
 fn initialization_completed(state_dir: &Path, project: &ProjectState) -> bool {
     let path = state::project_dir(state_dir, &project.id).join("logs.txt");
     fs::read_to_string(path).is_ok_and(|text| {
-        text.lines().any(|line| {
-            line.splitn(3, '\t').nth(1) == Some("analysis_completed")
-        })
+        text.lines()
+            .any(|line| line.split('\t').nth(1) == Some("analysis_completed"))
     })
 }
 

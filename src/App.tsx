@@ -6,7 +6,7 @@ import { openPath } from "@tauri-apps/plugin-opener";
 import {
   ArrowRight, BadgeCheck, BookOpen, Braces, Check, CheckCircle2, ChevronDown,
   ChevronUp, Circle, CircleDashed, Columns2, Download, FileText, FolderKanban,
-  History, Languages, LibraryBig, ListTree, LoaderCircle, MessageSquare, PanelTop,
+  Languages, LibraryBig, ListTree, LoaderCircle, MessageSquare, PanelTop,
   Play, Plus, RotateCcw, Search, Settings, ShieldCheck, SquareStop,
   Trash2, X, type LucideIcon,
 } from "lucide-react";
@@ -19,7 +19,8 @@ interface Segment { id:string; ordinal:number; source:string; target:string|null
 interface Chapter { id:string; title:string; target_title?:string; status:ItemStatus; segments:Segment[] }
 interface Term { source:string; target:string; type:string; aliases:string[]; first_chapter:number; note?:string; status:"ok"|"conflict"|"resolved" }
 interface LogEntry { timestamp:string; event:string; details:unknown }
-interface Config { language:{source:string;target:string}; llm:{provider:string;model:string;api_key_env:string;base_url?:string}; segment:{max_chars_per_segment:number;max_chars_per_batch:number}; pipeline:{polish:boolean;recent_context_chars:number}; general:{visible_segments:number} }
+interface Config { language:{source:string;target:string}; llm:{provider:string;model:string;api_key_env:string;base_url?:string;timeout_secs:number;max_retries:number}; segment:{max_chars_per_segment:number;max_chars_per_batch:number}; pipeline:{polish:boolean;recent_context_chars:number}; analysis:{full_book:boolean}; general:{visible_segments:number} }
+interface TaskConfigDraft { sourceLanguage:string;maxCharsPerSegment:number;maxCharsPerBatch:number;recentContextChars:number;timeoutSecs:number;maxRetries:number;fullBook:boolean }
 interface CredentialStatus { configured:boolean; source?:"environment"|"desktop"; lastFour?:string }
 interface Bootstrap { config:Config; credential:CredentialStatus; configPath?:string; stateDir:string; projects:Project[] }
 interface Detail { project:Project; taskInitialized:boolean; chapters:Chapter[]; logs:LogEntry[]; terms:Term[]; conflicts:Array<{source:string;target:string;chapter:number}>; report?:unknown }
@@ -43,7 +44,7 @@ export default function App() {
   const [busy,setBusy] = useState<string|null>(null);
   const [notice,setNotice] = useState<string|null>(null);
   const [search,setSearch] = useState("");
-  const [mockClient,setMockClient] = useState(false);
+  const [mockClient] = useState(false);
   const [visibleSegmentCount,setVisibleSegmentCount] = useState(100);
   const [displaySegmentCount,setDisplaySegmentCount] = useState(100);
 
@@ -92,10 +93,22 @@ export default function App() {
       }
     });
   };
-  const initializeTask = () => {
+  const taskConfigArgs = (value:TaskConfigDraft) => ({...value});
+  const initializeTask = (value:TaskConfigDraft) => {
     if(busy||!detail||detail.taskInitialized)return;
     if(!bootstrap?.credential.configured&&!mockClient){setView("settings");setNotice("请先在设置中配置并验证 API Key");return}
-    void run("项目初始化",()=>invoke<Detail>("ui_initialize",{projectId:detail.project.id,mockClient}));
+    void run("项目初始化",async()=>{const next=await invoke<Bootstrap>("ui_save_task_config",taskConfigArgs(value));setBootstrap(next);return invoke<Detail>("ui_initialize",{projectId:detail.project.id,mockClient})});
+  };
+  const saveTaskConfig = async (value:TaskConfigDraft) => {
+    if(busy)return;setBusy("保存任务配置");setNotice(null);
+    try{const next=await invoke<Bootstrap>("ui_save_task_config",taskConfigArgs(value));setBootstrap(next);setNotice("任务配置已保存")}
+    catch(error){setNotice(String(error))}finally{setBusy(null)}
+  };
+  const reanalyze = async (value:TaskConfigDraft) => {
+    if(busy||!detail||!detail.taskInitialized)return;
+    const confirmed=await confirmDialog("重新分析会再次调用模型，并刷新风格分析、章节摘要与全书梗概。继续吗？",{title:"重新分析",kind:"warning",okLabel:"重新分析",cancelLabel:"取消"});
+    if(!confirmed)return;
+    void run("重新分析",async()=>{const next=await invoke<Bootstrap>("ui_save_task_config",taskConfigArgs(value));setBootstrap(next);return invoke<Detail>("ui_reanalyze",{projectId:detail.project.id,mockClient})});
   };
   const selectProject = async (id:string) => {
     setBusy("加载项目");
@@ -148,7 +161,7 @@ export default function App() {
     catch(error){setNotice(String(error))}finally{setBusy(null)}
   };
   const cancelTask = async () => {
-    const taskId=busy==="项目初始化"?"initialize":busy==="导入书籍"?"import":detail?.project.id;
+    const taskId=busy==="项目初始化"||busy==="重新分析"?"initialize":busy==="导入书籍"?"import":detail?.project.id;
     if(!taskId)return;
     const cancelled=await invoke<boolean>("ui_cancel_task",{taskId});
     if(cancelled)setNotice("正在取消任务，已完成的进度会保留");
@@ -172,7 +185,16 @@ export default function App() {
         {view==="review"&&<ReviewPlaceholder/>}
         {view==="workspace"&&(!detail||!chapter)&&<EmptyState onImport={importFile}/>}
       </main>
-      {view==="workspace"&&detail&&<Inspector config={bootstrap?.config} detail={detail} mock={mockClient} busy={busy} onMock={setMockClient} onPolish={savePipeline} onInitialize={initializeTask}/>}
+      {view==="workspace"&&detail&&<Inspector
+        config={bootstrap?.config}
+        detail={detail}
+        busy={busy}
+        onPolish={savePipeline}
+        onInitialize={initializeTask}
+        onSaveConfig={saveTaskConfig}
+        onReanalyze={reanalyze}
+        onOpenTerms={()=>setView("terms")}
+      />}
     </div>
     <footer className="statusbar"><span>TransItPls v0.1.0</span><i/><span>Tauri · 跨平台</span><span className="status-spacer"/><span className="icon-label">{busy&&<LoaderCircle className="spin"/>}{busy?`${busy}进行中…`:"就绪"}</span><i/><span>{bootstrap?.projects.length??0} 个项目</span></footer>
     {notice&&<button className="toast" onClick={()=>setNotice(null)}>{notice}<X aria-hidden="true"/></button>}{busy&&<div className="busy-line"/>}
@@ -182,8 +204,8 @@ export default function App() {
 function Logo(){return <div className="logo-mark"><span>文</span><b>A</b></div>}
 function Header({project,projects,model,search,onSearch,onProject,onTranslate,busy,onCancel,disabled}:{project?:Project;projects:Project[];model:string;search:string;onSearch:(v:string)=>void;onProject:(id:string)=>void;onTranslate:()=>void;busy:string|null;onCancel:()=>void;disabled:boolean}){
   const[menuOpen,setMenuOpen]=useState(false);
-  const cancellable=busy==="翻译"||busy==="项目初始化"||busy==="导入书籍";
-  const translateLabel=busy==="翻译"?"正在翻译":busy==="项目初始化"?"正在初始化":busy==="导入书籍"?"正在导入":"开始翻译";
+  const cancellable=busy==="翻译"||busy==="项目初始化"||busy==="重新分析"||busy==="导入书籍";
+  const translateLabel=busy==="翻译"?"正在翻译":busy==="重新分析"?"正在重新分析":busy==="项目初始化"?"正在初始化":busy==="导入书籍"?"正在导入":"开始翻译";
   return <header className="topbar"><div className="brand"><Logo/><strong>TransItPls</strong><i/><span>项目：</span><div className="project-switcher"><button className="project-trigger" aria-expanded={menuOpen} disabled={!project||Boolean(busy)} onClick={()=>setMenuOpen(!menuOpen)}><b>{project?.title??"未选择项目"}</b>{menuOpen?<ChevronUp/>:<ChevronDown/>}</button>{menuOpen&&<><button className="menu-backdrop" aria-label="关闭项目菜单" onClick={()=>setMenuOpen(false)}/><div className="project-menu"><header><b>切换项目</b><small>{projects.length} 个项目</small></header><div>{projects.map((item)=><button className={`project-option ${item.id===project?.id?"active":""}`} key={item.id} onClick={()=>{setMenuOpen(false);if(item.id!==project?.id)onProject(item.id)}}><ProjectCover project={item} className="mini-cover"/><span><b>{item.title}</b><small>{item.chapters_completed} / {item.chapters_total} 章 · {projectStatusText(item)}</small></span>{item.id===project?.id&&<em>当前</em>}</button>)}</div></div></>}</div></div><label className="global-search"><Search/><input value={search} onChange={(e)=>onSearch(e.target.value)} placeholder="搜索原文或译文…"/><kbd>Ctrl K</kbd></label><div className="top-actions"><span>模型: <b>{model}</b></span><span className="local-state"><i/>本地状态</span><button className="primary icon-label" disabled={disabled||Boolean(busy)} onClick={onTranslate}>{busy?<LoaderCircle className="spin"/>:<Play/>}{translateLabel}</button>{cancellable&&<button className="cancel icon-label" onClick={onCancel}><SquareStop/>取消任务</button>}</div></header>
 }
 function ActivityBar({view,onChange}:{view:View;onChange:(v:View)=>void}){return <nav className="activity-bar"><div>{navItems.map((item)=>{const Icon=item.icon;return <button key={item.id} className={view===item.id?"active":""} onClick={()=>onChange(item.id)} title={item.label}><Icon/><span>{item.label}</span></button>})}</div><button className={view==="settings"?"active":""} onClick={()=>onChange("settings")} title="设置"><Settings/><span>设置</span></button></nav>}
@@ -200,7 +222,26 @@ function TaskTable({detail}:{detail:Detail}){return <table><thead><tr><th>#</th>
 function IssueList({detail}:{detail:Detail}){return detail.conflicts.length?<div className="issue-list">{detail.conflicts.map((item,index)=><div key={`${item.source}-${index}`}><b>术语冲突</b><span>{item.source} → {item.target}</span><em>第 {item.chapter+1} 章</em></div>)}</div>:<div className="panel-empty">当前没有术语冲突</div>}
 function LogList({logs}:{logs:LogEntry[]}){return logs.length?<div className="log-list">{logs.map((log,index)=><div key={`${log.timestamp}-${index}`}><time>{formatDate(log.timestamp)}</time><b>{eventText(log.event)}</b><code>{JSON.stringify(log.details)}</code></div>)}</div>:<div className="panel-empty">暂无运行日志</div>}
 
-function Inspector({config,detail,mock,busy,onMock,onPolish,onInitialize}:{config?:Config;detail:Detail;mock:boolean;busy:string|null;onMock:(v:boolean)=>void;onPolish:(v:boolean)=>Promise<void>;onInitialize:()=>void}){const progress=Math.round(detail.project.chapters_completed/Math.max(1,detail.project.chapters_total)*100);return <aside className="inspector"><div className="inspector-tabs"><button className="active">任务配置</button><button>术语与记忆</button></div><div className="inspector-body"><Field label="语言方向"><div className="direction"><span>{languageName(detail.project.source_language)}</span><ArrowRight/><span>{languageName(detail.project.target_language)}</span></div></Field><Field label="模型选择"><div className="select-like">{config?.llm.model??"—"}<ChevronDown/></div><small>提供商：{config?.llm.provider??"—"}</small></Field><Field label="分段策略"><div className="select-like">每段最多 {config?.segment.max_chars_per_segment??0} 字符</div></Field><label className="switch-row"><span>译后润色</span><button type="button" className={`toggle ${config?.pipeline.polish?"on":""}`} disabled={!config||Boolean(busy)} aria-pressed={Boolean(config?.pipeline.polish)} aria-label="译后润色" onClick={()=>void onPolish(!config?.pipeline.polish)}><i/></button></label><button type="button" className="initialize-task primary icon-label" disabled={detail.taskInitialized||Boolean(busy)} onClick={onInitialize}>{busy==="项目初始化"?<LoaderCircle className="spin"/>:detail.taskInitialized?<Check/>:<Play/>}{busy==="项目初始化"?"正在初始化任务":detail.taskInitialized?"任务已初始化":"初始化任务"}</button><label className="switch-row"><span>离线模拟模式</span><button className={`toggle ${mock?"on":""}`} onClick={()=>onMock(!mock)}><i/></button></label><hr/><section className="flow"><header><b>项目进度</b><strong>{progress}%</strong></header><div className="big-progress"><i style={{width:`${progress}%`}}/></div><p className="done"><CheckCircle2/>已完成 {detail.project.chapters_completed} 章</p><p className={detail.project.status==="failed"?"error":"active"}><CircleDashed/>{detail.taskInitialized?statusText[detail.project.status]:"等待初始化任务"}</p><p><Circle/>生成校对报告 <em>阶段 8 待实现</em></p></section></div></aside>}
+function Inspector({config,detail,busy,onPolish,onInitialize,onSaveConfig,onReanalyze,onOpenTerms}:{config?:Config;detail:Detail;busy:string|null;onPolish:(v:boolean)=>Promise<void>;onInitialize:(value:TaskConfigDraft)=>void;onSaveConfig:(value:TaskConfigDraft)=>Promise<void>;onReanalyze:(value:TaskConfigDraft)=>Promise<void>;onOpenTerms:()=>void}){
+  const[tab,setTab]=useState<"task"|"memory">("task");
+  const[draft,setDraft]=useState<TaskConfigDraft|null>(null);
+  useEffect(()=>{if(config)setDraft({sourceLanguage:detail.taskInitialized?detail.project.source_language:config.language.source,maxCharsPerSegment:config.segment.max_chars_per_segment,maxCharsPerBatch:config.segment.max_chars_per_batch,recentContextChars:config.pipeline.recent_context_chars,timeoutSecs:config.llm.timeout_secs,maxRetries:config.llm.max_retries,fullBook:config.analysis.full_book})},[config,detail.project.source_language,detail.taskInitialized]);
+  const progress=Math.round(detail.project.chapters_completed/Math.max(1,detail.project.chapters_total)*100);
+  const conflictCount=new Set(detail.conflicts.map((item)=>item.source)).size;
+  return <aside className="inspector"><div className="inspector-tabs"><button className={tab==="task"?"active":""} onClick={()=>setTab("task")}>任务配置</button><button className={tab==="memory"?"active":""} onClick={()=>setTab("memory")}>术语与记忆</button></div><div className="inspector-body">{!draft?<div className="panel-empty">正在读取任务配置…</div>:tab==="task"?<>
+    <Field label="语言方向"><div className="direction configurable-direction"><select value={draft.sourceLanguage} disabled={detail.taskInitialized||Boolean(busy)} onChange={(event)=>setDraft({...draft,sourceLanguage:event.target.value})}><option value="auto">自动检测</option><option value="ja">日本語</option><option value="en">English</option><option value="ko">한국어</option><option value="zh-CN">中文（简体）</option></select><ArrowRight/><span>{languageName(detail.project.target_language)}</span></div><small>{detail.taskInitialized?`初始化结果：${languageName(detail.project.source_language)}`:"初始化时确定源语言，自动检测会调用模型。"}</small></Field>
+    <Field label="模型选择"><div className="select-like">{config?.llm.model??"—"}<ChevronDown/></div><small>提供商：{config?.llm.provider??"—"}</small></Field>
+    <section className="inspector-section"><b>分段策略</b><div className="compact-fields"><NumberField label="每段字符数" value={draft.maxCharsPerSegment} disabled={Boolean(busy)} onChange={(value)=>setDraft({...draft,maxCharsPerSegment:value})}/><NumberField label="每批字符数" value={draft.maxCharsPerBatch} disabled={Boolean(busy)} onChange={(value)=>setDraft({...draft,maxCharsPerBatch:value})}/></div><small className="field-hint">每段字符数只影响之后新导入的项目；每批字符数会用于后续翻译。</small></section>
+    <section className="inspector-section"><b>初始化选项</b><label className="switch-row"><span>全书译前分析</span><button type="button" className={`toggle ${draft.fullBook?"on":""}`} disabled={Boolean(busy)} aria-pressed={draft.fullBook} onClick={()=>setDraft({...draft,fullBook:!draft.fullBook})}><i/></button></label></section>
+    <details className="advanced-config"><summary>高级模型配置</summary><div className="compact-fields"><NumberField label="超时（秒）" value={draft.timeoutSecs} disabled={Boolean(busy)} onChange={(value)=>setDraft({...draft,timeoutSecs:value})}/><NumberField label="重试次数" value={draft.maxRetries} min={0} disabled={Boolean(busy)} onChange={(value)=>setDraft({...draft,maxRetries:value})}/></div></details>
+    <label className="switch-row"><span>译后润色</span><button type="button" className={`toggle ${config?.pipeline.polish?"on":""}`} disabled={!config||Boolean(busy)} aria-pressed={Boolean(config?.pipeline.polish)} aria-label="译后润色" onClick={()=>void onPolish(!config?.pipeline.polish)}><i/></button></label>
+    <button type="button" className="secondary save-task-config" disabled={Boolean(busy)||!validTaskConfig(draft)} onClick={()=>void onSaveConfig(draft)}>{busy==="保存任务配置"?"正在保存…":"保存配置"}</button>
+    {detail.taskInitialized?<button type="button" className="initialize-task icon-label" disabled={Boolean(busy)||!validTaskConfig(draft)} onClick={()=>void onReanalyze(draft)}>{busy==="重新分析"?<LoaderCircle className="spin"/>:<RotateCcw/>}{busy==="重新分析"?"正在重新分析":"重新分析"}</button>:<button type="button" className="initialize-task primary icon-label" disabled={Boolean(busy)||!validTaskConfig(draft)} onClick={()=>onInitialize(draft)}>{busy==="项目初始化"?<LoaderCircle className="spin"/>:<Play/>}{busy==="项目初始化"?"正在初始化任务":"初始化任务"}</button>}
+    <hr/><section className="flow"><header><b>项目进度</b><strong>{progress}%</strong></header><div className="big-progress"><i style={{width:`${progress}%`}}/></div><p className="done"><CheckCircle2/>已完成 {detail.project.chapters_completed} 章</p><p className={detail.project.status==="failed"?"error":"active"}><CircleDashed/>{detail.taskInitialized?statusText[detail.project.status]:"等待初始化任务"}</p><p><Circle/>生成校对报告 <em>阶段 8 待实现</em></p></section>
+  </>:<><section className="memory-summary"><div><strong>{detail.terms.length}</strong><span>术语总数</span></div><div className={conflictCount?"has-conflicts":""}><strong>{conflictCount}</strong><span>待处理冲突</span></div></section><Field label="近期译文上下文"><div className="number-with-unit"><input type="number" min="1" step="100" value={draft.recentContextChars} disabled={Boolean(busy)} onChange={(event)=>setDraft({...draft,recentContextChars:Number(event.target.value)})}/><span>字符</span></div><small>翻译下一批时携带的近期已译内容上限。</small></Field><button type="button" className="secondary save-task-config" disabled={Boolean(busy)||!validTaskConfig(draft)} onClick={()=>void onSaveConfig(draft)}>{busy==="保存任务配置"?"正在保存…":"保存记忆设置"}</button><button type="button" className="text-action" onClick={onOpenTerms}>打开术语库{conflictCount>0&&` · ${conflictCount} 个冲突`}</button></>}</div></aside>
+}
+function NumberField({label,value,min=1,disabled,onChange}:{label:string;value:number;min?:number;disabled:boolean;onChange:(value:number)=>void}){return <label><span>{label}</span><input type="number" min={min} step="1" value={value} disabled={disabled} onChange={(event)=>onChange(Number(event.target.value))}/></label>}
+function validTaskConfig(value:TaskConfigDraft){return Boolean(value.sourceLanguage.trim())&&Number.isInteger(value.maxCharsPerSegment)&&value.maxCharsPerSegment>0&&Number.isInteger(value.maxCharsPerBatch)&&value.maxCharsPerBatch>0&&Number.isInteger(value.recentContextChars)&&value.recentContextChars>0&&Number.isInteger(value.timeoutSecs)&&value.timeoutSecs>0&&Number.isInteger(value.maxRetries)&&value.maxRetries>=0}
 function Field({label,children}:{label:string;children:ReactNode}){return <label className="field"><b>{label}</b>{children}</label>}
 function ProjectGallery({projects,busy,onSelect,onDelete,onImport}:{projects:Project[];busy:boolean;onSelect:(id:string)=>void;onDelete?:(project:Project)=>void;onImport:()=>void}){return <div className="page-view"><header><div><h1>翻译项目</h1><p>管理本机状态目录中的所有书籍。</p></div><button className="primary icon-label" onClick={onImport}><Plus/>新建项目</button></header>{projects.length?<div className="project-grid">{projects.map((project)=>{const progress=Math.round(project.chapters_completed/Math.max(1,project.chapters_total)*100);return <article key={project.id}><button className="project-open" onClick={()=>onSelect(project.id)}><ProjectCover project={project} className="cover"/><section className={onDelete?"with-actions":""}><h3>{project.title}</h3><p>{fileName(project.source_file)}</p><div className="progress"><i style={{width:`${progress}%`}}/></div><footer><span>{project.chapters_completed} / {project.chapters_total} 章</span><em className={project.status}>{projectStatusText(project)}</em></footer></section></button>{onDelete&&<button className="project-card-delete icon-label" disabled={busy} onClick={()=>onDelete(project)}><Trash2/>删除</button>}</article>})}</div>:<EmptyState onImport={onImport}/>}</div>}
 function ProjectCover({project,className}:{project:Project;className:string}){const[failed,setFailed]=useState(false);return <span className={className}>{project.cover_data_url&&!failed?<img src={project.cover_data_url} alt="" onError={()=>setFailed(true)}/>:"文"}</span>}
@@ -227,4 +268,4 @@ function languageName(code:string){return ({auto:"自动检测",en:"English","zh
 function projectStatusText(project:Project){return project.task_initialized===false?"待初始化":statusText[project.status]}
 function formatDate(value:string){try{return new Intl.DateTimeFormat("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"}).format(new Date(value))}catch{return value}}
 function eventText(event:string){return ({initialized:"项目已创建",analysis_completed:"译前分析完成",transit_started:"开始翻译",transit_completed:"翻译完成",term_resolved:"术语已裁定",exported:"成品已导出",failed:"任务失败"} as Record<string,string>)[event]??event}
-function browserPreview():Bootstrap{return {stateDir:"projects",projects:[],credential:{configured:false},config:{language:{source:"auto",target:"zh-CN"},llm:{provider:"openai-chat",model:"gpt-4o-mini",api_key_env:"OPENAI_API_KEY",base_url:"https://api.openai.com/v1"},segment:{max_chars_per_segment:1200,max_chars_per_batch:1800},pipeline:{polish:false,recent_context_chars:2000},general:{visible_segments:100}}}}
+function browserPreview():Bootstrap{return {stateDir:"projects",projects:[],credential:{configured:false},config:{language:{source:"auto",target:"zh-CN"},llm:{provider:"openai-chat",model:"gpt-4o-mini",api_key_env:"OPENAI_API_KEY",base_url:"https://api.openai.com/v1",timeout_secs:60,max_retries:3},segment:{max_chars_per_segment:1200,max_chars_per_batch:1800},pipeline:{polish:false,recent_context_chars:2000},analysis:{full_book:true},general:{visible_segments:100}}}}
