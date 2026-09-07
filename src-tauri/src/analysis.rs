@@ -136,10 +136,14 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
                     max_retries,
                 )
                 .await?;
-                if response.source_digest.trim().is_empty() {
-                    return Err(format!("chapter {} digest is empty", chapter.id));
-                }
-                chapter.meta["source_digest"] = serde_json::Value::String(response.source_digest);
+                let digest = if response.source_digest.trim().is_empty() {
+                    // Some compatible providers return an empty structured field; retain
+                    // useful chapter context so initialization can still resume.
+                    sample_text(&source, 1_000)
+                } else {
+                    response.source_digest
+                };
+                chapter.meta["source_digest"] = serde_json::Value::String(digest);
                 state::write_chapter(state_dir, project, chapter)?;
             }
         }
@@ -162,10 +166,15 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
                 max_retries,
             )
             .await?;
-            if response.book_synopsis.trim().is_empty() {
-                return Err("book synopsis is empty".to_string());
-            }
-            analysis.book_synopsis = Some(response.book_synopsis);
+            analysis.book_synopsis = Some(if response.book_synopsis.trim().is_empty() {
+                digests
+                    .iter()
+                    .filter_map(|chapter| chapter["source_digest"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                response.book_synopsis
+            });
             state::write_json_atomic(&analysis_path, &analysis)?;
         }
     }

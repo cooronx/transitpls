@@ -17,6 +17,7 @@ type OpfData = (
     HashMap<String, String>,
     Vec<String>,
     Option<String>,
+    Option<String>,
 );
 
 #[derive(Debug)]
@@ -160,18 +161,23 @@ fn parse_epub(path: &Path, max_chars: usize) -> Result<(String, Vec<Chapter>, St
     let opf_dir = Path::new(&opf_path)
         .parent()
         .unwrap_or_else(|| Path::new(""));
-    let (title, manifest, spine, navigation_href) = parse_opf(&opf)?;
-    let navigation = if let Some(href) = navigation_href {
+    let (title, manifest, spine, navigation_href, ncx_href) = parse_opf(&opf)?;
+    let navigation = if let Some(href) = navigation_href.or(ncx_href) {
         let path = normalize_zip_path(opf_dir, &href);
         let document = read_zip_entry(&mut archive, &path)?;
         let navigation_dir = Path::new(&path).parent().unwrap_or_else(|| Path::new(""));
-        parse_navigation(&document)?
-            .into_iter()
-            .map(|entry| {
-                let href = entry.href.split('#').next().unwrap_or(&entry.href);
-                (normalize_zip_path(navigation_dir, href), entry.title)
-            })
-            .collect::<HashMap<_, _>>()
+        if href.ends_with(".ncx") {
+            parse_ncx_navigation(&document)?
+        } else {
+            parse_navigation(&document)?
+        }
+        .into_iter()
+        .map(|entry| {
+            let href = entry.href.split('#').next().unwrap_or(&entry.href);
+            (normalize_zip_path(navigation_dir, href), entry.title)
+        })
+        .filter(|(_, title)| !is_contents_title(title))
+        .collect::<HashMap<_, _>>()
     } else {
         HashMap::new()
     };
@@ -246,14 +252,6 @@ fn group_spine_by_navigation(
         }
         if let Some((_, blocks)) = current.as_mut() {
             blocks.extend(content);
-        } else if !content.is_empty() {
-            let next_chapter_number = chapters.len() + 1;
-            let title = content
-                .iter()
-                .find(|(kind, text)| matches!(kind, SegmentKind::Heading) && !text.is_empty())
-                .map(|(_, text)| text.clone())
-                .unwrap_or_else(|| format!("Chapter {next_chapter_number}"));
-            push_chapter(&mut chapters, title, content);
         }
     }
     if let Some((title, blocks)) = current {
@@ -530,6 +528,7 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
     let mut manifest = HashMap::new();
     let mut spine = Vec::new();
     let mut navigation_href = None;
+    let mut ncx_href = None;
     let mut current_element = String::new();
     loop {
         match reader.read_event_into(&mut buffer) {
@@ -570,7 +569,10 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
                         }
                     }
                     if let (Some(id), Some(href), Some(media_type)) = (id, href, media_type) {
-                        if media_type == "application/xhtml+xml" || media_type == "text/html" {
+                        if media_type == "application/x-dtbncx+xml" {
+                            ncx_href = Some(href);
+                        } else if media_type == "application/xhtml+xml" || media_type == "text/html"
+                        {
                             if properties.as_deref().is_some_and(|value| {
                                 value.split_whitespace().any(|item| item == "nav")
                             }) {
@@ -601,7 +603,7 @@ fn parse_opf(xml: &str) -> Result<OpfData, String> {
         }
         buffer.clear();
     }
-    Ok((title, manifest, spine, navigation_href))
+    Ok((title, manifest, spine, navigation_href, ncx_href))
 }
 
 fn parse_cover_reference(xml: &str) -> Result<Option<(String, String)>, String> {
@@ -742,6 +744,93 @@ fn parse_navigation(xml: &str) -> Result<Vec<NavigationEntry>, String> {
     Ok(entries)
 }
 
+fn parse_ncx_navigation(xml: &str) -> Result<Vec<NavigationEntry>, String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut navpoint_depth = 0usize;
+    let mut in_nav_label = false;
+    let mut current_href = None;
+    let mut current_title = String::new();
+    let mut entries = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(event)) => {
+                let name = local_name(event.name().as_ref());
+                if name == "navpoint" {
+                    navpoint_depth += 1;
+                    if navpoint_depth == 1 {
+                        current_href = None;
+                        current_title.clear();
+                    }
+                } else if name == "navlabel" && navpoint_depth == 1 {
+                    in_nav_label = true;
+                } else if name == "content" && navpoint_depth == 1 {
+                    current_href = event.attributes().flatten().find_map(|attribute| {
+                        (local_name(attribute.key.as_ref()) == "src")
+                            .then(|| {
+                                attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            })
+                            .flatten()
+                    });
+                }
+            }
+            Ok(Event::Empty(event)) if local_name(event.name().as_ref()) == "content" => {
+                if navpoint_depth == 1 {
+                    current_href = event.attributes().flatten().find_map(|attribute| {
+                        (local_name(attribute.key.as_ref()) == "src")
+                            .then(|| {
+                                attribute
+                                    .normalized_value(XmlVersion::Implicit1_0)
+                                    .ok()
+                                    .map(|v| v.into_owned())
+                            })
+                            .flatten()
+                    });
+                }
+            }
+            Ok(Event::Text(event)) if in_nav_label => {
+                let value = unescape(event.as_ref())
+                    .map(|v| v.into_owned())
+                    .unwrap_or_default();
+                if !value.trim().is_empty() {
+                    current_title.push_str(value.trim());
+                }
+            }
+            Ok(Event::End(event)) => {
+                let name = local_name(event.name().as_ref());
+                if name == "navlabel" && navpoint_depth == 1 {
+                    in_nav_label = false;
+                } else if name == "navpoint" {
+                    if navpoint_depth == 1 {
+                        if let (Some(href), true) = (current_href.take(), !current_title.is_empty())
+                        {
+                            entries.push(NavigationEntry {
+                                href,
+                                title: std::mem::take(&mut current_title),
+                            });
+                        }
+                        current_title.clear();
+                    }
+                    navpoint_depth = navpoint_depth.saturating_sub(1);
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("invalid EPUB NCX: {error}")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(entries)
+}
+
+fn is_contents_title(title: &str) -> bool {
+    matches!(title.trim(), "目次" | "Contents" | "Table of Contents")
+}
+
 fn read_zip_entry<R: Read + io::Seek>(
     archive: &mut ZipArchive<R>,
     path: &str,
@@ -837,7 +926,7 @@ mod tests {
               <spine><itemref idref="first"/><itemref idref="second"/></spine>
             </package>
         "#;
-        let (title, manifest, spine, navigation) = parse_opf(xml).expect("valid OPF");
+        let (title, manifest, spine, navigation, _) = parse_opf(xml).expect("valid OPF");
         assert_eq!(title.as_deref(), Some("Book"));
         assert_eq!(
             manifest.get("first").map(String::as_str),
@@ -871,7 +960,7 @@ mod tests {
               <opf:spine><opf:itemref idref="one"/></opf:spine>
             </opf:package>
         "#;
-        let (title, manifest, spine, navigation) = parse_opf(xml).expect("valid prefixed OPF");
+        let (title, manifest, spine, navigation, _) = parse_opf(xml).expect("valid prefixed OPF");
         assert_eq!(title.as_deref(), Some("Book"));
         assert!(manifest.contains_key("one"));
         assert_eq!(spine, vec!["one"]);
@@ -1001,6 +1090,67 @@ mod tests {
             .iter()
             .flat_map(|chapter| &chapter.segments)
             .all(|segment| segment.source != "Book"));
+        fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn uses_epub2_ncx_to_group_spine_documents() {
+        let root =
+            std::env::temp_dir().join(format!("transitpls-parser-ncx-{}", std::process::id()));
+        fs::create_dir_all(&root).expect("fixture directory should be created");
+        let path = root.join("book.epub");
+        let file = File::create(&path).expect("fixture EPUB should be created");
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        for (name, contents) in [
+            (
+                "META-INF/container.xml",
+                r#"<container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#,
+            ),
+            (
+                "content.opf",
+                r#"<package><metadata><dc:title xmlns:dc="http://purl.org/dc/elements/1.1/">Book</dc:title></metadata><manifest><item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/><item id="toc" href="toc.ncx" media-type="application/x-dtbncx+xml"/><item id="toc-page" href="toc-page.xhtml" media-type="application/xhtml+xml"/><item id="first" href="first.xhtml" media-type="application/xhtml+xml"/><item id="first-body" href="first-body.xhtml" media-type="application/xhtml+xml"/><item id="second" href="second.xhtml" media-type="application/xhtml+xml"/></manifest><spine toc="toc"><itemref idref="cover"/><itemref idref="toc-page"/><itemref idref="first"/><itemref idref="first-body"/><itemref idref="second"/></spine></package>"#,
+            ),
+            (
+                "toc.ncx",
+                r#"<ncx><navMap><navPoint><navLabel><text>目次</text></navLabel><content src="toc-page.xhtml"/></navPoint><navPoint><navLabel><text>First</text></navLabel><content src="first.xhtml"/></navPoint><navPoint><navLabel><text>Second</text></navLabel><content src="second.xhtml"/></navPoint></navMap></ncx>"#,
+            ),
+            ("cover.xhtml", "<html><body><p>Cover</p></body></html>"),
+            (
+                "toc-page.xhtml",
+                "<html><body><p>Contents</p></body></html>",
+            ),
+            (
+                "first.xhtml",
+                "<html><body><p>First title</p></body></html>",
+            ),
+            (
+                "first-body.xhtml",
+                "<html><body><p>First body</p></body></html>",
+            ),
+            (
+                "second.xhtml",
+                "<html><body><p>Second body</p></body></html>",
+            ),
+        ] {
+            writer
+                .start_file(name, options)
+                .expect("fixture entry should start");
+            writer
+                .write_all(contents.as_bytes())
+                .expect("fixture entry should be written");
+        }
+        writer.finish().expect("fixture EPUB should finish");
+
+        let document = parse_document(&path, Some("en"), 1_200).expect("EPUB should parse");
+
+        assert_eq!(document.chapters.len(), 2);
+        assert_eq!(document.chapters[0].title, "First");
+        assert_eq!(document.chapters[1].title, "Second");
+        assert!(document.chapters[0]
+            .segments
+            .iter()
+            .any(|segment| segment.source == "First body"));
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
 }

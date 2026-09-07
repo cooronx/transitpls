@@ -325,11 +325,22 @@ pub fn project_dir(state_dir: &Path, id: &str) -> PathBuf {
     state_dir.join(id)
 }
 
+fn project_lock_path(state_dir: &Path, project_id: &str) -> PathBuf {
+    state_dir.join(".locks").join(format!("{project_id}.lock"))
+}
+
 pub fn acquire_project_lock(
     state_dir: &Path,
     project: &ProjectState,
 ) -> Result<ProjectLock, String> {
-    let path = project_dir(state_dir, &project.id).join("project.lock");
+    let locks_dir = state_dir.join(".locks");
+    fs::create_dir_all(&locks_dir).map_err(|error| {
+        format!(
+            "failed to create project lock directory {}: {error}",
+            locks_dir.display()
+        )
+    })?;
+    let path = project_lock_path(state_dir, &project.id);
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -361,7 +372,7 @@ fn acquire_project_read_lock(
     state_dir: &Path,
     project: &ProjectState,
 ) -> Result<ProjectLock, String> {
-    let path = project_dir(state_dir, &project.id).join("project.lock");
+    let path = project_lock_path(state_dir, &project.id);
     let file = OpenOptions::new().read(true).open(&path).map_err(|error| {
         format!(
             "project lock {} is unavailable; run transit before export: {error}",
