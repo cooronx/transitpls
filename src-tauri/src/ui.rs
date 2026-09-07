@@ -109,7 +109,7 @@ pub async fn ui_verify_and_save_model(
             "OK",
         )
         .await
-        .map_err(|error| format!("模型连接验证失败：{error}"))?;
+        .map_err(|error| format!("模型配置验证失败：{error}"))?;
     if let Some(key) = supplied {
         crate::credentials::save_api_key(&value.llm.provider, &key)?;
     }
