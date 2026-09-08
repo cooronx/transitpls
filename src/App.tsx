@@ -1549,6 +1549,7 @@ function TermsView({
   const [target, setTarget] = useState("");
   const [impact, setImpact] = useState<AffectedContent[]>([]);
   const [impactSource, setImpactSource] = useState<string | null>(null);
+  const [allConflictImpacts, setAllConflictImpacts] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1571,7 +1572,25 @@ function TermsView({
     });
     setImpact(items);
     setImpactSource(source);
+    setAllConflictImpacts(false);
     setSelected(new Set());
+  };
+  const scanAll = async (selectAll = true) => {
+    if (!detail) return;
+    const sources = detail.termConflicts
+      .filter((item) => item.unresolved_events > 0)
+      .map((item) => item.source);
+    const groups = await Promise.all(sources.map((source) =>
+      invoke<AffectedContent[]>("ui_scan_term_impact", {
+        projectId: detail.project.id,
+        source,
+      }),
+    ));
+    const items = [...new Map(groups.flat().map((item) => [item.id, item])).values()];
+    setImpact(items);
+    setImpactSource(null);
+    setAllConflictImpacts(true);
+    setSelected(selectAll ? new Set(items.map((item) => item.id)) : new Set());
   };
   useEffect(() => {
     if (!conflict) return;
@@ -1620,13 +1639,15 @@ function TermsView({
       itemIds: [...selected],
       mockClient: false,
     });
-    if (impactSource) await scan(impactSource);
+    if (allConflictImpacts) await scanAll(false);
+    else if (impactSource) await scan(impactSource);
     await onReload();
   });
   const restore = (item: AffectedContent) => run("恢复译文", async () => {
     if (!detail) return;
     await invoke("ui_restore_translation", { projectId: detail.project.id, itemId: item.id });
-    if (impactSource) await scan(impactSource);
+    if (allConflictImpacts) await scanAll(false);
+    else if (impactSource) await scan(impactSource);
     await onReload();
   });
   return (
@@ -1676,6 +1697,7 @@ function TermsView({
             <button className="primary" disabled={!target.trim() || Boolean(working)} onClick={() => void resolve(conflict.source)}>保存人工裁定</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "non_fixed")}>标记为非固定术语</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "ignored")}>忽略术语</button>
+            <button disabled={Boolean(working)} onClick={() => void run("汇总影响", () => scanAll())}>汇总并全选全部冲突影响</button>
             {conflict.policy !== "automatic" && <button disabled={Boolean(working)} onClick={() => void undo(conflict.source)}>撤销并恢复待处理</button>}
           </div>
         </section>
@@ -1684,9 +1706,9 @@ function TermsView({
       {impact.length > 0 && (
         <section className="impact-panel">
           <header>
-            <div><h2>可能受影响的已翻译内容</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪。</p></div>
+            <div><h2>{allConflictImpacts ? "全部待处理冲突可能影响的内容" : "当前术语可能影响的内容"}</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪；重复命中的内容只显示一次。</p></div>
             <button onClick={() => setSelected(selected.size === impact.length ? new Set() : new Set(impact.map((item) => item.id)))}>
-              {selected.size === impact.length ? "取消全选" : "选择全部"}
+              {selected.size === impact.length ? "取消全选" : "选择当前列表全部"}
             </button>
           </header>
           {impact.map((item) => (
