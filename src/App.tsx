@@ -1700,9 +1700,6 @@ function SettingsView({
                   setApiKey("");
                 }}
               >
-                <option value="openai-chat">
-                  OpenAI Chat Completions
-                </option>
                 <option value="openai-compatible">OpenAI-compatible (Chat Completions)</option>
                 <option value="openai-responses">OpenAI Responses</option>
                 <option value="anthropic">Anthropic(Messages)</option>
