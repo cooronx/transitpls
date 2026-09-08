@@ -254,7 +254,7 @@ fn configuration_normalization_and_presets() {
     assert!(RigClient::from_config_with_api_key(&LlmConfig::default(), "").is_err());
     let presets: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../src/provider-presets.json")).unwrap();
-    assert_eq!(presets.len(), 8);
+    assert_eq!(presets.len(), 6);
     for preset in presets {
         if preset["base_url"] == "" {
             continue;

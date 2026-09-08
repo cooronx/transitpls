@@ -1605,7 +1605,7 @@ function SettingsView({
       item.provider === config?.llm.provider.trim().toLowerCase() &&
       item.base_url === config?.llm.base_url?.replace(/\/$/, ""));
     setPresetName(preset?.name ?? "");
-    setEditedFields(new Set(["base_url", "model", "api_key_env"].filter((key) => {
+    setEditedFields(new Set(["base_url", "model"].filter((key) => {
       const value = config?.llm[key as keyof Config["llm"]];
       return value !== undefined && value !== (preset?.[key as keyof typeof preset]);
     })));
@@ -1635,8 +1635,7 @@ function SettingsView({
     noKey = ["openai-chat", "openai-compatible"].includes(draft.llm.provider.trim().toLowerCase()) &&
       !draft.llm.api_key_env.trim() && (host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host));
   } catch { /* The backend reports invalid URLs when validating. */ }
-  const configured = Boolean(sameProvider && credential?.configured && credential.source !== "none" &&
-    (credential.source !== "environment" || draft.llm.api_key_env === config?.llm.api_key_env));
+  const configured = Boolean(sameProvider && credential?.configured && credential.source !== "none");
   const savingModel = busy === "验证模型";
   const savingGeneral = busy === "保存通用设置";
   return (
@@ -1678,7 +1677,7 @@ function SettingsView({
               {(configured || noKey) && (
                 <span className="credential-ok icon-label">
                   <Check />
-                  {noKey ? "本地免密" : credential?.source === "environment" ? "环境变量已配置" : "密钥已保存"}
+                  {noKey ? "本地免密" : "API Key 已配置"}
                 </span>
               )}
             </div>
@@ -1717,9 +1716,6 @@ function SettingsView({
                 onChange={(e) => field("base_url", e.target.value)}
               />
             </Field>
-            <Field label="API Key 环境变量">
-              <input value={draft.llm.api_key_env} onChange={(e) => field("api_key_env", e.target.value)} placeholder="本地无认证服务可留空" />
-            </Field>
             <Field label="API Key">
               <div className="secret-input">
                 <input
@@ -1742,12 +1738,6 @@ function SettingsView({
                 Key 仅保存在当前用户的 TransItPls 配置目录中，不会写入书籍项目。
               </small>
             </Field>
-            {credential?.source === "environment" && configured && !noKey && (
-              <div className="config-note">
-                当前优先使用环境变量 {draft.llm.api_key_env}；桌面端保存的 Key
-                将作为后备。
-              </div>
-            )}
             <div className="settings-actions">
               <button
                 className="primary"

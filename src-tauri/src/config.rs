@@ -173,12 +173,9 @@ impl LlmConfig {
         if config.allows_empty_key() {
             return Ok(String::new());
         }
-        if let Ok(value) = std::env::var(&config.api_key_env) {
-            if !value.trim().is_empty() {
-                return Ok(value);
-            }
-        }
-        if let Some(value) = crate::credentials::load_api_key(&config.provider)? {
+        let stored = crate::credentials::load_api_key(&config.provider)?;
+        let environment = std::env::var(&config.api_key_env).ok();
+        if let Some(value) = select_api_key(stored, environment) {
             return Ok(value);
         }
         Err(format!(
@@ -186,6 +183,10 @@ impl LlmConfig {
             config.provider, config.model
         ))
     }
+}
+
+fn select_api_key(stored: Option<String>, environment: Option<String>) -> Option<String> {
+    stored.or_else(|| environment.filter(|value| !value.trim().is_empty()))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -362,15 +363,18 @@ mod tests {
     }
 
     #[test]
-    fn reads_api_key_from_named_environment_variable() {
-        let mut config = AppConfig::default();
-        let name = format!("TRANSITPLS_TEST_KEY_{}", std::process::id());
-        config.llm.api_key_env = name.clone();
-        std::env::set_var(&name, "secret-value");
+    fn prefers_desktop_api_key_over_environment_fallback() {
         assert_eq!(
-            config.llm.api_key().expect("key should resolve"),
-            "secret-value"
+            super::select_api_key(Some("desktop-key".into()), Some("environment-key".into())),
+            Some("desktop-key".into())
         );
-        std::env::remove_var(name);
+    }
+
+    #[test]
+    fn uses_environment_api_key_as_fallback() {
+        assert_eq!(
+            super::select_api_key(None, Some("environment-key".into())),
+            Some("environment-key".into())
+        );
     }
 }

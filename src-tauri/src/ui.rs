@@ -485,6 +485,13 @@ fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
             source: Some("none"),
         });
     }
+    let stored = crate::credentials::load_api_key(&config.llm.provider)?;
+    if stored.is_some() {
+        return Ok(CredentialStatus {
+            configured: true,
+            source: Some("desktop"),
+        });
+    }
     if let Ok(value) = std::env::var(&config.llm.api_key_env) {
         if !value.trim().is_empty() {
             return Ok(CredentialStatus {
@@ -493,10 +500,9 @@ fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
             });
         }
     }
-    let stored = crate::credentials::load_api_key(&config.llm.provider)?;
     Ok(CredentialStatus {
-        configured: stored.is_some(),
-        source: stored.as_ref().map(|_| "desktop"),
+        configured: false,
+        source: None,
     })
 }
 
