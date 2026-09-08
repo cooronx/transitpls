@@ -1672,7 +1672,7 @@ function SettingsView({
           <div className="settings-card">
             <div className="settings-heading">
               <div>
-                <h2>模型配置</h2>
+                <h2>服务预设</h2>
                 <p>选择模型提供商，并验证用于翻译的 API Key。</p>
               </div>
               {(configured || noKey) && (
