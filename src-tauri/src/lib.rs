@@ -7,6 +7,7 @@ pub mod llm;
 pub mod model;
 pub mod parser;
 pub mod pipeline;
+pub mod review;
 pub mod state;
 pub mod terms;
 pub mod ui;

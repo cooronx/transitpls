@@ -5,6 +5,7 @@ use crate::llm::{self, MockClient, RecordingClient, RigClient, TranslationClient
 use crate::model::{Chapter, ItemStatus, ProjectStatus, Segment, SegmentKind};
 use crate::parser;
 use crate::pipeline;
+use crate::review;
 use crate::state;
 use crate::terms::{self, PendingExtraction, TermStore};
 use crate::usage::UsageRecorder;
@@ -28,7 +29,7 @@ pub struct Cli {
 enum Command {
     Init(InitArgs),
     Transit(TransitArgs),
-    Review(InputArgs),
+    Review(ReviewArgs),
     Export(ExportArgs),
     Status(ProjectArgs),
     Terms(TermsArgs),
@@ -59,6 +60,26 @@ struct TransitArgs {
 #[derive(Debug, Args)]
 struct InputArgs {
     input: PathBuf,
+}
+#[derive(Debug, Args)]
+struct ReviewArgs {
+    input: Option<PathBuf>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long)]
+    chapter: Option<usize>,
+    #[arg(long)]
+    severity: Option<String>,
+    #[arg(long, default_value = "text")]
+    format: String,
+    #[arg(long)]
+    out: Option<PathBuf>,
+    #[arg(long)]
+    mock: bool,
+    #[arg(long)]
+    resume: Option<String>,
+    #[arg(long)]
+    retry_failed: bool,
 }
 
 #[derive(Debug, Args)]
@@ -164,23 +185,66 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             Ok(0)
         }
         Command::Transit(args) => transit(args, &state_dir, &config).await,
-        Command::Review(args) => {
-            let project = state::load_for_source(&state_dir, &args.input)?;
-            state::append_log(
-                &state_dir,
-                &project,
-                "review_requested",
-                serde_json::json!({}),
-            )?;
-            eprintln!(
-                "review is not implemented in this stage (project {})",
-                project.id
-            );
-            Ok(2)
-        }
+        Command::Review(args) => review_command(args, &state_dir).await,
         Command::Export(args) => export_file(args, &state_dir),
         Command::Terms(args) => terms(args, &state_dir),
     }
+}
+
+async fn review_command(args: ReviewArgs, state_dir: &std::path::Path) -> Result<i32, String> {
+    let project = if let Some(id) = args.project {
+        state::load_project(state_dir, &id)?
+    } else if let Some(input) = args.input {
+        state::load_for_source(state_dir, &input)?
+    } else {
+        return Err("review requires INPUT or --project".into());
+    };
+    let chapters = state::load_chapters(state_dir, &project)?;
+    if let Some(index) = args.chapter {
+        if index >= chapters.len() {
+            return Err(format!("chapter index {index} is out of range"));
+        }
+    }
+    let (report, dir) = review::run(
+        state_dir,
+        &project,
+        &chapters,
+        args.chapter,
+        args.mock,
+        args.resume.as_deref(),
+        args.retry_failed,
+    )
+    .await?;
+    if let Some(out) = args.out {
+        std::fs::copy(
+            if args.format == "json" {
+                dir.join("report.json")
+            } else {
+                dir.join("report.md")
+            },
+            &out,
+        )
+        .map_err(|e| format!("copy report: {e}"))?;
+    }
+    if args.format == "json" {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&report).map_err(|e| e.to_string())?
+        );
+    } else {
+        println!(
+            "review completed: project {}\nrun: {}\nissues: {}\nreport: {}",
+            project.id,
+            dir.display(),
+            report.issues.len(),
+            dir.join("report.md").display()
+        );
+    }
+    Ok(if report.failed_batches.is_empty() {
+        0
+    } else {
+        2
+    })
 }
 
 pub async fn initialize_project(
