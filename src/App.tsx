@@ -1573,6 +1573,10 @@ function TermsView({
     setImpactSource(source);
     setSelected(new Set());
   };
+  useEffect(() => {
+    if (!conflict) return;
+    void scan(conflict.source).catch((value) => setError(String(value)));
+  }, [conflict?.source, detail?.project.id]);
   const run = async (label: string, action: () => Promise<void>) => {
     setWorking(label);
     setError(null);
