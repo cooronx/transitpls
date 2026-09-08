@@ -63,6 +63,7 @@ interface Segment {
   target: string | null;
   kind: string;
   status: ItemStatus;
+  meta?: Record<string, unknown>;
 }
 interface Chapter {
   id: string;
@@ -70,7 +71,9 @@ interface Chapter {
   target_title?: string;
   status: ItemStatus;
   segments: Segment[];
+  meta?: Record<string, unknown>;
 }
+type TermPolicy = "automatic" | "fixed" | "non_fixed" | "ignored";
 interface Term {
   source: string;
   target: string;
@@ -79,6 +82,33 @@ interface Term {
   first_chapter: number;
   note?: string;
   status: "ok" | "conflict" | "resolved";
+  policy: TermPolicy;
+  manual_target?: string | null;
+}
+interface ConflictCandidate {
+  target: string;
+  occurrences: number;
+  chapters: number[];
+  evidence: Array<{ chapter: number; source_excerpt: string; target_excerpt: string }>;
+}
+interface TermConflict {
+  source: string;
+  current_target: string;
+  policy: TermPolicy;
+  manual_target?: string | null;
+  unresolved_events: number;
+  resolved_events: number;
+  candidates: ConflictCandidate[];
+}
+interface AffectedContent {
+  id: string;
+  chapterId: string;
+  chapter: number;
+  kind: string;
+  source: string;
+  currentTarget: string;
+  previousTarget?: string | null;
+  retranslationError?: string | null;
 }
 interface LogEntry {
   timestamp: string;
@@ -127,6 +157,8 @@ interface Detail {
   logs: LogEntry[];
   terms: Term[];
   conflicts: Array<{ source: string; target: string; chapter: number }>;
+  termConflicts: TermConflict[];
+  pendingConflicts: number;
   report?: unknown;
 }
 type View =
@@ -523,6 +555,7 @@ export default function App() {
               ready={detail.taskInitialized}
               onTranslate={() => translate(chapterIndex)}
               onExport={exportBook}
+              onOpenTerms={() => setView("terms")}
             />
           )}
           {view === "projects" && (
@@ -543,7 +576,12 @@ export default function App() {
             />
           )}
           {view === "terms" && (
-            <TermsView detail={detail} onReload={() => reload()} />
+            <TermsView
+              detail={detail}
+              config={bootstrap?.config}
+              taskBusy={Boolean(busy)}
+              onReload={() => reload()}
+            />
           )}
           {view === "settings" && (
             <SettingsView
@@ -872,6 +910,7 @@ function Workspace({
   ready,
   onTranslate,
   onExport,
+  onOpenTerms,
 }: {
   detail: Detail;
   chapter: Chapter;
@@ -885,6 +924,7 @@ function Workspace({
   ready: boolean;
   onTranslate: () => void;
   onExport: (f: "txt" | "epub") => void;
+  onOpenTerms: () => void;
 }) {
   return (
     <div className="editor-layout">
@@ -947,7 +987,7 @@ function Workspace({
           </button>
         )}
       </section>
-      <Tray detail={detail} tray={tray} setTray={setTray} onExport={onExport} />
+      <Tray detail={detail} tray={tray} setTray={setTray} onExport={onExport} onOpenTerms={onOpenTerms} />
     </div>
   );
 }
@@ -1002,11 +1042,13 @@ function Tray({
   tray,
   setTray,
   onExport,
+  onOpenTerms,
 }: {
   detail: Detail;
   tray: TrayName;
   setTray: (t: TrayName) => void;
   onExport: (f: "txt" | "epub") => void;
+  onOpenTerms: () => void;
 }) {
   return (
     <section className="tray">
@@ -1022,7 +1064,7 @@ function Tray({
             className={tray === "issues" ? "active" : ""}
             onClick={() => setTray("issues")}
           >
-            问题列表 <b>{detail.conflicts.length}</b>
+            问题列表 <b>{detail.pendingConflicts}</b>
           </button>
           <button
             className={tray === "logs" ? "active" : ""}
@@ -1044,7 +1086,7 @@ function Tray({
       </header>
       <div className="tray-content">
         {tray === "tasks" && <TaskTable detail={detail} />}{" "}
-        {tray === "issues" && <IssueList detail={detail} />}{" "}
+        {tray === "issues" && <IssueList detail={detail} onOpenTerms={onOpenTerms} />}{" "}
         {tray === "logs" && <LogList logs={detail.logs} />}
       </div>
     </section>
@@ -1093,17 +1135,18 @@ function TaskTable({ detail }: { detail: Detail }) {
     </table>
   );
 }
-function IssueList({ detail }: { detail: Detail }) {
-  return detail.conflicts.length ? (
+function IssueList({ detail, onOpenTerms }: { detail: Detail; onOpenTerms: () => void }) {
+  const conflicts = detail.termConflicts.filter((item) => item.unresolved_events > 0);
+  return conflicts.length ? (
     <div className="issue-list">
-      {detail.conflicts.map((item, index) => (
-        <div key={`${item.source}-${index}`}>
+      {conflicts.map((item) => (
+        <button type="button" key={item.source} onClick={onOpenTerms}>
           <b>术语冲突</b>
           <span>
-            {item.source} → {item.target}
+            {item.source} · 当前固定译名：{item.current_target}
           </span>
-          <em>第 {item.chapter + 1} 章</em>
-        </div>
+          <em>{item.unresolved_events} 个待处理事件</em>
+        </button>
       ))}
     </div>
   ) : (
@@ -1166,7 +1209,7 @@ function Inspector({
       Math.max(1, detail.project.chapters_total)) *
       100,
   );
-  const conflictCount = new Set(detail.conflicts.map((item) => item.source)).size;
+  const conflictCount = detail.pendingConflicts;
   return (
     <aside className="inspector">
       <div className="inspector-tabs">
@@ -1491,23 +1534,97 @@ function ProjectCover({
 }
 function TermsView({
   detail,
+  config,
+  taskBusy,
   onReload,
 }: {
   detail: Detail | null;
+  config?: Config;
+  taskBusy: boolean;
   onReload: () => Promise<void>;
 }) {
-  const [editing, setEditing] = useState<string | null>(null),
-    [target, setTarget] = useState("");
-  const resolve = async (term: Term) => {
-    if (!detail || !target.trim()) return;
-    await invoke("ui_resolve_term", {
+  const [showResolved, setShowResolved] = useState(false);
+  const [conflictIndex, setConflictIndex] = useState(0);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [target, setTarget] = useState("");
+  const [impact, setImpact] = useState<AffectedContent[]>([]);
+  const [impactSource, setImpactSource] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [working, setWorking] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const conflicts = (detail?.termConflicts ?? []).filter(
+    (item) => showResolved || item.unresolved_events > 0,
+  );
+  const conflict = conflicts[Math.min(conflictIndex, Math.max(0, conflicts.length - 1))];
+  useEffect(() => {
+    setConflictIndex((index) => Math.min(index, Math.max(0, conflicts.length - 1)));
+  }, [conflicts.length]);
+  useEffect(() => {
+    setTarget(conflict?.manual_target ?? conflict?.current_target ?? "");
+  }, [conflict?.source, conflict?.manual_target, conflict?.current_target]);
+
+  const scan = async (source: string) => {
+    if (!detail) return;
+    const items = await invoke<AffectedContent[]>("ui_scan_term_impact", {
       projectId: detail.project.id,
-      source: term.source,
-      target,
+      source,
     });
-    setEditing(null);
-    await onReload();
+    setImpact(items);
+    setImpactSource(source);
+    setSelected(new Set());
   };
+  const run = async (label: string, action: () => Promise<void>) => {
+    setWorking(label);
+    setError(null);
+    try {
+      await action();
+    } catch (value) {
+      setError(String(value));
+    } finally {
+      setWorking(null);
+    }
+  };
+  const resolve = (source: string) => run("保存裁定", async () => {
+    if (!detail || !target.trim()) return;
+    await invoke("ui_resolve_term", { projectId: detail.project.id, source, target: target.trim() });
+    setEditing(null);
+    await scan(source);
+    await onReload();
+  });
+  const setPolicy = (source: string, policy: TermPolicy) => run("更新规则", async () => {
+    if (!detail) return;
+    await invoke("ui_set_term_policy", { projectId: detail.project.id, source, policy });
+    await scan(source);
+    await onReload();
+  });
+  const undo = (source: string) => run("撤销裁定", async () => {
+    if (!detail) return;
+    await invoke("ui_undo_term_resolution", { projectId: detail.project.id, source });
+    setImpact([]);
+    await onReload();
+  });
+  const retranslate = () => run("重译", async () => {
+    if (!detail || !selected.size) return;
+    const chapters = new Set(impact.filter((item) => selected.has(item.id)).map((item) => item.chapter)).size;
+    const confirmed = await confirmDialog(
+      `将重译 ${selected.size} 项、涉及 ${chapters} 章${config?.pipeline.polish ? "，并重新执行润色" : ""}。此操作会消耗 API Token，是否继续？`,
+      { title: "确认选择性重译", kind: "warning" },
+    );
+    if (!confirmed) return;
+    await invoke("ui_retranslate", {
+      projectId: detail.project.id,
+      itemIds: [...selected],
+      mockClient: false,
+    });
+    if (impactSource) await scan(impactSource);
+    await onReload();
+  });
+  const restore = (item: AffectedContent) => run("恢复译文", async () => {
+    if (!detail) return;
+    await invoke("ui_restore_translation", { projectId: detail.project.id, itemId: item.id });
+    if (impactSource) await scan(impactSource);
+    await onReload();
+  });
   return (
     <div className="page-view">
       <header>
@@ -1519,7 +1636,70 @@ function TermsView({
               : "选择项目后查看术语"}
           </p>
         </div>
+        <label className="history-toggle">
+          <input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} />
+          查看已处理记录
+        </label>
       </header>
+      {error && <div className="term-error">{error}</div>}
+      {detail && conflict && (
+        <section className="conflict-panel">
+          <header>
+            <div>
+              <small>译名冲突 · {conflict.unresolved_events} 个待处理事件</small>
+              <h2>{conflict.source}</h2>
+              <p>当前固定译名：<b>{conflict.current_target}</b></p>
+            </div>
+            <nav>
+              <button disabled={conflictIndex === 0} onClick={() => setConflictIndex((value) => value - 1)}>上一个</button>
+              <span>{conflictIndex + 1} / {conflicts.length}</span>
+              <button disabled={conflictIndex >= conflicts.length - 1} onClick={() => setConflictIndex((value) => value + 1)}>下一个</button>
+            </nav>
+          </header>
+          <div className="candidate-grid">
+            {conflict.candidates.map((candidate) => (
+              <button key={candidate.target} onClick={() => setTarget(candidate.target)} className={target === candidate.target ? "active" : ""}>
+                <b>{candidate.target}</b>
+                <span>{candidate.occurrences} 次 · {candidate.chapters.map((chapter) => `第 ${chapter + 1} 章`).join("、")}</span>
+                {candidate.evidence.slice(0, 3).map((evidence, index) => (
+                  <small key={index}>{evidence.source_excerpt || "旧数据库无原文片段"}<br />{evidence.target_excerpt || "旧数据库无译文片段"}</small>
+                ))}
+              </button>
+            ))}
+          </div>
+          <div className="conflict-actions">
+            <input value={target} placeholder="选择候选或输入新的固定译名" onChange={(event) => setTarget(event.target.value)} />
+            <button className="primary" disabled={!target.trim() || Boolean(working)} onClick={() => void resolve(conflict.source)}>保存人工裁定</button>
+            <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "non_fixed")}>标记为非固定术语</button>
+            <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "ignored")}>忽略术语</button>
+            {conflict.policy !== "automatic" && <button disabled={Boolean(working)} onClick={() => void undo(conflict.source)}>撤销并恢复待处理</button>}
+          </div>
+        </section>
+      )}
+      {detail && !conflict && <div className="panel-empty">当前没有{showResolved ? "冲突记录" : "待处理冲突"}</div>}
+      {impact.length > 0 && (
+        <section className="impact-panel">
+          <header>
+            <div><h2>可能受影响的已翻译内容</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪。</p></div>
+            <button onClick={() => setSelected(selected.size === impact.length ? new Set() : new Set(impact.map((item) => item.id)))}>
+              {selected.size === impact.length ? "取消全选" : "选择全部"}
+            </button>
+          </header>
+          {impact.map((item) => (
+            <div className="impact-row" key={item.id}>
+              <input type="checkbox" checked={selected.has(item.id)} onChange={() => setSelected((current) => {
+                const next = new Set(current); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next;
+              })} />
+              <span><b>第 {item.chapter + 1} 章 · {item.kind}</b><small>{item.source}</small><em>{item.currentTarget}</em>{item.retranslationError && <strong>重译失败：{item.retranslationError}</strong>}</span>
+              <button disabled={!item.previousTarget || Boolean(working)} onClick={() => void restore(item)}>恢复旧译文</button>
+            </div>
+          ))}
+          <footer>
+            <span>已选择 {selected.size} 项；默认不会自动重译。</span>
+            <button className="primary" disabled={!selected.size || taskBusy || Boolean(working)} onClick={() => void retranslate()}>{taskBusy ? "翻译任务结束后可重译" : "重译所选内容"}</button>
+          </footer>
+        </section>
+      )}
       {detail && detail.terms.length ? (
         <div className="term-table">
           <div className="term-row term-head">
@@ -1545,22 +1725,30 @@ function TermsView({
               <span>{termTypeText[term.type] ?? "其他"}</span>
               <span>第 {term.first_chapter + 1} 章</span>
               <em className={term.status}>
-                {term.status === "conflict"
+                {term.policy === "ignored"
+                  ? "已忽略"
+                  : term.policy === "non_fixed"
+                    ? "非固定"
+                    : term.status === "conflict"
                   ? "有冲突"
                   : term.status === "resolved"
                     ? "已裁定"
                     : "正常"}
               </em>
               {editing === term.source ? (
-                <button onClick={() => void resolve(term)}>保存</button>
+                <button onClick={() => void resolve(term.source)}>保存</button>
               ) : (
                 <button
                   onClick={() => {
-                    setEditing(term.source);
-                    setTarget(term.target);
+                    if (term.policy === "ignored" || term.policy === "non_fixed") {
+                      void setPolicy(term.source, "automatic");
+                    } else {
+                      setEditing(term.source);
+                      setTarget(term.target);
+                    }
                   }}
                 >
-                  修改
+                  {term.policy === "ignored" || term.policy === "non_fixed" ? "恢复" : "修改"}
                 </button>
               )}
             </div>
@@ -1868,6 +2056,11 @@ function eventText(event: string) {
         transit_started: "开始翻译",
         transit_completed: "翻译完成",
         term_resolved: "术语已裁定",
+        term_policy_changed: "术语规则已更新",
+        term_resolution_undone: "术语裁定已撤销",
+        retranslated: "内容已重译",
+        retranslation_failed: "内容重译失败",
+        translation_restored: "旧译文已恢复",
         exported: "成品已导出",
         failed: "任务失败",
       } as Record<string, string>

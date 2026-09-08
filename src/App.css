@@ -1011,13 +1011,21 @@ button:disabled {
     justify-self: end
 }
 
-.issue-list>div,
+.issue-list>button,
 .log-list>div {
     display: grid;
     grid-template-columns: 120px 1fr auto;
     gap: 12px;
     padding: 8px 13px;
     border-bottom: 1px solid #edf1f4
+}
+
+.issue-list>button {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    text-align: left;
+    cursor: pointer
 }
 
 .issue-list b {
@@ -1446,6 +1454,156 @@ button:disabled {
 
 .term-row em.resolved {
     color: var(--teal)
+}
+
+.history-toggle {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: #607589;
+    font-size: 13px
+}
+
+.term-error {
+    margin-bottom: 12px;
+    padding: 10px 13px;
+    border: 1px solid #efc7c7;
+    border-radius: 7px;
+    background: #fff3f3;
+    color: #a63f3f
+}
+
+.conflict-panel,
+.impact-panel {
+    margin-bottom: 16px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: #fff
+}
+
+.conflict-panel>header,
+.impact-panel>header,
+.impact-panel>footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px
+}
+
+.conflict-panel h2,
+.impact-panel h2 {
+    margin: 3px 0;
+    font-size: 18px
+}
+
+.conflict-panel p,
+.impact-panel p {
+    margin: 0;
+    color: #718399;
+    font-size: 12px
+}
+
+.conflict-panel nav,
+.conflict-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px
+}
+
+.conflict-panel button,
+.impact-panel button {
+    border: 1px solid #d8e1e8;
+    border-radius: 6px;
+    background: #fff;
+    padding: 7px 10px;
+    cursor: pointer
+}
+
+.conflict-panel button:disabled,
+.impact-panel button:disabled {
+    cursor: default;
+    opacity: .5
+}
+
+.candidate-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 10px;
+    margin: 14px 0
+}
+
+.candidate-grid>button {
+    display: grid;
+    gap: 5px;
+    text-align: left
+}
+
+.candidate-grid>button.active {
+    border-color: var(--teal);
+    background: #effaf8
+}
+
+.candidate-grid span,
+.candidate-grid small {
+    color: #718399
+}
+
+.candidate-grid small {
+    padding-top: 5px;
+    border-top: 1px solid #edf1f4
+}
+
+.conflict-actions {
+    flex-wrap: wrap
+}
+
+.conflict-actions input {
+    flex: 1 1 260px;
+    min-height: 33px;
+    padding: 0 9px;
+    border: 1px solid #cfd9e1;
+    border-radius: 6px
+}
+
+.conflict-panel button.primary,
+.impact-panel button.primary {
+    border-color: var(--teal);
+    background: var(--teal);
+    color: #fff
+}
+
+.impact-row {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid #edf1f4
+}
+
+.impact-row>span {
+    display: grid;
+    gap: 3px
+}
+
+.impact-row small,
+.impact-row em {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #718399;
+    font-style: normal
+}
+
+.impact-row strong {
+    color: #a63f3f;
+    font-size: 12px
+}
+
+.impact-panel>footer {
+    padding-top: 12px;
+    color: #718399
 }
 
 .page-empty {

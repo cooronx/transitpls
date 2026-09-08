@@ -6,6 +6,37 @@ use std::path::Path;
 use std::time::Duration;
 use unicode_normalization::UnicodeNormalization;
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TermPolicy {
+    #[default]
+    Automatic,
+    Fixed,
+    NonFixed,
+    Ignored,
+}
+
+impl TermPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Fixed => "fixed",
+            Self::NonFixed => "non_fixed",
+            Self::Ignored => "ignored",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "automatic" => Ok(Self::Automatic),
+            "fixed" => Ok(Self::Fixed),
+            "non_fixed" => Ok(Self::NonFixed),
+            "ignored" => Ok(Self::Ignored),
+            _ => Err(format!("invalid term policy in database: {value}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Term {
     pub source: String,
@@ -19,6 +50,10 @@ pub struct Term {
     pub first_chapter: usize,
     pub note: Option<String>,
     pub status: TermStatus,
+    #[serde(default)]
+    pub policy: TermPolicy,
+    #[serde(default)]
+    pub manual_target: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +94,32 @@ pub struct TermCandidate {
     pub source: String,
     pub target: String,
     pub chapter: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermEvidence {
+    pub chapter: usize,
+    pub source_excerpt: String,
+    pub target_excerpt: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConflictCandidate {
+    pub target: String,
+    pub occurrences: usize,
+    pub chapters: Vec<usize>,
+    pub evidence: Vec<TermEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TermConflict {
+    pub source: String,
+    pub current_target: String,
+    pub policy: TermPolicy,
+    pub manual_target: Option<String>,
+    pub unresolved_events: usize,
+    pub resolved_events: usize,
+    pub candidates: Vec<ConflictCandidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,20 +170,38 @@ impl TermStore {
     }
 
     pub fn insert(&self, term: &Term) -> Result<TermStatus, String> {
+        self.insert_with_evidence(term, "", "")
+    }
+
+    pub fn insert_with_evidence(
+        &self,
+        term: &Term,
+        source_text: &str,
+        target_text: &str,
+    ) -> Result<TermStatus, String> {
         validate_term(term)?;
         let mut connection = self.connect()?;
         let transaction = connection
             .transaction()
             .map_err(|error| format!("failed to start term transaction: {error}"))?;
         let existing = find_term(&transaction, &term.source)?;
+        let policy = read_policy(&transaction, &term.source)?;
+        if policy == TermPolicy::Ignored {
+            transaction
+                .commit()
+                .map_err(|error| format!("failed to commit term transaction: {error}"))?;
+            return Ok(TermStatus::Resolved);
+        }
         let status = match existing {
             None => {
                 write_new_term(&transaction, term)?;
                 sync_aliases(&transaction, &term.source, &term.aliases)?;
+                record_evidence(&transaction, term, source_text, target_text)?;
                 TermStatus::Ok
             }
             Some(existing) if existing.target == term.target => {
                 merge_term_metadata(&transaction, &existing, term)?;
+                record_evidence(&transaction, term, source_text, target_text)?;
                 let mut aliases = existing.aliases;
                 for alias in &term.aliases {
                     if !aliases.contains(alias) {
@@ -134,6 +213,7 @@ impl TermStore {
             }
             Some(existing) => {
                 merge_term_metadata(&transaction, &existing, term)?;
+                record_evidence(&transaction, term, source_text, target_text)?;
                 let mut aliases = existing.aliases.clone();
                 for alias in &term.aliases {
                     if !aliases.contains(alias) {
@@ -148,7 +228,17 @@ impl TermStore {
                     existing.first_chapter,
                 )?;
                 record_candidate(&transaction, &term.source, &term.target, term.first_chapter)?;
-                if existing.status != TermStatus::Resolved {
+                record_conflict(&transaction, &term.source, &term.target)?;
+                if matches!(policy, TermPolicy::Fixed | TermPolicy::NonFixed) {
+                    transaction
+                        .execute(
+                            "UPDATE term_conflicts SET resolved = 1, resolved_at = CURRENT_TIMESTAMP
+                             WHERE source = ?1 AND target = ?2",
+                            params![term.source, term.target],
+                        )
+                        .map_err(|error| format!("failed to settle term conflict: {error}"))?;
+                    TermStatus::Resolved
+                } else {
                     transaction
                         .execute(
                             "UPDATE terms SET status = 'conflict' WHERE source = ?1",
@@ -156,8 +246,6 @@ impl TermStore {
                         )
                         .map_err(|error| format!("failed to mark term conflict: {error}"))?;
                     TermStatus::Conflict
-                } else {
-                    TermStatus::Resolved
                 }
             }
         };
@@ -181,11 +269,18 @@ impl TermStore {
         let rows = statement
             .query_map([], row_to_term)
             .map_err(|error| format!("failed to query terms: {error}"))?;
-        rows.map(|row| row.map_err(|error| format!("failed to read term: {error}")))
+        let mut terms = rows
+            .map(|row| row.map_err(|error| format!("failed to read term: {error}")))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .map(parse_stored_term)
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        for term in &mut terms {
+            let (policy, target) = read_rule(&connection, &term.source)?;
+            term.policy = policy;
+            term.manual_target = target;
+        }
+        Ok(terms)
     }
 
     pub fn conflicts(&self) -> Result<Vec<TermCandidate>, String> {
@@ -216,8 +311,16 @@ impl TermStore {
         if source.trim().is_empty() || target.trim().is_empty() {
             return Err("term source and resolved target must not be empty".to_string());
         }
-        let connection = self.connect()?;
-        let changed = connection
+        let mut connection = self.connect()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let action = if read_policy(&transaction, source)? == TermPolicy::Fixed {
+            "modify_resolution"
+        } else {
+            "resolve"
+        };
+        let changed = transaction
             .execute(
                 "UPDATE terms SET target = ?2, status = 'resolved' WHERE source = ?1",
                 params![source, target],
@@ -226,7 +329,209 @@ impl TermStore {
         if changed == 0 {
             return Err(format!("term not found: {source}"));
         }
-        Ok(())
+        write_rule(&transaction, source, TermPolicy::Fixed, Some(target))?;
+        transaction.execute(
+            "UPDATE term_conflicts SET resolved = 1, resolved_at = CURRENT_TIMESTAMP WHERE source = ?1 AND resolved = 0",
+            [source],
+        ).map_err(|error| format!("failed to settle term conflicts: {error}"))?;
+        audit(
+            &transaction,
+            source,
+            action,
+            serde_json::json!({"target": target}),
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| format!("failed to commit term resolution: {error}"))
+    }
+
+    pub fn undo_resolution(&self, source: &str) -> Result<(), String> {
+        self.set_policy(source, TermPolicy::Automatic)
+    }
+
+    pub fn set_policy(&self, source: &str, policy: TermPolicy) -> Result<(), String> {
+        let mut connection = self.connect()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        let exists = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM terms WHERE source = ?1)",
+                [source],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| format!("failed to query term: {error}"))?;
+        if !exists {
+            return Err(format!("term not found: {source}"));
+        }
+        let target = if policy == TermPolicy::Fixed {
+            transaction
+                .query_row(
+                    "SELECT target FROM terms WHERE source = ?1",
+                    [source],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        write_rule(&transaction, source, policy, target.as_deref())?;
+        let unresolved = if policy == TermPolicy::Automatic {
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO term_conflicts (source, target)
+                     SELECT e.source, e.target FROM term_evidence e
+                     JOIN terms t ON t.source = e.source
+                     WHERE e.source = ?1 AND e.target != t.target",
+                    [source],
+                )
+                .map_err(|error| format!("failed to restore term conflicts: {error}"))?;
+            transaction
+                .execute(
+                    "UPDATE term_conflicts SET resolved = 0, resolved_at = NULL WHERE source = ?1",
+                    [source],
+                )
+                .map_err(|error| format!("failed to reopen term conflicts: {error}"))?;
+            transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM term_conflicts WHERE source = ?1 AND resolved = 0",
+                    [source],
+                    |row| row.get::<_, usize>(0),
+                )
+                .map_err(|error| error.to_string())?
+        } else {
+            transaction.execute(
+                "UPDATE term_conflicts SET resolved = 1, resolved_at = CURRENT_TIMESTAMP WHERE source = ?1 AND resolved = 0",
+                [source],
+            ).map_err(|error| format!("failed to settle term conflicts: {error}"))?;
+            0
+        };
+        transaction
+            .execute(
+                "UPDATE terms SET status = ?2 WHERE source = ?1",
+                params![
+                    source,
+                    if unresolved > 0 {
+                        "conflict"
+                    } else if policy == TermPolicy::Automatic {
+                        "ok"
+                    } else {
+                        "resolved"
+                    }
+                ],
+            )
+            .map_err(|error| format!("failed to update term status: {error}"))?;
+        audit(&transaction, source, policy.as_str(), serde_json::json!({}))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("failed to commit term policy: {error}"))
+    }
+
+    pub fn conflict_details(&self, include_resolved: bool) -> Result<Vec<TermConflict>, String> {
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT source, target, resolved FROM term_conflicts
+             WHERE ?1 OR resolved = 0 ORDER BY source, id",
+            )
+            .map_err(|error| format!("failed to prepare conflict details: {error}"))?;
+        let events = statement
+            .query_map([include_resolved], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })
+            .map_err(|error| format!("failed to query conflict details: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(statement);
+        let mut sources = Vec::<String>::new();
+        for (source, _, _) in &events {
+            if !sources.contains(source) {
+                sources.push(source.clone());
+            }
+        }
+        let terms = self
+            .list()?
+            .into_iter()
+            .map(|term| (term.source.clone(), term))
+            .collect::<HashMap<_, _>>();
+        let mut result = Vec::new();
+        for source in sources {
+            let Some(term) = terms.get(&source) else {
+                continue;
+            };
+            let mut evidence_statement = connection
+                .prepare(
+                    "SELECT target, chapter, source_excerpt, target_excerpt FROM term_evidence
+                 WHERE source = ?1 ORDER BY id",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = evidence_statement
+                .query_map([&source], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, usize>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            let mut candidates = Vec::<ConflictCandidate>::new();
+            for (target, chapter, source_excerpt, target_excerpt) in rows {
+                let index = candidates
+                    .iter()
+                    .position(|item| item.target == target)
+                    .unwrap_or_else(|| {
+                        candidates.push(ConflictCandidate {
+                            target: target.clone(),
+                            occurrences: 0,
+                            chapters: Vec::new(),
+                            evidence: Vec::new(),
+                        });
+                        candidates.len() - 1
+                    });
+                let candidate = &mut candidates[index];
+                candidate.occurrences += 1;
+                if !candidate.chapters.contains(&chapter) {
+                    candidate.chapters.push(chapter);
+                }
+                candidate.evidence.push(TermEvidence {
+                    chapter,
+                    source_excerpt,
+                    target_excerpt,
+                });
+            }
+            if candidates.is_empty() {
+                candidates.push(ConflictCandidate {
+                    target: term.target.clone(),
+                    occurrences: 1,
+                    chapters: vec![term.first_chapter],
+                    evidence: Vec::new(),
+                });
+            }
+            result.push(TermConflict {
+                source: source.clone(),
+                current_target: term.target.clone(),
+                policy: term.policy,
+                manual_target: term.manual_target.clone(),
+                unresolved_events: events
+                    .iter()
+                    .filter(|(value, _, resolved)| value == &source && !resolved)
+                    .count(),
+                resolved_events: events
+                    .iter()
+                    .filter(|(value, _, resolved)| value == &source && *resolved)
+                    .count(),
+                candidates,
+            });
+        }
+        Ok(result)
     }
 
     pub fn relevant(&self, source_text: &str) -> Result<Vec<Term>, String> {
@@ -252,7 +557,11 @@ impl TermStore {
         Ok(terms
             .into_iter()
             .enumerate()
-            .filter(|(index, term)| direct.contains(&term.source) || unambiguous.contains(index))
+            .filter(|(index, term)| {
+                term.policy != TermPolicy::NonFixed
+                    && term.policy != TermPolicy::Ignored
+                    && (direct.contains(&term.source) || unambiguous.contains(index))
+            })
             .map(|(_, term)| term)
             .collect())
     }
@@ -489,9 +798,166 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
                  first_source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
                  second_source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
                  UNIQUE(alias, first_source, second_source)
+             );
+             CREATE TABLE IF NOT EXISTS term_rules (
+                 source TEXT PRIMARY KEY REFERENCES terms(source) ON DELETE CASCADE,
+                 policy TEXT NOT NULL CHECK (policy IN ('automatic', 'fixed', 'non_fixed', 'ignored')),
+                 manual_target TEXT,
+                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+             );
+             CREATE TABLE IF NOT EXISTS term_evidence (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
+                 target TEXT NOT NULL,
+                 chapter INTEGER NOT NULL,
+                 source_excerpt TEXT NOT NULL DEFAULT '',
+                 target_excerpt TEXT NOT NULL DEFAULT ''
+             );
+             CREATE TABLE IF NOT EXISTS term_conflicts (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 source TEXT NOT NULL REFERENCES terms(source) ON DELETE CASCADE,
+                 target TEXT NOT NULL,
+                 resolved INTEGER NOT NULL DEFAULT 0,
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                 resolved_at TEXT,
+                 UNIQUE(source, target)
+             );
+             CREATE TABLE IF NOT EXISTS term_audit (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 source TEXT NOT NULL,
+                 action TEXT NOT NULL,
+                 details TEXT NOT NULL DEFAULT '{}',
+                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
              );",
         )
-        .map_err(|error| format!("failed to initialize terms database: {error}"))
+        .map_err(|error| format!("failed to initialize terms database: {error}"))?;
+    connection
+        .execute_batch(
+            "INSERT OR IGNORE INTO term_rules (source, policy, manual_target)
+         SELECT source, 'fixed', target FROM terms WHERE status = 'resolved';
+         INSERT INTO term_evidence (source, target, chapter)
+         SELECT t.source, t.target, t.first_chapter FROM terms t
+         WHERE NOT EXISTS (SELECT 1 FROM term_evidence e WHERE e.source = t.source);
+         INSERT INTO term_evidence (source, target, chapter)
+         SELECT c.source, c.target, c.chapter FROM term_candidates c
+         WHERE NOT EXISTS (
+             SELECT 1 FROM term_evidence e
+             WHERE e.source = c.source AND e.target = c.target AND e.chapter = c.chapter
+         );
+         INSERT OR IGNORE INTO term_conflicts (source, target, resolved)
+         SELECT c.source, c.target, 0 FROM term_candidates c
+         JOIN terms t ON t.source = c.source
+         WHERE t.status = 'conflict' AND c.target != t.target;
+         INSERT OR IGNORE INTO term_conflicts (source, target, resolved, resolved_at)
+         SELECT c.source, c.target, 1, CURRENT_TIMESTAMP FROM term_candidates c
+         JOIN terms t ON t.source = c.source
+         WHERE t.status = 'resolved' AND c.target != t.target;
+         UPDATE terms SET status = 'ok'
+         WHERE status = 'conflict' AND NOT EXISTS (
+             SELECT 1 FROM term_conflicts c WHERE c.source = terms.source AND c.resolved = 0
+         );",
+        )
+        .map_err(|error| format!("failed to migrate terms database: {error}"))
+}
+
+fn read_policy(connection: &Connection, source: &str) -> Result<TermPolicy, String> {
+    read_rule(connection, source).map(|value| value.0)
+}
+
+fn read_rule(
+    connection: &Connection,
+    source: &str,
+) -> Result<(TermPolicy, Option<String>), String> {
+    connection
+        .query_row(
+            "SELECT policy, manual_target FROM term_rules WHERE source = ?1",
+            [source],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(|error| format!("failed to read term rule: {error}"))?
+        .map(|(policy, target)| TermPolicy::parse(&policy).map(|policy| (policy, target)))
+        .transpose()
+        .map(|value| value.unwrap_or((TermPolicy::Automatic, None)))
+}
+
+fn write_rule(
+    transaction: &Transaction<'_>,
+    source: &str,
+    policy: TermPolicy,
+    manual_target: Option<&str>,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO term_rules (source, policy, manual_target, updated_at)
+         VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
+         ON CONFLICT(source) DO UPDATE SET policy = excluded.policy,
+         manual_target = excluded.manual_target, updated_at = CURRENT_TIMESTAMP",
+            params![source, policy.as_str(), manual_target],
+        )
+        .map_err(|error| format!("failed to save term rule: {error}"))?;
+    Ok(())
+}
+
+fn record_evidence(
+    transaction: &Transaction<'_>,
+    term: &Term,
+    source_text: &str,
+    target_text: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO term_evidence
+         (source, target, chapter, source_excerpt, target_excerpt)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                term.source,
+                term.target,
+                term.first_chapter,
+                excerpt(source_text, &term.source),
+                excerpt(target_text, &term.target),
+            ],
+        )
+        .map_err(|error| format!("failed to record term evidence: {error}"))?;
+    Ok(())
+}
+
+fn record_conflict(
+    transaction: &Transaction<'_>,
+    source: &str,
+    target: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT OR IGNORE INTO term_conflicts (source, target) VALUES (?1, ?2)",
+            params![source, target],
+        )
+        .map_err(|error| format!("failed to record term conflict: {error}"))?;
+    Ok(())
+}
+
+fn audit(
+    transaction: &Transaction<'_>,
+    source: &str,
+    action: &str,
+    details: serde_json::Value,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "INSERT INTO term_audit (source, action, details) VALUES (?1, ?2, ?3)",
+            params![source, action, details.to_string()],
+        )
+        .map_err(|error| format!("failed to record term audit: {error}"))?;
+    Ok(())
+}
+
+fn excerpt(text: &str, needle: &str) -> String {
+    text.lines()
+        .find(|line| matches_text(line, needle))
+        .unwrap_or_else(|| text.lines().next().unwrap_or_default())
+        .chars()
+        .take(240)
+        .collect()
 }
 
 fn validate_term(term: &Term) -> Result<(), String> {
@@ -627,13 +1093,6 @@ fn sync_aliases(
                     params![alias, first, second],
                 )
                 .map_err(|error| format!("failed to record alias conflict: {error}"))?;
-            transaction
-                .execute(
-                    "UPDATE terms SET status = 'conflict'
-                     WHERE source IN (?1, ?2) AND status != 'resolved'",
-                    params![source, other],
-                )
-                .map_err(|error| format!("failed to mark alias conflict: {error}"))?;
         }
     }
     Ok(())
@@ -691,10 +1150,12 @@ fn parse_stored_term(value: StoredTerm) -> Result<Term, String> {
         first_chapter: value.6,
         note: value.7,
         status: TermStatus::parse(&value.8)?,
+        policy: TermPolicy::Automatic,
+        manual_target: None,
     })
 }
 
-fn matches_text(haystack: &str, needle: &str) -> bool {
+pub fn matches_text(haystack: &str, needle: &str) -> bool {
     let haystack = normalize(haystack);
     let needle = normalize(needle);
     if needle.is_empty() {
@@ -717,13 +1178,23 @@ fn normalize(value: &str) -> String {
 }
 
 fn is_cjk(value: char) -> bool {
-    matches!(value, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}')
+    matches!(
+        value,
+        '\u{1100}'..='\u{11ff}'
+            | '\u{3040}'..='\u{30ff}'
+            | '\u{31f0}'..='\u{31ff}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{ac00}'..='\u{d7af}'
+            | '\u{f900}'..='\u{faff}'
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_terms, extract_terms_resilient, PendingExtraction, Term, TermStatus, TermStore,
+        extract_terms, extract_terms_resilient, PendingExtraction, Term, TermPolicy, TermStatus,
+        TermStore,
     };
     use crate::llm::{CompletionOutput, MockClient, TranslationClient};
     use async_trait::async_trait;
@@ -755,6 +1226,8 @@ mod tests {
             first_chapter: 0,
             note: None,
             status: TermStatus::Ok,
+            policy: TermPolicy::Automatic,
+            manual_target: None,
         }
     }
 
@@ -812,6 +1285,91 @@ mod tests {
     }
 
     #[test]
+    fn manual_decision_stays_authoritative_while_new_evidence_is_kept() {
+        let (store, path) = store("manual-authority");
+        store.insert(&term("Alice", "爱丽丝")).unwrap();
+        store
+            .insert_with_evidence(&term("Alice", "艾丽斯"), "Alice arrived.", "艾丽斯到了。")
+            .unwrap();
+        store.resolve("Alice", "阿丽丝").unwrap();
+        store
+            .insert_with_evidence(&term("Alice", "爱莉丝"), "Alice left.", "爱莉丝离开了。")
+            .unwrap();
+
+        let stored = store.list().unwrap().remove(0);
+        assert_eq!(stored.target, "阿丽丝");
+        assert_eq!(stored.policy, TermPolicy::Fixed);
+        assert_eq!(stored.manual_target.as_deref(), Some("阿丽丝"));
+        let conflict = store.conflict_details(true).unwrap().remove(0);
+        assert_eq!(conflict.unresolved_events, 0);
+        assert_eq!(conflict.resolved_events, 2);
+        assert!(conflict
+            .candidates
+            .iter()
+            .any(|candidate| candidate.target == "爱莉丝"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn policies_suppress_injection_and_restore_independent_conflicts() {
+        let (store, path) = store("policies");
+        store.insert(&term("Alice", "爱丽丝")).unwrap();
+        store.insert(&term("Alice", "艾丽斯")).unwrap();
+        store.insert(&term("Alice", "爱莉丝")).unwrap();
+        assert_eq!(
+            store.conflict_details(false).unwrap()[0].unresolved_events,
+            2
+        );
+
+        store.set_policy("Alice", TermPolicy::NonFixed).unwrap();
+        assert!(store.relevant("Alice arrived").unwrap().is_empty());
+        store.insert(&term("Alice", "阿莉丝")).unwrap();
+        assert!(store.conflict_details(false).unwrap().is_empty());
+
+        store.undo_resolution("Alice").unwrap();
+        assert_eq!(
+            store.conflict_details(false).unwrap()[0].unresolved_events,
+            3
+        );
+        store.set_policy("Alice", TermPolicy::Ignored).unwrap();
+        store.insert(&term("Alice", "不会记录")).unwrap();
+        assert!(!store.conflict_details(true).unwrap()[0]
+            .candidates
+            .iter()
+            .any(|candidate| candidate.target == "不会记录"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn migrates_legacy_conflicts_without_losing_candidates() {
+        let (_, path) = store("legacy-path");
+        std::fs::remove_file(&path).unwrap();
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE terms (
+                 source TEXT PRIMARY KEY, target TEXT NOT NULL, reading TEXT,
+                 term_type TEXT NOT NULL, gender TEXT, aliases TEXT NOT NULL DEFAULT '[]',
+                 first_chapter INTEGER NOT NULL, note TEXT,
+                 status TEXT NOT NULL CHECK (status IN ('ok', 'conflict', 'resolved'))
+             );
+             CREATE TABLE term_candidates (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL,
+                 target TEXT NOT NULL, chapter INTEGER NOT NULL, UNIQUE(source, target)
+             );
+             INSERT INTO terms VALUES ('Alice', '爱丽丝', NULL, 'person', NULL, '[]', 0, NULL, 'conflict');
+             INSERT INTO term_candidates (source, target, chapter) VALUES
+                 ('Alice', '爱丽丝', 0), ('Alice', '艾丽斯', 1);"
+        ).unwrap();
+        drop(connection);
+
+        let store = TermStore::open(&path).unwrap();
+        let conflict = store.conflict_details(false).unwrap().remove(0);
+        assert_eq!(conflict.unresolved_events, 1);
+        assert_eq!(conflict.candidates.len(), 2);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn filters_relevant_terms_by_source_and_alias() {
         let (store, path) = store("relevant");
         let mut alice = term("Alice", "爱丽丝");
@@ -821,13 +1379,17 @@ mod tests {
             .insert(&term("王都", "王都"))
             .expect("CJK term should insert");
         store.insert(&term("cat", "猫")).expect("cat should insert");
+        store
+            .insert(&term("アリス", "爱丽丝"))
+            .expect("Japanese term should insert");
 
         let relevant = store
-            .relevant("Alicia entered the 王都. Concatenate stayed behind.")
+            .relevant("Alicia entered the 王都. アリスは来た。Concatenate stayed behind.")
             .expect("relevant terms should filter");
-        assert_eq!(relevant.len(), 2);
+        assert_eq!(relevant.len(), 3);
         assert!(relevant.iter().any(|term| term.source == "Alice"));
         assert!(relevant.iter().any(|term| term.source == "王都"));
+        assert!(relevant.iter().any(|term| term.source == "アリス"));
         std::fs::remove_file(path).expect("database should be removed");
     }
 
@@ -841,7 +1403,7 @@ mod tests {
         store.insert(&alice).expect("Alice should insert");
         assert_eq!(
             store.insert(&bob).expect("Bob should insert"),
-            TermStatus::Conflict
+            TermStatus::Ok
         );
 
         assert_eq!(
@@ -856,7 +1418,7 @@ mod tests {
             .list()
             .expect("terms should list")
             .iter()
-            .all(|term| term.status == TermStatus::Conflict));
+            .all(|term| term.status == TermStatus::Ok));
         std::fs::remove_file(path).expect("database should be removed");
     }
 

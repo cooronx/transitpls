@@ -359,6 +359,281 @@ pub async fn transit_project(
     state::load_for_source(&loaded.state_dir, &input)
 }
 
+pub async fn retranslate_project(
+    config_path: Option<PathBuf>,
+    input: PathBuf,
+    item_ids: Vec<String>,
+    mock_client: bool,
+) -> Result<crate::model::ProjectState, String> {
+    let loaded = config::load(config_path.as_deref())?;
+    let mut project = state::load_for_source(&loaded.state_dir, &input)?;
+    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
+    let mut chapters = state::load_chapters(&loaded.state_dir, &project)?;
+    let analysis =
+        load_translation_analysis(&loaded.state_dir, &project, &chapters, &loaded.value)?;
+    let client = build_client(&loaded.value, mock_client, &loaded.state_dir, &project)?;
+    let store = term_store(&loaded.state_dir, &project)?;
+
+    for item_id in item_ids {
+        let result = retranslate_item(
+            client.as_ref(),
+            &store,
+            &loaded.state_dir,
+            &mut project,
+            &mut chapters,
+            &analysis,
+            &loaded.value,
+            &item_id,
+        )
+        .await;
+        if let Err(error) = result {
+            mark_retranslation_error(&loaded.state_dir, &project, &mut chapters, &item_id, &error)?;
+            state::append_log(
+                &loaded.state_dir,
+                &project,
+                "retranslation_failed",
+                serde_json::json!({ "item_id": item_id, "error": error }),
+            )?;
+        }
+    }
+    save_project_progress(&loaded.state_dir, &mut project, &chapters)?;
+    Ok(project)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn retranslate_item<C: TranslationClient + ?Sized>(
+    client: &C,
+    store: &TermStore,
+    state_dir: &std::path::Path,
+    project: &mut crate::model::ProjectState,
+    chapters: &mut [Chapter],
+    analysis: &analysis::BookAnalysis,
+    config: &AppConfig,
+    item_id: &str,
+) -> Result<(), String> {
+    if let Some(chapter_id) = item_id.strip_prefix("title:") {
+        let chapter_index = chapters
+            .iter()
+            .position(|chapter| chapter.id == chapter_id)
+            .ok_or_else(|| format!("chapter was removed: {chapter_id}"))?;
+        let request = Segment {
+            id: item_id.to_string(),
+            ordinal: 0,
+            source: chapters[chapter_index].title.clone(),
+            target: chapters[chapter_index].target_title.clone(),
+            target_before_polish: None,
+            kind: SegmentKind::Heading,
+            status: ItemStatus::Translated,
+            source_hash: String::new(),
+            meta: serde_json::json!({}),
+        };
+        let translation = llm::translate_titles(
+            client,
+            &[request],
+            &project.source_language,
+            &project.target_language,
+            &analysis.style_guide,
+            &store.relevant(&chapters[chapter_index].title)?,
+            config.llm.max_retries,
+        )
+        .await?
+        .remove(0);
+        if !chapters[chapter_index].meta.is_object() {
+            chapters[chapter_index].meta = serde_json::json!({});
+        }
+        if let Some(previous) = chapters[chapter_index].target_title.clone() {
+            chapters[chapter_index].meta["previous_target_title"] =
+                serde_json::Value::String(previous);
+        }
+        chapters[chapter_index]
+            .meta
+            .as_object_mut()
+            .unwrap()
+            .remove("retranslation_error");
+        apply_title(state_dir, project, chapters, chapter_index, translation)?;
+        let extraction = PendingExtraction {
+            chapter_id: chapters[chapter_index].id.clone(),
+            batch_key: format!("retranslate:{item_id}"),
+            source_text: chapters[chapter_index].title.clone(),
+            target_text: chapters[chapter_index]
+                .target_title
+                .clone()
+                .unwrap_or_default(),
+        };
+        record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
+        store.queue_extraction(&extraction)?;
+        if process_extraction(
+            client,
+            store,
+            &extraction,
+            chapter_index,
+            config.llm.max_retries,
+        )
+        .await
+        .is_ok()
+        {
+            clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+        }
+        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+        state::append_log(
+            state_dir,
+            project,
+            "retranslated",
+            serde_json::json!({ "item_id": item_id }),
+        )?;
+        return Ok(());
+    }
+
+    let (chapter_index, segment_index) = chapters
+        .iter()
+        .enumerate()
+        .find_map(|(chapter_index, chapter)| {
+            chapter
+                .segments
+                .iter()
+                .position(|segment| segment.id == item_id)
+                .map(|segment_index| (chapter_index, segment_index))
+        })
+        .ok_or_else(|| format!("content was removed: {item_id}"))?;
+    let source = chapters[chapter_index].segments[segment_index]
+        .source
+        .clone();
+    let relevant_terms = store.relevant(&source)?;
+    let digest = chapters[chapter_index]
+        .meta
+        .get("source_digest")
+        .and_then(serde_json::Value::as_str);
+    let recent = pipeline::recent_targets(
+        chapters,
+        chapter_index,
+        segment_index,
+        config.pipeline.recent_context_chars,
+    );
+    let request = chapters[chapter_index].segments[segment_index].clone();
+    let draft = request_translation(
+        client,
+        std::slice::from_ref(&request),
+        project,
+        analysis,
+        digest,
+        &relevant_terms,
+        &recent,
+        config.llm.max_retries,
+    )
+    .await?
+    .remove(0);
+    let target = if config.pipeline.polish {
+        let relevant_terms = store.relevant(&source)?;
+        let mut polish_request = request.clone();
+        polish_request.target_before_polish = Some(draft.clone());
+        llm::polish_batch(
+            client,
+            &[polish_request],
+            &llm::TranslationContext {
+                style_guide: &analysis.style_guide,
+                book_synopsis: analysis.book_synopsis.as_deref(),
+                chapter_digest: digest,
+                terms: &relevant_terms,
+                recent_targets: &recent,
+            },
+            config.llm.max_retries,
+        )
+        .await?
+        .remove(0)
+    } else {
+        draft.clone()
+    };
+
+    let segment = &mut chapters[chapter_index].segments[segment_index];
+    if !segment.meta.is_object() {
+        segment.meta = serde_json::json!({});
+    }
+    if let Some(previous) = segment.target.clone() {
+        segment.meta["previous_target"] = serde_json::Value::String(previous);
+    }
+    segment
+        .meta
+        .as_object_mut()
+        .unwrap()
+        .remove("retranslation_error");
+    segment.target_before_polish = config.pipeline.polish.then_some(draft);
+    segment.target = Some(target.clone());
+    segment.status = ItemStatus::Translated;
+    if segment.kind == SegmentKind::Heading
+        && segment.source.trim() == chapters[chapter_index].title.trim()
+    {
+        if let Some(previous) = chapters[chapter_index].target_title.clone() {
+            chapters[chapter_index].meta["previous_target_title"] =
+                serde_json::Value::String(previous);
+        }
+        chapters[chapter_index].target_title = Some(target.clone());
+    }
+    state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+
+    let extraction = PendingExtraction {
+        chapter_id: chapters[chapter_index].id.clone(),
+        batch_key: format!("retranslate:{item_id}"),
+        source_text: source,
+        target_text: target,
+    };
+    record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
+    store.queue_extraction(&extraction)?;
+    if process_extraction(
+        client,
+        store,
+        &extraction,
+        chapter_index,
+        config.llm.max_retries,
+    )
+    .await
+    .is_ok()
+    {
+        clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+    }
+    state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+    state::append_log(
+        state_dir,
+        project,
+        "retranslated",
+        serde_json::json!({ "item_id": item_id }),
+    )
+}
+
+fn mark_retranslation_error(
+    state_dir: &std::path::Path,
+    project: &crate::model::ProjectState,
+    chapters: &mut [Chapter],
+    item_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    if let Some(chapter_id) = item_id.strip_prefix("title:") {
+        if let Some(chapter) = chapters.iter_mut().find(|chapter| chapter.id == chapter_id) {
+            if !chapter.meta.is_object() {
+                chapter.meta = serde_json::json!({});
+            }
+            chapter.meta["retranslation_error"] = serde_json::Value::String(error.to_string());
+            return state::write_chapter(state_dir, project, chapter);
+        }
+    }
+    if let Some(chapter) = chapters
+        .iter_mut()
+        .find(|chapter| chapter.segments.iter().any(|segment| segment.id == item_id))
+    {
+        if let Some(segment) = chapter
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == item_id)
+        {
+            if !segment.meta.is_object() {
+                segment.meta = serde_json::json!({});
+            }
+            segment.meta["retranslation_error"] = serde_json::Value::String(error.to_string());
+        }
+        return state::write_chapter(state_dir, project, chapter);
+    }
+    Ok(())
+}
+
 fn export_file(args: ExportArgs, state_dir: &std::path::Path) -> Result<i32, String> {
     let format = ExportFormat::from(args.format);
     let output = args
@@ -434,7 +709,6 @@ fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
                     &args.values[2],
                 )
             };
-            let _lock = state::acquire_project_lock(state_dir, &project)?;
             let store = term_store(state_dir, &project)?;
             store.resolve(source, target)?;
             state::append_log(
@@ -556,7 +830,10 @@ async fn run_transit<C: TranslationClient + ?Sized>(
     }
 
     if chapters.iter().all(chapter_body_complete) {
-        translate_missing_titles(client, state_dir, project, chapters, analysis, config).await?;
+        translate_missing_titles(
+            client, store, state_dir, project, chapters, analysis, config,
+        )
+        .await?;
     }
     save_project_progress(state_dir, project, chapters)
 }
@@ -572,13 +849,6 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
     analysis: &analysis::BookAnalysis,
     config: &AppConfig,
 ) -> Result<(), String> {
-    let chapter_source = chapters[chapter_index]
-        .segments
-        .iter()
-        .map(|segment| segment.source.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let relevant_terms = store.relevant(&chapter_source)?;
     let digest = chapters[chapter_index]
         .meta
         .get("source_digest")
@@ -626,6 +896,13 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
             .collect::<Vec<_>>();
         if !untranslated.is_empty() {
             let request = cloned_segments(chapters, chapter_index, &untranslated);
+            let relevant_terms = store.relevant(
+                &request
+                    .iter()
+                    .map(|segment| segment.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )?;
             let recent = pipeline::recent_targets(
                 chapters,
                 chapter_index,
@@ -679,7 +956,6 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                             index,
                             analysis,
                             digest.as_deref(),
-                            &relevant_terms,
                             config,
                         )
                         .await?;
@@ -706,7 +982,6 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                 &unpolished,
                 analysis,
                 digest.as_deref(),
-                &relevant_terms,
                 config,
             )
             .await?;
@@ -790,7 +1065,6 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
     segment_index: usize,
     analysis: &analysis::BookAnalysis,
     digest: Option<&str>,
-    terms: &[crate::terms::Term],
     config: &AppConfig,
 ) -> Result<(), String> {
     let recent = pipeline::recent_targets(
@@ -800,13 +1074,14 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         config.pipeline.recent_context_chars,
     );
     let segment = chapters[chapter_index].segments[segment_index].clone();
+    let terms = store.relevant(&segment.source)?;
     let translations = request_translation(
         client,
         std::slice::from_ref(&segment),
         project,
         analysis,
         digest,
-        terms,
+        &terms,
         &recent,
         config.llm.max_retries,
     )
@@ -837,7 +1112,6 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
             &[segment_index],
             analysis,
             digest,
-            terms,
             config,
         )
         .await
@@ -867,13 +1141,19 @@ async fn polish_segments<C: TranslationClient + ?Sized>(
     indices: &[usize],
     analysis: &analysis::BookAnalysis,
     digest: Option<&str>,
-    terms: &[crate::terms::Term],
     config: &AppConfig,
 ) -> Result<(), String> {
     if indices.is_empty() {
         return Ok(());
     }
     let request = cloned_segments(chapters, chapter_index, indices);
+    let terms = store.relevant(
+        &request
+            .iter()
+            .map(|segment| segment.source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )?;
     let recent = pipeline::recent_targets(
         chapters,
         chapter_index,
@@ -884,7 +1164,7 @@ async fn polish_segments<C: TranslationClient + ?Sized>(
         style_guide: &analysis.style_guide,
         book_synopsis: analysis.book_synopsis.as_deref(),
         chapter_digest: digest,
-        terms,
+        terms: &terms,
         recent_targets: &recent,
     };
     match llm::polish_batch(client, &request, &context, config.llm.max_retries).await {
@@ -909,6 +1189,7 @@ async fn polish_segments<C: TranslationClient + ?Sized>(
         Err(_) => {
             for &index in indices {
                 let request = chapters[chapter_index].segments[index].clone();
+                let terms = store.relevant(&request.source)?;
                 let recent = pipeline::recent_targets(
                     chapters,
                     chapter_index,
@@ -919,7 +1200,7 @@ async fn polish_segments<C: TranslationClient + ?Sized>(
                     style_guide: &analysis.style_guide,
                     book_synopsis: analysis.book_synopsis.as_deref(),
                     chapter_digest: digest,
-                    terms,
+                    terms: &terms,
                     recent_targets: &recent,
                 };
                 let polished = llm::polish_batch(
@@ -1074,6 +1355,7 @@ async fn extract_completed_chapter<C: TranslationClient + ?Sized>(
 
 async fn translate_missing_titles<C: TranslationClient + ?Sized>(
     client: &C,
+    store: &TermStore,
     state_dir: &std::path::Path,
     project: &mut crate::model::ProjectState,
     chapters: &mut [Chapter],
@@ -1114,12 +1396,20 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
             .iter()
             .map(|&index| title_segments[index].clone())
             .collect::<Vec<_>>();
+        let relevant_terms = store.relevant(
+            &request
+                .iter()
+                .map(|title| title.source.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )?;
         match llm::translate_titles(
             client,
             &request,
             &project.source_language,
             &project.target_language,
             &analysis.style_guide,
+            &relevant_terms,
             config.llm.max_retries,
         )
         .await
@@ -1137,6 +1427,7 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
                         &project.source_language,
                         &project.target_language,
                         &analysis.style_guide,
+                        &store.relevant(&title_segments[index].source)?,
                         config.llm.max_retries,
                     )
                     .await
@@ -1362,7 +1653,7 @@ async fn process_extraction<C: TranslationClient + ?Sized>(
     )
     .await?;
     for term in extracted {
-        store.insert(&term)?;
+        store.insert_with_evidence(&term, &extraction.source_text, &extraction.target_text)?;
     }
     store.complete_extraction(&extraction.chapter_id, &extraction.batch_key)
 }
@@ -1436,8 +1727,8 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_file, import_project, run_transit, transit, Cli, Command, ExportArgs,
-        ExportFormatArg, TransitArgs,
+        export_file, import_project, mark_retranslation_error, retranslate_item, run_transit,
+        transit, Cli, Command, ExportArgs, ExportFormatArg, TransitArgs,
     };
     use crate::analysis::BookAnalysis;
     use crate::config::AppConfig;
@@ -1963,6 +2254,92 @@ mod tests {
         assert_eq!(project.chapters_completed, 1);
         assert_eq!(project.status, ProjectStatus::Translating);
         fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    struct RetranslationFailure;
+
+    #[async_trait]
+    impl TranslationClient for RetranslationFailure {
+        async fn complete(
+            &self,
+            _system_prompt: &str,
+            _user_prompt: &str,
+        ) -> Result<CompletionOutput, String> {
+            Err("planned retranslation failure".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn retranslation_keeps_failed_text_and_saves_a_recovery_version_on_success() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        fs::write(&source, "book").unwrap();
+        let state_dir = dir.join("projects");
+        let mut segment = test_segment("segment-1", "Alice arrived.");
+        segment.target = Some("旧译文".to_string());
+        segment.status = ItemStatus::Translated;
+        let document = Document {
+            metadata: DocumentMetadata {
+                title: "Book".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![crate::model::Chapter {
+                id: "chapter-1".to_string(),
+                title: "Chapter 1".to_string(),
+                target_title: Some("第一章".to_string()),
+                status: ItemStatus::Translated,
+                meta: serde_json::json!({}),
+                segments: vec![segment],
+            }],
+        };
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200).unwrap();
+        let mut project = initialized.project;
+        let mut chapters = state::load_chapters(&state_dir, &project).unwrap();
+        let store =
+            TermStore::open(state::project_dir(&state_dir, &project.id).join("terms.db")).unwrap();
+        let mut config = AppConfig::default();
+        config.llm.max_retries = 0;
+
+        let error = retranslate_item(
+            &RetranslationFailure,
+            &store,
+            &state_dir,
+            &mut project,
+            &mut chapters,
+            &test_analysis(),
+            &config,
+            "segment-1",
+        )
+        .await
+        .unwrap_err();
+        mark_retranslation_error(&state_dir, &project, &mut chapters, "segment-1", &error).unwrap();
+        assert_eq!(chapters[0].segments[0].target.as_deref(), Some("旧译文"));
+        assert!(chapters[0].segments[0].meta["retranslation_error"]
+            .as_str()
+            .unwrap()
+            .contains("planned retranslation failure"));
+
+        retranslate_item(
+            &MockClient,
+            &store,
+            &state_dir,
+            &mut project,
+            &mut chapters,
+            &test_analysis(),
+            &config,
+            "segment-1",
+        )
+        .await
+        .unwrap();
+        assert_eq!(chapters[0].segments[0].meta["previous_target"], "旧译文");
+        assert!(chapters[0].segments[0]
+            .meta
+            .get("retranslation_error")
+            .is_none());
+        assert_ne!(chapters[0].segments[0].target.as_deref(), Some("旧译文"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     fn test_analysis() -> BookAnalysis {

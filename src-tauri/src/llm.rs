@@ -899,6 +899,7 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
     source_language: &str,
     target_language: &str,
     style_guide: &[String],
+    terms: &[Term],
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
     let expected_ids = titles
@@ -912,7 +913,7 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
         style: style_guide,
         book_synopsis: None,
         chapter_digest: None,
-        terms: &[],
+        terms,
         recent_targets: &[],
         segments: titles
             .iter()
@@ -1015,6 +1016,8 @@ mod tests {
             first_chapter: 0,
             note: None,
             status: TermStatus::Resolved,
+            policy: crate::terms::TermPolicy::Fixed,
+            manual_target: Some("爱丽丝".to_string()),
         };
         let terms = [term];
         let context = super::TranslationContext {
