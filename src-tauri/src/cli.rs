@@ -12,6 +12,15 @@ use crate::usage::UsageRecorder;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
+pub struct RetranslationProgress {
+    pub completed: usize,
+    pub total: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub item_id: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "transitpls-cli",
@@ -364,6 +373,7 @@ pub async fn retranslate_project(
     input: PathBuf,
     item_ids: Vec<String>,
     mock_client: bool,
+    progress: Option<tokio::sync::mpsc::UnboundedSender<RetranslationProgress>>,
 ) -> Result<crate::model::ProjectState, String> {
     let loaded = config::load(config_path.as_deref())?;
     let mut project = state::load_for_source(&loaded.state_dir, &input)?;
@@ -373,8 +383,17 @@ pub async fn retranslate_project(
         load_translation_analysis(&loaded.state_dir, &project, &chapters, &loaded.value)?;
     let client = build_client(&loaded.value, mock_client, &loaded.state_dir, &project)?;
     let store = term_store(&loaded.state_dir, &project)?;
+    let total = item_ids.len();
+    let mut succeeded = 0;
+    let mut failed = 0;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "retranslation_started",
+        serde_json::json!({ "total": total }),
+    )?;
 
-    for item_id in item_ids {
+    for (index, item_id) in item_ids.into_iter().enumerate() {
         let result = retranslate_item(
             client.as_ref(),
             &store,
@@ -386,17 +405,42 @@ pub async fn retranslate_project(
             &item_id,
         )
         .await;
-        if let Err(error) = result {
-            mark_retranslation_error(&loaded.state_dir, &project, &mut chapters, &item_id, &error)?;
-            state::append_log(
-                &loaded.state_dir,
-                &project,
-                "retranslation_failed",
-                serde_json::json!({ "item_id": item_id, "error": error }),
-            )?;
+        match result {
+            Ok(()) => succeeded += 1,
+            Err(error) => {
+                failed += 1;
+                mark_retranslation_error(
+                    &loaded.state_dir,
+                    &project,
+                    &mut chapters,
+                    &item_id,
+                    &error,
+                )?;
+                state::append_log(
+                    &loaded.state_dir,
+                    &project,
+                    "retranslation_failed",
+                    serde_json::json!({ "item_id": item_id, "error": error }),
+                )?;
+            }
+        }
+        if let Some(progress) = &progress {
+            let _ = progress.send(RetranslationProgress {
+                completed: index + 1,
+                total,
+                succeeded,
+                failed,
+                item_id,
+            });
         }
     }
     save_project_progress(&loaded.state_dir, &mut project, &chapters)?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "retranslation_completed",
+        serde_json::json!({ "total": total, "succeeded": succeeded, "failed": failed }),
+    )?;
     Ok(project)
 }
 
@@ -1727,8 +1771,9 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_file, import_project, mark_retranslation_error, retranslate_item, run_transit,
-        transit, Cli, Command, ExportArgs, ExportFormatArg, TransitArgs,
+        export_file, import_project, mark_retranslation_error, retranslate_item,
+        retranslate_project, run_transit, transit, Cli, Command, ExportArgs, ExportFormatArg,
+        TransitArgs,
     };
     use crate::analysis::BookAnalysis;
     use crate::config::AppConfig;
@@ -2339,6 +2384,65 @@ mod tests {
             .get("retranslation_error")
             .is_none());
         assert_ne!(chapters[0].segments[0].target.as_deref(), Some("旧译文"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn project_retranslation_reports_each_completed_item() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        let config_path = dir.join("config.toml");
+        fs::write(&source, "book").unwrap();
+        fs::write(
+            &config_path,
+            "[paths]\nstate_dir = 'projects'\n[pipeline]\npolish = false\n[analysis]\nfull_book = false\n",
+        )
+        .unwrap();
+        let mut segment = test_segment("segment-1", "Alice arrived.");
+        segment.target = Some("旧译文".to_string());
+        segment.status = ItemStatus::Translated;
+        let document = Document {
+            metadata: DocumentMetadata {
+                title: "Book".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![crate::model::Chapter {
+                id: "chapter-1".to_string(),
+                title: "Chapter 1".to_string(),
+                target_title: Some("第一章".to_string()),
+                status: ItemStatus::Translated,
+                meta: serde_json::json!({}),
+                segments: vec![segment],
+            }],
+        };
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200).unwrap();
+        state::write_json_atomic(
+            &state::project_dir(&state_dir, &initialized.project.id).join("analysis.json"),
+            &test_analysis(),
+        )
+        .unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+
+        retranslate_project(
+            Some(config_path),
+            source,
+            vec!["segment-1".to_string()],
+            true,
+            Some(sender),
+        )
+        .await
+        .unwrap();
+
+        let progress = receiver.recv().await.unwrap();
+        assert_eq!(progress.completed, 1);
+        assert_eq!(progress.total, 1);
+        assert_eq!(progress.succeeded, 1);
+        assert_eq!(progress.failed, 0);
+        assert_eq!(progress.item_id, "segment-1");
+        assert!(receiver.recv().await.is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 

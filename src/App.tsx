@@ -110,6 +110,15 @@ interface AffectedContent {
   previousTarget?: string | null;
   retranslationError?: string | null;
 }
+interface RetranslationProgress {
+  projectId: string;
+  completed: number;
+  total: number;
+  succeeded: number;
+  failed: number;
+  itemId: string;
+  detail: Detail;
+}
 interface LogEntry {
   timestamp: string;
   event: string;
@@ -200,6 +209,8 @@ export default function App() {
   const [view, setView] = useState<View>("workspace");
   const [tray, setTray] = useState<TrayName>("tasks");
   const [busy, setBusy] = useState<string | null>(null);
+  const [retranslationProgress, setRetranslationProgress] =
+    useState<RetranslationProgress | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [mockClient] = useState(false);
@@ -242,6 +253,45 @@ export default function App() {
                 project.id === payload.project.id
                   ? {
                       ...payload.project,
+                      cover_data_url: project.cover_data_url,
+                      task_initialized: project.task_initialized,
+                    }
+                  : project,
+              ),
+            }
+          : current,
+      );
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      })
+      .catch((error) => {
+        if (!String(error).includes("invoke")) setNotice(String(error));
+      });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let stop: undefined | (() => void);
+    listen<RetranslationProgress>("retranslation-progress", ({ payload }) => {
+      setRetranslationProgress(payload);
+      setBusy(`重译 ${payload.completed}/${payload.total}`);
+      setDetail((current) =>
+        current?.project.id === payload.projectId ? payload.detail : current,
+      );
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              projects: current.projects.map((project) =>
+                project.id === payload.projectId
+                  ? {
+                      ...payload.detail.project,
                       cover_data_url: project.cover_data_url,
                       task_initialized: project.task_initialized,
                     }
@@ -420,6 +470,37 @@ export default function App() {
         }),
       );
   };
+  const retranslateItems = async (itemIds: string[]) => {
+    if (busy || !detail || !itemIds.length) return;
+    const projectId = detail.project.id;
+    setBusy(`重译 0/${itemIds.length}`);
+    setRetranslationProgress({
+      projectId,
+      completed: 0,
+      total: itemIds.length,
+      succeeded: 0,
+      failed: 0,
+      itemId: "",
+      detail,
+    });
+    setNotice(null);
+    try {
+      const next = await invoke<Detail>("ui_retranslate", {
+        projectId,
+        itemIds,
+        mockClient,
+      });
+      setDetail(next);
+      await reload(projectId);
+      setNotice(`重译任务已完成，共处理 ${itemIds.length} 项`);
+    } catch (error) {
+      setNotice(String(error));
+      throw error;
+    } finally {
+      setRetranslationProgress(null);
+      setBusy(null);
+    }
+  };
   const saveModel = async (value: Config, apiKey: string) => {
     setBusy("验证模型");
     setNotice(null);
@@ -580,6 +661,8 @@ export default function App() {
               detail={detail}
               config={bootstrap?.config}
               taskBusy={Boolean(busy)}
+              retranslationProgress={retranslationProgress}
+              onRetranslate={retranslateItems}
               onReload={() => reload()}
             />
           )}
@@ -603,6 +686,7 @@ export default function App() {
             config={bootstrap?.config}
             detail={detail}
             busy={busy}
+            retranslationProgress={retranslationProgress}
             onPolish={savePipeline}
             onInitialize={initializeTask}
             onSaveConfig={saveTaskConfig}
@@ -618,7 +702,7 @@ export default function App() {
         <span className="status-spacer" />
         <span className="icon-label">
           {busy && <LoaderCircle className="spin" />}
-          {busy ? `${busy}进行中…` : "就绪"}
+          {busy ? `${busy} 进行中…` : "就绪"}
         </span>
         <i />
         <span>{bootstrap?.projects.length ?? 0} 个项目</span>
@@ -666,13 +750,17 @@ function Header({
   disabled: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const retranslating = busy?.startsWith("重译") ?? false;
   const cancellable =
     busy === "翻译" ||
+    retranslating ||
     busy === "项目初始化" ||
     busy === "重新分析" ||
     busy === "导入书籍";
   const translateLabel =
-    busy === "翻译"
+    retranslating
+      ? busy
+      : busy === "翻译"
       ? "正在翻译"
       : busy === "项目初始化" || busy === "重新分析"
         ? busy === "重新分析" ? "正在重新分析" : "正在初始化"
@@ -1173,6 +1261,7 @@ function Inspector({
   config,
   detail,
   busy,
+  retranslationProgress,
   onPolish,
   onInitialize,
   onSaveConfig,
@@ -1182,6 +1271,7 @@ function Inspector({
   config?: Config;
   detail: Detail;
   busy: string | null;
+  retranslationProgress: RetranslationProgress | null;
   onPolish: (v: boolean) => Promise<void>;
   onInitialize: (value: TaskConfigDraft) => void;
   onSaveConfig: (value: TaskConfigDraft) => Promise<void>;
@@ -1210,6 +1300,13 @@ function Inspector({
       100,
   );
   const conflictCount = detail.pendingConflicts;
+  const retranslationPercent = retranslationProgress
+    ? Math.round(
+        (retranslationProgress.completed /
+          Math.max(1, retranslationProgress.total)) *
+          100,
+      )
+    : 0;
   return (
     <aside className="inspector">
       <div className="inspector-tabs">
@@ -1360,6 +1457,22 @@ function Inspector({
               <header><b>项目进度</b><strong>{progress}%</strong></header>
               <div className="big-progress"><i style={{ width: `${progress}%` }} /></div>
               <p className="done"><CheckCircle2 />已完成 {detail.project.chapters_completed} 章</p>
+              {retranslationProgress?.projectId === detail.project.id && (
+                <>
+                  <header>
+                    <b>本次重译进度</b>
+                    <strong>{retranslationPercent}%</strong>
+                  </header>
+                  <div className="big-progress">
+                    <i style={{ width: `${retranslationPercent}%` }} />
+                  </div>
+                  <p className="active">
+                    <CircleDashed />
+                    已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
+                    · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
+                  </p>
+                </>
+              )}
               <p className={detail.project.status === "failed" ? "error" : "active"}>
                 <CircleDashed />
                 {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
@@ -1536,11 +1649,15 @@ function TermsView({
   detail,
   config,
   taskBusy,
+  retranslationProgress,
+  onRetranslate,
   onReload,
 }: {
   detail: Detail | null;
   config?: Config;
   taskBusy: boolean;
+  retranslationProgress: RetranslationProgress | null;
+  onRetranslate: (itemIds: string[]) => Promise<void>;
   onReload: () => Promise<void>;
 }) {
   const [showResolved, setShowResolved] = useState(false);
@@ -1553,6 +1670,10 @@ function TermsView({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const activeRetranslation =
+    retranslationProgress?.projectId === detail?.project.id
+      ? retranslationProgress
+      : null;
   const conflicts = (detail?.termConflicts ?? []).filter(
     (item) => showResolved || item.unresolved_events > 0,
   );
@@ -1578,7 +1699,7 @@ function TermsView({
   const scanAll = async (selectAll = true) => {
     if (!detail) return;
     const sources = detail.termConflicts
-      .filter((item) => item.unresolved_events > 0)
+      .filter((item) => item.policy === "fixed")
       .map((item) => item.source);
     const groups = await Promise.all(sources.map((source) =>
       invoke<AffectedContent[]>("ui_scan_term_impact", {
@@ -1634,11 +1755,7 @@ function TermsView({
       { title: "确认选择性重译", kind: "warning" },
     );
     if (!confirmed) return;
-    await invoke("ui_retranslate", {
-      projectId: detail.project.id,
-      itemIds: [...selected],
-      mockClient: false,
-    });
+    await onRetranslate([...selected]);
     if (allConflictImpacts) await scanAll(false);
     else if (impactSource) await scan(impactSource);
     await onReload();
@@ -1697,7 +1814,7 @@ function TermsView({
             <button className="primary" disabled={!target.trim() || Boolean(working)} onClick={() => void resolve(conflict.source)}>保存人工裁定</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "non_fixed")}>标记为非固定术语</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "ignored")}>忽略术语</button>
-            <button disabled={Boolean(working)} onClick={() => void run("汇总影响", () => scanAll())}>汇总并全选全部冲突影响</button>
+            <button disabled={Boolean(working)} onClick={() => void run("汇总影响", () => scanAll())}>汇总并全选全部已裁定冲突影响</button>
             {conflict.policy !== "automatic" && <button disabled={Boolean(working)} onClick={() => void undo(conflict.source)}>撤销并恢复待处理</button>}
           </div>
         </section>
@@ -1706,7 +1823,7 @@ function TermsView({
       {impact.length > 0 && (
         <section className="impact-panel">
           <header>
-            <div><h2>{allConflictImpacts ? "全部待处理冲突可能影响的内容" : "当前术语可能影响的内容"}</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪；重复命中的内容只显示一次。</p></div>
+            <div><h2>{allConflictImpacts ? "全部已裁定冲突可能影响的内容" : "当前术语可能影响的内容"}</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪；重复命中的内容只显示一次。</p></div>
             <button onClick={() => setSelected(selected.size === impact.length ? new Set() : new Set(impact.map((item) => item.id)))}>
               {selected.size === impact.length ? "取消全选" : "选择当前列表全部"}
             </button>
@@ -1721,8 +1838,18 @@ function TermsView({
             </div>
           ))}
           <footer>
-            <span>已选择 {selected.size} 项；默认不会自动重译。</span>
-            <button className="primary" disabled={!selected.size || taskBusy || Boolean(working)} onClick={() => void retranslate()}>{taskBusy ? "翻译任务结束后可重译" : "重译所选内容"}</button>
+            <span>
+              {activeRetranslation
+                ? `重译进度 ${activeRetranslation.completed}/${activeRetranslation.total} · 成功 ${activeRetranslation.succeeded} · 失败 ${activeRetranslation.failed}`
+                : `已选择 ${selected.size} 项；默认不会自动重译。`}
+            </span>
+            <button className="primary" disabled={!selected.size || taskBusy || Boolean(working)} onClick={() => void retranslate()}>
+              {activeRetranslation
+                ? `正在重译 ${activeRetranslation.completed}/${activeRetranslation.total}`
+                : taskBusy
+                  ? "其他任务结束后可重译"
+                  : "重译所选内容"}
+            </button>
           </footer>
         </section>
       )}
@@ -2084,6 +2211,8 @@ function eventText(event: string) {
         term_resolved: "术语已裁定",
         term_policy_changed: "术语规则已更新",
         term_resolution_undone: "术语裁定已撤销",
+        retranslation_started: "开始选择性重译",
+        retranslation_completed: "选择性重译完成",
         retranslated: "内容已重译",
         retranslation_failed: "内容重译失败",
         translation_restored: "旧译文已恢复",

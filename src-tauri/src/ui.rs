@@ -73,6 +73,18 @@ pub struct AffectedContent {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetranslationProgressEvent {
+    project_id: String,
+    completed: usize,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    item_id: String,
+    detail: ProjectDetail,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct LogEntry {
     timestamp: String,
     event: String,
@@ -615,6 +627,7 @@ fn restore_translation(chapters: &mut [Chapter], item_id: &str) -> Result<usize,
 
 #[tauri::command]
 pub async fn ui_retranslate(
+    app: tauri::AppHandle,
     registry: tauri::State<'_, TaskRegistry>,
     project_id: String,
     item_ids: Vec<String>,
@@ -634,18 +647,42 @@ pub async fn ui_retranslate(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let task = tokio::spawn(crate::cli::retranslate_project(
+    let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut task = tokio::spawn(crate::cli::retranslate_project(
         None,
         PathBuf::from(project.source_path),
         item_ids,
         mock_client,
+        Some(progress_sender),
     ));
     registry
         .tasks
         .lock()
         .map_err(|_| "task registry lock is poisoned".to_string())?
         .insert(task_id.clone(), task.abort_handle());
-    let result = task.await;
+    let mut progress_open = true;
+    let result = loop {
+        tokio::select! {
+            biased;
+            progress = progress_receiver.recv(), if progress_open => match progress {
+                Some(progress) => {
+                    if let Ok(detail) = project_detail(&loaded.state_dir, &project_id) {
+                        let _ = app.emit("retranslation-progress", RetranslationProgressEvent {
+                            project_id: project_id.clone(),
+                            completed: progress.completed,
+                            total: progress.total,
+                            succeeded: progress.succeeded,
+                            failed: progress.failed,
+                            item_id: progress.item_id,
+                            detail,
+                        });
+                    }
+                }
+                None => progress_open = false,
+            },
+            result = &mut task => break result,
+        }
+    };
     registry
         .tasks
         .lock()
