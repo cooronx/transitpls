@@ -599,7 +599,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "transitpls-ui-log-{}-{}.txt",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         fs::write(
             &path,
@@ -617,7 +620,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "transitpls-ui-project-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         fs::create_dir_all(&root).expect("fixture directory should be created");
         let input = root.join("book.txt");
@@ -683,7 +689,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "transitpls-ui-delete-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         fs::create_dir_all(&root).expect("fixture directory should be created");
         let input = root.join("book.txt");

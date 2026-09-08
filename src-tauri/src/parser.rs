@@ -1004,7 +1004,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "transitpls-parser-cover-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         fs::create_dir_all(&root).expect("fixture directory should be created");
         let path = root.join("book.epub");
@@ -1045,7 +1048,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "transitpls-parser-nav-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         fs::create_dir_all(&root).expect("fixture directory should be created");
         let path = root.join("book.epub");

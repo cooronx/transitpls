@@ -101,7 +101,10 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "transitpls-credentials-{}-{}",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .replace(':', "_")
         ));
         let path = root.join("credentials.json");
         save_api_key_at(&path, "OpenAI-Chat", "  sk-example  ").expect("key should be saved");
