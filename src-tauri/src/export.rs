@@ -1,7 +1,7 @@
 use crate::model::{Chapter, ItemStatus, SegmentKind};
 use crate::parser;
 use crate::state::ExportSnapshot;
-use quick_xml::escape::escape;
+use quick_xml::escape::{escape, unescape};
 use quick_xml::events::{BytesText, Event};
 use quick_xml::{Reader, Writer, XmlVersion};
 use std::collections::{HashMap, HashSet};
@@ -475,7 +475,7 @@ fn rewrite_xhtml(xhtml: &str, replacements: &HashMap<usize, String>) -> Result<V
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut buffer = Vec::new();
     let mut block_ordinal = 0;
-    let mut element_stack = Vec::new();
+    let mut element_stack = Vec::<Option<(String, bool)>>::new();
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => {
@@ -485,22 +485,70 @@ fn rewrite_xhtml(xhtml: &str, replacements: &HashMap<usize, String>) -> Result<V
                     .then(|| {
                         let ordinal = block_ordinal;
                         block_ordinal += 1;
-                        replacements.get(&ordinal)
+                        replacements.get(&ordinal).cloned()
                     })
-                    .flatten();
+                    .flatten()
+                    .map(|text| (text, false));
                 writer
                     .write_event(Event::Start(event.into_owned()))
                     .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
-                if let Some(text) = replacement {
+                element_stack.push(replacement);
+            }
+            Ok(Event::Text(event)) => {
+                if let Some((replacement, inserted)) =
+                    element_stack.iter_mut().rev().find_map(Option::as_mut)
+                {
+                    let is_whitespace = unescape(event.as_ref())
+                        .ok()
+                        .is_some_and(|text| text.trim().is_empty());
+                    if is_whitespace {
+                        writer
+                            .write_event(Event::Text(event.into_owned()))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                    } else if !*inserted {
+                        writer
+                            .write_event(Event::Text(BytesText::new(replacement)))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                        *inserted = true;
+                    }
+                } else {
                     writer
-                        .write_event(Event::Text(BytesText::new(text)))
+                        .write_event(Event::Text(event.into_owned()))
                         .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
                 }
-                element_stack.push(replacement.is_some());
             }
-            Ok(Event::Text(_)) if element_stack.iter().any(|replaced| *replaced) => {}
-            Ok(Event::CData(_)) if element_stack.iter().any(|replaced| *replaced) => {}
+            Ok(Event::CData(event)) => {
+                if let Some((replacement, inserted)) =
+                    element_stack.iter_mut().rev().find_map(Option::as_mut)
+                {
+                    let is_whitespace = event.as_ref().trim().is_empty();
+                    if is_whitespace {
+                        writer
+                            .write_event(Event::CData(event.into_owned()))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                    } else if !*inserted {
+                        writer
+                            .write_event(Event::Text(BytesText::new(replacement)))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                        *inserted = true;
+                    }
+                } else {
+                    writer
+                        .write_event(Event::CData(event.into_owned()))
+                        .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                }
+            }
             Ok(Event::End(event)) => {
+                if let Some((replacement, inserted)) =
+                    element_stack.last_mut().and_then(Option::as_mut)
+                {
+                    if !*inserted {
+                        writer
+                            .write_event(Event::Text(BytesText::new(replacement)))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                        *inserted = true;
+                    }
+                }
                 let _ = element_stack.pop();
                 writer
                     .write_event(Event::End(event.into_owned()))
@@ -1085,7 +1133,7 @@ fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_chinese_punctuation, render_epub, render_txt};
+    use super::{normalize_chinese_punctuation, render_epub, render_txt, rewrite_xhtml};
     use crate::model::{Chapter, ItemStatus, ProjectState, ProjectStatus, Segment, SegmentKind};
     use crate::state::ExportSnapshot;
     use std::io::{Cursor, Read, Write};
@@ -1164,6 +1212,20 @@ mod tests {
         snapshot.chapters[0].segments[1].target = None;
         let error = render_txt(&snapshot).expect_err("incomplete export should fail");
         assert!(error.contains("empty translation"));
+    }
+
+    #[test]
+    fn epub_rewrite_keeps_translated_toc_text_inside_original_markup() {
+        let xhtml = r#"<div><p><span class="title">Contents</span></p><p><a href="chapter.xhtml">Chapter</a></p></div>"#;
+        let replacements = [(1, "目录".to_string()), (2, "第一章".to_string())]
+            .into_iter()
+            .collect();
+
+        let rewritten = rewrite_xhtml(xhtml, &replacements).expect("XHTML should rewrite");
+        let rewritten = String::from_utf8(rewritten).expect("XHTML should remain UTF-8");
+
+        assert!(rewritten.contains(r#"<span class="title">目录</span>"#));
+        assert!(rewritten.contains(r#"<a href="chapter.xhtml">第一章</a>"#));
     }
 
     #[test]
