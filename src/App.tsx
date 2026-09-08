@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
@@ -16,6 +16,8 @@ import {
   CircleDashed,
   Columns2,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   FolderKanban,
   Languages,
@@ -36,6 +38,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import "./App.css";
+import providerPresets from "./provider-presets.json";
 
 type Status = "initialized" | "translating" | "translated" | "failed";
 type ItemStatus = "pending" | "translated" | "failed";
@@ -108,8 +111,7 @@ interface TaskConfigDraft {
 }
 interface CredentialStatus {
   configured: boolean;
-  source?: "environment" | "desktop";
-  lastFour?: string;
+  source?: "environment" | "desktop" | "none";
 }
 interface Bootstrap {
   config: Config;
@@ -193,6 +195,7 @@ export default function App() {
     });
   }, []);
   useEffect(() => {
+    if (!isTauri()) return;
     let disposed = false;
     let stop: undefined | (() => void);
     listen<Detail>("translation-progress", ({ payload }) => {
@@ -1591,15 +1594,49 @@ function SettingsView({
   );
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [presetName, setPresetName] = useState("");
+  const [editedFields, setEditedFields] = useState<Set<string>>(new Set());
   useEffect(() => {
     setDraft(config);
     setVisibleSegments(config?.general.visible_segments ?? 100);
+    setApiKey("");
+    setShowKey(false);
+    const preset = providerPresets.find((item) =>
+      item.provider === config?.llm.provider.trim().toLowerCase() &&
+      item.base_url === config?.llm.base_url?.replace(/\/$/, ""));
+    setPresetName(preset?.name ?? "");
+    setEditedFields(new Set(["base_url", "model", "api_key_env"].filter((key) => {
+      const value = config?.llm[key as keyof Config["llm"]];
+      return value !== undefined && value !== (preset?.[key as keyof typeof preset]);
+    })));
   }, [config]);
   if (!draft) return <div className="page-empty">正在读取设置…</div>;
-  const field = (key: keyof Config["llm"], value: string) =>
+  const field = (key: keyof Config["llm"], value: string) => {
+    setEditedFields(new Set([...editedFields, key]));
     setDraft({ ...draft, llm: { ...draft.llm, [key]: value } });
-  const sameProvider = draft.llm.provider === config?.llm.provider;
-  const configured = Boolean(sameProvider && credential?.configured);
+  };
+  const applyPreset = (name: string, reset = false) => {
+    setPresetName(name);
+    const preset = providerPresets.find((item) => item.name === name);
+    if (!preset) return;
+    const llm = { ...draft.llm };
+    for (const key of ["provider", "base_url", "model", "api_key_env"] as const) {
+      if (reset || !editedFields.has(key)) llm[key] = preset[key];
+    }
+    if (reset) setEditedFields(new Set());
+    setDraft({ ...draft, llm });
+    setApiKey("");
+    setShowKey(false);
+  };
+  const sameProvider = draft.llm.provider.trim().toLowerCase() === config?.llm.provider.trim().toLowerCase();
+  let noKey = false;
+  try {
+    const host = new URL(draft.llm.base_url ?? "").hostname;
+    noKey = ["openai-chat", "openai-compatible"].includes(draft.llm.provider.trim().toLowerCase()) &&
+      !draft.llm.api_key_env.trim() && (host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host));
+  } catch { /* The backend reports invalid URLs when validating. */ }
+  const configured = Boolean(sameProvider && credential?.configured && credential.source !== "none" &&
+    (credential.source !== "environment" || draft.llm.api_key_env === config?.llm.api_key_env));
   const savingModel = busy === "验证模型";
   const savingGeneral = busy === "保存通用设置";
   return (
@@ -1638,24 +1675,35 @@ function SettingsView({
                 <h2>模型配置</h2>
                 <p>选择模型提供商，并验证用于翻译的 API Key。</p>
               </div>
-              {configured && (
+              {(configured || noKey) && (
                 <span className="credential-ok icon-label">
                   <Check />
-                  密钥已保存 ····{credential?.lastFour}
+                  {noKey ? "本地免密" : credential?.source === "environment" ? "环境变量已配置" : "密钥已保存"}
                 </span>
               )}
             </div>
-            <Field label="接口格式">
+            <Field label="服务预设">
+              <div className="preset-input">
+                <select aria-label="服务预设" value={presetName} onChange={(e) => applyPreset(e.target.value)}>
+                  <option value="">自定义</option>
+                  {providerPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
+                </select>
+                <button type="button" title="重置为预设默认值" aria-label="重置为预设默认值" disabled={!presetName} onClick={() => applyPreset(presetName, true)}><RotateCcw size={16} /></button>
+              </div>
+            </Field>
+            <Field label="协议类型">
               <select
-                value={draft.llm.provider}
+                aria-label="协议类型"
+                value={draft.llm.provider.trim().toLowerCase()}
                 onChange={(e) => {
                   field("provider", e.target.value);
                   setApiKey("");
                 }}
               >
                 <option value="openai-chat">
-                  OpenAI Chat Completions(OpenAI 兼容)
+                  OpenAI Chat Completions
                 </option>
+                <option value="openai-compatible">OpenAI-compatible (Chat Completions)</option>
                 <option value="openai-responses">OpenAI Responses</option>
                 <option value="anthropic">Anthropic(Messages)</option>
               </select>
@@ -1672,28 +1720,32 @@ function SettingsView({
                 onChange={(e) => field("base_url", e.target.value)}
               />
             </Field>
+            <Field label="API Key 环境变量">
+              <input value={draft.llm.api_key_env} onChange={(e) => field("api_key_env", e.target.value)} placeholder="本地无认证服务可留空" />
+            </Field>
             <Field label="API Key">
               <div className="secret-input">
                 <input
                   autoFocus={!credential?.configured}
                   type={showKey ? "text" : "password"}
-                  value={apiKey}
+                  disabled={noKey}
+                  value={noKey ? "" : apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   placeholder={
-                    configured
-                      ? `已保存 ····${credential?.lastFour}，留空则不更改`
+                    noKey ? "本地免密" : configured
+                      ? "已配置，留空则使用现有凭据"
                       : "粘贴 API Key"
                   }
                 />
-                <button type="button" onClick={() => setShowKey(!showKey)}>
-                  {showKey ? "隐藏" : "显示"}
+                <button type="button" title={showKey ? "隐藏密钥" : "显示密钥"} aria-label={showKey ? "隐藏密钥" : "显示密钥"} onClick={() => setShowKey(!showKey)}>
+                  {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
               </div>
               <small>
                 Key 仅保存在当前用户的 TransItPls 配置目录中，不会写入书籍项目。
               </small>
             </Field>
-            {credential?.source === "environment" && sameProvider && (
+            {credential?.source === "environment" && configured && !noKey && (
               <div className="config-note">
                 当前优先使用环境变量 {draft.llm.api_key_env}；桌面端保存的 Key
                 将作为后备。
@@ -1702,8 +1754,8 @@ function SettingsView({
             <div className="settings-actions">
               <button
                 className="primary"
-                disabled={busy !== null || (!configured && !apiKey.trim())}
-                onClick={() => void onSaveModel(draft, apiKey)}
+                disabled={busy !== null}
+                onClick={() => void onSaveModel(draft, noKey ? "" : apiKey)}
               >
                 {savingModel ? "正在验证…" : "测试连接并保存"}
               </button>

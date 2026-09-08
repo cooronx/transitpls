@@ -1637,7 +1637,7 @@ button:disabled {
 
 .settings-layout {
     display: grid;
-    grid-template-columns: 170px minmax(480px, 680px);
+    grid-template-columns: 170px minmax(0, 680px);
     gap: 18px;
     align-items: start
 }
@@ -1692,6 +1692,28 @@ button:disabled {
 
 .secret-input {
     display: flex
+}
+
+.preset-input { display: flex; gap: 8px; min-width: 0 }
+.preset-input select { min-width: 0 }
+.preset-input button { flex: 0 0 36px; height: 36px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; background: white; cursor: pointer }
+.secret-input input { min-width: 0 }
+.secret-input button { flex-shrink: 0; display: grid; place-items: center }
+.settings-card { min-width: 0 }
+.settings-card footer code { overflow-wrap: anywhere }
+@media (max-width: 800px) {
+    .app-shell:has(.model-page) { min-width: 0 }
+    .app-shell:has(.model-page) .topbar { grid-template-columns: minmax(0, 1fr); gap: 0 }
+    .app-shell:has(.model-page) .topbar>.global-search,
+    .app-shell:has(.model-page) .top-actions { display: none }
+    .app-shell:has(.model-page) .statusbar { gap: 6px; overflow: hidden; white-space: nowrap }
+    .model-page { padding: 20px 12px; min-width: 0 }
+    .model-page .settings-card { padding: 16px }
+    .model-page select { font-size: 12px }
+    .model-page .settings-heading p { overflow-wrap: anywhere }
+    .settings-layout { grid-template-columns: minmax(0, 1fr) }
+    .settings-layout>nav { flex-direction: row; flex-wrap: wrap }
+    .settings-heading { flex-wrap: wrap; gap: 8px }
 }
 
 .secret-input input {
