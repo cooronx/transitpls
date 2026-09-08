@@ -339,13 +339,37 @@ pub async fn ui_transit(
         .lock()
         .map_err(|_| "task registry lock is poisoned".to_string())?
         .remove(&task_id);
-    let project = result.map_err(|error| {
-        if error.is_cancelled() {
-            "翻译任务已取消，可重新运行以断点续译".to_string()
-        } else {
-            format!("translation task failed: {error}")
+    let project = match result {
+        Ok(Ok(project)) => project,
+        Ok(Err(error)) => {
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "ui_translation_failed",
+                serde_json::json!({ "error": error }),
+            );
+            return Err(error);
         }
-    })??;
+        Err(error) if error.is_cancelled() => {
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "ui_translation_cancelled",
+                serde_json::json!({}),
+            );
+            return Err("翻译任务已取消，可重新运行以断点续译".to_string());
+        }
+        Err(error) => {
+            let detail = format!("translation task failed: {error}");
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "ui_translation_task_failed",
+                serde_json::json!({ "error": detail }),
+            );
+            return Err(detail);
+        }
+    };
     let detail = project_detail(&loaded.state_dir, &project.id)?;
     let _ = app.emit("translation-progress", &detail);
     Ok(detail)
