@@ -234,7 +234,7 @@ where
 {
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete(system, user).await {
+        match client.complete_attempt(system, user, attempt).await {
             Ok(output) => match crate::llm::parse_json_response(&output.text) {
                 Ok(value) => return Ok(value),
                 Err(error) => last_error = format!("LLM response is not valid JSON: {error}"),

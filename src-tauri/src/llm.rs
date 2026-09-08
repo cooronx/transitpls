@@ -4,7 +4,9 @@ use crate::terms::Term;
 use async_trait::async_trait;
 use rand::RngExt;
 use rig_core::client::CompletionClient;
-use rig_core::completion::{AssistantContent, CompletionRequestBuilder, Message, Usage};
+use rig_core::completion::{
+    AssistantContent, CompletionError, CompletionRequestBuilder, Message, Usage,
+};
 use rig_core::http_client::ReqwestClient;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -12,9 +14,19 @@ use std::time::Duration;
 
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
 pub const LANGUAGE_SAMPLE_CHARS: usize = 1_000;
+pub(crate) const EMPTY_COMPLETION_ERROR: &str =
+    "Response contained no message or tool call (empty)";
 
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
+    async fn complete_attempt(
+        &self,
+        system: &str,
+        user: &str,
+        _retry: usize,
+    ) -> Result<CompletionOutput, String> {
+        self.complete(system, user).await
+    }
     fn record_failure(&self, _stage: &str, _details: serde_json::Value) -> Result<(), String> {
         Ok(())
     }
@@ -192,6 +204,10 @@ enum RigModel {
 
 pub struct RigClient {
     model: RigModel,
+    provider: String,
+    model_name: String,
+    host: String,
+    recorder: Option<crate::usage::UsageRecorder>,
 }
 
 pub struct RecordingClient {
@@ -215,7 +231,20 @@ impl TranslationClient for RecordingClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
-        let output = match self.inner.complete(system_prompt, user_prompt).await {
+        self.complete_attempt(system_prompt, user_prompt, 0).await
+    }
+
+    async fn complete_attempt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        retry: usize,
+    ) -> Result<CompletionOutput, String> {
+        let output = match self
+            .inner
+            .complete_attempt(system_prompt, user_prompt, retry)
+            .await
+        {
             Ok(output) => output,
             Err(error) => {
                 self.record_failure(
@@ -235,7 +264,9 @@ impl TranslationClient for RecordingClient {
 }
 
 fn stage_from_prompt(system_prompt: &str) -> &'static str {
-    if system_prompt.contains("language identification") {
+    if system_prompt.contains("checking whether an LLM connection") {
+        "model_verification"
+    } else if system_prompt.contains("language identification") {
         "language_identification"
     } else if system_prompt.contains("TASK:BOOK_STYLE_ANALYSIS") {
         "book_style_analysis"
@@ -255,6 +286,11 @@ fn stage_from_prompt(system_prompt: &str) -> &'static str {
 }
 
 impl RigClient {
+    pub fn with_recorder(mut self, recorder: crate::usage::UsageRecorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
     pub fn from_config(config: &LlmConfig) -> Result<Self, String> {
         Self::from_config_with_api_key(config, config.api_key()?)
     }
@@ -263,47 +299,67 @@ impl RigClient {
         config: &LlmConfig,
         api_key: impl Into<String>,
     ) -> Result<Self, String> {
+        let config = config.normalized()?;
+        let api_key = api_key.into();
+        if api_key.trim().is_empty() && !config.allows_empty_key() {
+            return Err(format!("configuration_failed provider={} model={} stage=configuration: API key is required for this endpoint", config.provider, config.model));
+        }
         let http_client = ReqwestClient::builder()
             .timeout(Duration::from_secs(config.timeout_secs))
             .build()
-            .map_err(|error| format!("failed to build HTTP client: {error}"))?;
-        let provider = config.provider.to_ascii_lowercase();
-        let api_key = api_key.into();
+            .map_err(|_| {
+                "configuration_failed stage=configuration: failed to build HTTP client".to_string()
+            })?;
+        let provider = config.provider.clone();
+        let base_url = config.base_url.as_deref().expect("normalized URL");
+        let host = url::Url::parse(base_url)
+            .expect("validated URL")
+            .host_str()
+            .unwrap_or_default()
+            .to_string();
+        let model_name = if api_key.is_empty() {
+            config.model.clone()
+        } else {
+            config.model.replace(&api_key, "[redacted]")
+        };
         let model = match provider.as_str() {
-            "openai-chat" => {
-                let base_url = normalize_openai_url(config.base_url.as_deref(), "chat/completions");
-                let client = rig_core::providers::openai::CompletionsClient::builder()
-                    .api_key(api_key.clone())
-                    .base_url(base_url)
-                    .http_client(http_client)
-                    .build()
-                    .map_err(|error| format!("failed to configure OpenAI Chat client: {error}"))?;
+            "openai-chat" | "openai-compatible" => {
+                let client = if api_key.is_empty() {
+                    // Reuse Rig's unauthenticated transport, retaining the Chat protocol.
+                    rig_core::providers::ollama::Client::builder()
+                        .api_key(rig_core::client::Nothing)
+                        .base_url(base_url)
+                        .http_client(http_client)
+                        .build()
+                        .map(|client| client.with_ext(rig_core::providers::openai::OpenAICompletionsExt::default()))
+                } else {
+                    rig_core::providers::openai::CompletionsClient::builder()
+                        .api_key(api_key.clone())
+                        .base_url(base_url)
+                        .http_client(http_client)
+                        .build()
+                }
+                    .map_err(|_| "configuration_failed stage=configuration: invalid Chat client settings or API key header".to_string())?;
                 RigModel::OpenAiChat(client.completion_model(config.model.clone()))
             }
             "openai-responses" => {
-                let base_url = normalize_openai_url(config.base_url.as_deref(), "responses");
                 let client = rig_core::providers::openai::Client::builder()
                     .api_key(api_key.clone())
                     .base_url(base_url)
                     .http_client(http_client)
                     .build()
-                    .map_err(|error| {
-                        format!("failed to configure OpenAI Responses client: {error}")
+                    .map_err(|_| {
+                        "configuration_failed stage=configuration: invalid Responses client settings or API key header".to_string()
                     })?;
                 RigModel::OpenAiResponses(client.completion_model(config.model.clone()))
             }
             "anthropic" => {
-                let base_url = config
-                    .base_url
-                    .as_deref()
-                    .unwrap_or("https://api.anthropic.com")
-                    .to_string();
                 let client = rig_core::providers::anthropic::Client::builder()
                     .api_key(api_key)
                     .base_url(base_url)
                     .http_client(http_client)
                     .build()
-                    .map_err(|error| format!("failed to configure Anthropic client: {error}"))?;
+                    .map_err(|_| "configuration_failed stage=configuration: invalid Anthropic client settings or API key header".to_string())?;
                 RigModel::Anthropic(client.completion_model(config.model.clone()))
             }
             _ => {
@@ -313,7 +369,34 @@ impl RigClient {
             ))
             }
         };
-        Ok(Self { model })
+        Ok(Self {
+            model,
+            provider,
+            model_name,
+            host,
+            recorder: None,
+        })
+    }
+
+    fn event(
+        &self,
+        event: &str,
+        stage: &str,
+        retry: usize,
+        elapsed_ms: u128,
+    ) -> Result<(), String> {
+        let details = serde_json::json!({"provider":self.provider,"model":self.model_name,"stage":stage,"endpoint_host":self.host,"retry_count":retry,"elapsed_ms":elapsed_ms});
+        if let Some(recorder) = &self.recorder {
+            recorder.record_event(event, details)?;
+        }
+        Ok(())
+    }
+
+    fn context(&self, event: &str, stage: &str, message: &str) -> String {
+        format!(
+            "{event} provider={} model={} stage={stage} endpoint_host={}: {message}",
+            self.provider, self.model_name, self.host
+        )
     }
 }
 
@@ -324,6 +407,17 @@ impl TranslationClient for RigClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
+        self.complete_attempt(system_prompt, user_prompt, 0).await
+    }
+
+    async fn complete_attempt(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        retry: usize,
+    ) -> Result<CompletionOutput, String> {
+        let started = std::time::Instant::now();
+        let stage = stage_from_prompt(system_prompt);
         let response = match &self.model {
             RigModel::OpenAiChat(model) => {
                 CompletionRequestBuilder::new(model.clone(), Message::user(user_prompt))
@@ -349,9 +443,27 @@ impl TranslationClient for RigClient {
                     .send()
                     .await
             }
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let (event, message) = safe_completion_error(&error);
+                self.event(event, stage, retry, started.elapsed().as_millis())?;
+                return Err(self.context(event, stage, message));
+            }
+        };
+        if response
+            .raw
+            .get("usage")
+            .is_none_or(serde_json::Value::is_null)
+        {
+            self.event("usage_missing", stage, retry, started.elapsed().as_millis())?;
         }
-        .map_err(|error| format!("LLM request failed: {error}"))?;
         let usage = response.usage;
+        let has_non_text = response
+            .choice
+            .iter()
+            .any(|content| !matches!(content, AssistantContent::Text(_)));
         let text = response
             .choice
             .into_iter()
@@ -360,7 +472,75 @@ impl TranslationClient for RigClient {
                 _ => None,
             })
             .collect::<String>();
+        if text.trim().is_empty() {
+            self.event(
+                "response_parse_failed",
+                stage,
+                retry,
+                started.elapsed().as_millis(),
+            )?;
+            return Err(self.context(
+                "response_parse_failed",
+                stage,
+                if has_non_text {
+                    "non-text choice; use a text completion model"
+                } else {
+                    EMPTY_COMPLETION_ERROR
+                },
+            ));
+        }
+        self.event(
+            "request_completed",
+            stage,
+            retry,
+            started.elapsed().as_millis(),
+        )?;
         Ok(CompletionOutput { text, usage })
+    }
+}
+
+fn safe_completion_error(error: &CompletionError) -> (&'static str, &'static str) {
+    // Provider and transport error strings can contain credentials or response bodies.
+    if error.to_string().contains(EMPTY_COMPLETION_ERROR) {
+        return ("response_parse_failed", EMPTY_COMPLETION_ERROR);
+    }
+    match error
+        .provider_response_status()
+        .map(|status| status.as_u16())
+    {
+        Some(200..=299) => (
+            "response_parse_failed",
+            "invalid JSON or unsupported response format; check protocol and model",
+        ),
+        Some(401 | 403) => (
+            "request_failed",
+            "authentication failed; check API Key and permissions",
+        ),
+        Some(404) => (
+            "request_failed",
+            "model or endpoint not found; check model name and Base URL",
+        ),
+        Some(429) => (
+            "request_failed",
+            "rate limit exceeded; retry later or check quota",
+        ),
+        Some(500..=599) => ("request_failed", "provider unavailable; retry later"),
+        Some(_) => (
+            "request_failed",
+            "provider rejected the request; check model and protocol settings",
+        ),
+        None => match error {
+            CompletionError::JsonError(_)
+            | CompletionError::ResponseError(_)
+            | CompletionError::ProviderResponse(_) => (
+                "response_parse_failed",
+                "invalid JSON or unsupported response format; check protocol and model",
+            ),
+            _ => (
+                "request_failed",
+                "connection or request failed; check endpoint, network, timeout and model",
+            ),
+        },
     }
 }
 
@@ -475,7 +655,7 @@ pub async fn detect_source_language<C: TranslationClient + ?Sized>(
         let mut language = None;
         let mut last_error = String::new();
         for attempt in 0..=max_retries {
-            match client.complete(system, sample).await {
+            match client.complete_attempt(system, sample, attempt).await {
                 Ok(output) => match validate_language_response(&output.text) {
                     Ok(value) => {
                         language = Some(value);
@@ -631,26 +811,6 @@ struct TranslationItem {
     translation: String,
 }
 
-fn normalize_openai_url(base_url: Option<&str>, suffix: &str) -> String {
-    let value = base_url
-        .unwrap_or("https://api.openai.com/v1")
-        .trim_end_matches('/');
-    for ending in ["/chat/completions", "/responses", "/v1"] {
-        if let Some(stripped) = value.strip_suffix(ending) {
-            return if ending == "/v1" {
-                stripped.to_string() + "/v1"
-            } else {
-                stripped.to_string()
-            };
-        }
-    }
-    if let Some(stripped) = value.strip_suffix(suffix) {
-        stripped.trim_end_matches('/').to_string()
-    } else {
-        value.to_string()
-    }
-}
-
 pub async fn translate_batch<C: TranslationClient + ?Sized>(
     client: &C,
     segments: &[Segment],
@@ -666,7 +826,7 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
     let (system, user) = build_prompts(segments, source_language, target_language, context);
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete(&system, &user).await {
+        match client.complete_attempt(&system, &user, attempt).await {
             Ok(output) => match validate_response(&output.text, &expected_ids) {
                 Ok(translations) => return Ok(translations),
                 Err(error) => last_error = error,
@@ -786,7 +946,7 @@ async fn call_numbered_batch<C: TranslationClient + ?Sized>(
 ) -> Result<Vec<String>, String> {
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete(system, user).await {
+        match client.complete_attempt(system, user, attempt).await {
             Ok(output) => match validate_response(&output.text, expected_ids) {
                 Ok(translations) => return Ok(translations),
                 Err(error) => last_error = error,

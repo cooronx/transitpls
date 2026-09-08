@@ -1373,18 +1373,23 @@ fn build_client(
     state_dir: &std::path::Path,
     project: &crate::model::ProjectState,
 ) -> Result<Box<dyn TranslationClient>, String> {
+    let recorder = UsageRecorder::new(
+        &state::project_dir(state_dir, &project.id),
+        &config.llm.model,
+    );
     let inner: Box<dyn TranslationClient> = if mock {
         Box::new(MockClient)
     } else {
-        Box::new(RigClient::from_config(&config.llm)?)
+        let client = RigClient::from_config(&config.llm).map_err(|error| {
+            let _ = recorder.record_event(
+                "configuration_failed",
+                serde_json::json!({"stage":"configuration","error":error}),
+            );
+            error
+        })?;
+        Box::new(client.with_recorder(recorder.clone()))
     };
-    Ok(Box::new(RecordingClient::new(
-        inner,
-        UsageRecorder::new(
-            &state::project_dir(state_dir, &project.id),
-            &config.llm.model,
-        ),
-    )))
+    Ok(Box::new(RecordingClient::new(inner, recorder)))
 }
 
 fn load_project_args(

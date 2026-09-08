@@ -86,21 +86,104 @@ impl Default for LlmConfig {
 }
 
 impl LlmConfig {
-    pub fn api_key(&self) -> Result<String, String> {
-        if self.api_key_env.trim().is_empty() {
-            return Err("llm.api_key_env must not be empty".to_string());
+    pub fn normalized(&self) -> Result<Self, String> {
+        let mut value = self.clone();
+        value.provider = crate::credentials::normalize_provider(&self.provider);
+        let fail = |message: &str| format!("configuration_failed stage=configuration: {message}");
+        let suffix = match value.provider.as_str() {
+            "openai-chat" | "openai-compatible" => "/chat/completions",
+            "openai-responses" => "/responses",
+            "anthropic" => "/messages",
+            _ => return Err(fail("unsupported provider; use openai-chat, openai-compatible, openai-responses, or anthropic")),
+        };
+        let default_url = if value.provider == "anthropic" {
+            "https://api.anthropic.com"
+        } else {
+            "https://api.openai.com/v1"
+        };
+        let mut url = url::Url::parse(self.base_url.as_deref().unwrap_or(default_url).trim())
+            .map_err(|_| fail("Base URL must be a valid HTTP(S) URL"))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(fail("Base URL must be a valid HTTP(S) URL"));
         }
-        if let Ok(value) = std::env::var(&self.api_key_env) {
+        if !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(fail("remove credentials, query parameters and fragments from Base URL; use API Key settings"));
+        }
+        let path = url.path().trim_end_matches('/');
+        if (url.host_str() == Some("api.anthropic.com") && value.provider != "anthropic")
+            || (url.host_str() == Some("api.openai.com") && value.provider == "anthropic")
+        {
+            return Err(fail(
+                "provider protocol does not match the endpoint host; select the matching protocol",
+            ));
+        }
+        for endpoint in [
+            "/chat/completions",
+            "/responses",
+            "/messages",
+            "/api/chat",
+            "/api/generate",
+        ] {
+            if path.ends_with(endpoint) && endpoint != suffix {
+                return Err(fail(&format!(
+                    "provider={} expects {suffix}; correct the protocol or Base URL",
+                    value.provider
+                )));
+            }
+        }
+        let mut base = path.strip_suffix(suffix).unwrap_or(path).to_string();
+        if value.provider == "anthropic" {
+            base = base.strip_suffix("/v1").unwrap_or(&base).to_string();
+        }
+        url.set_path(&base);
+        value.base_url = Some(url.as_str().trim_end_matches('/').to_string());
+        value.model = value.model.trim().to_string();
+        value.api_key_env = value.api_key_env.trim().to_string();
+        if value.model.is_empty() || value.timeout_secs == 0 {
+            return Err(fail(
+                "model must not be empty and timeout_secs must be greater than zero",
+            ));
+        }
+        Ok(value)
+    }
+
+    pub fn allows_empty_key(&self) -> bool {
+        matches!(
+            self.provider.trim().to_ascii_lowercase().as_str(),
+            "openai-chat" | "openai-compatible"
+        ) && self.api_key_env.trim().is_empty()
+            && self
+                .base_url
+                .as_deref()
+                .and_then(|value| url::Url::parse(value).ok())
+                .is_some_and(|url| match url.host() {
+                    Some(url::Host::Domain(host)) => host == "localhost",
+                    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                    None => false,
+                })
+    }
+
+    pub fn api_key(&self) -> Result<String, String> {
+        let config = self.normalized()?;
+        if config.allows_empty_key() {
+            return Ok(String::new());
+        }
+        if let Ok(value) = std::env::var(&config.api_key_env) {
             if !value.trim().is_empty() {
                 return Ok(value);
             }
         }
-        if let Some(value) = crate::credentials::load_api_key(&self.provider)? {
+        if let Some(value) = crate::credentials::load_api_key(&config.provider)? {
             return Ok(value);
         }
         Err(format!(
-            "LLM API key is not configured; open desktop Settings or set '{}'",
-            self.api_key_env
+            "configuration_failed provider={} model={} stage=configuration: API key is not configured; open desktop Settings or configure the API Key environment variable",
+            config.provider, config.model
         ))
     }
 }
@@ -160,7 +243,7 @@ pub fn load(explicit_path: Option<&Path>) -> Result<LoadedConfig, String> {
     let candidate = explicit_path
         .map(Path::to_path_buf)
         .unwrap_or_else(|| cwd.join(DEFAULT_CONFIG_FILE));
-    let (value, path) = if candidate.exists() {
+    let (mut value, path): (AppConfig, _) = if candidate.exists() {
         let text = std::fs::read_to_string(&candidate)
             .map_err(|error| format!("failed to read config {}: {error}", candidate.display()))?;
         let parsed = toml::from_str(&text)
@@ -175,6 +258,7 @@ pub fn load(explicit_path: Option<&Path>) -> Result<LoadedConfig, String> {
         (AppConfig::default(), None)
     };
     validate(&value)?;
+    value.llm = value.llm.normalized()?;
     let base = path.as_deref().and_then(Path::parent).unwrap_or(&cwd);
     let state_dir = if value.paths.state_dir.is_absolute() {
         value.paths.state_dir.clone()
@@ -189,6 +273,7 @@ pub fn load(explicit_path: Option<&Path>) -> Result<LoadedConfig, String> {
 }
 
 fn validate(config: &AppConfig) -> Result<(), String> {
+    config.llm.normalized()?;
     if config.language.source.trim().is_empty() {
         return Err("language.source must not be empty".to_string());
     }
@@ -215,10 +300,12 @@ fn validate(config: &AppConfig) -> Result<(), String> {
 
 pub fn save_default(config: &AppConfig) -> Result<PathBuf, String> {
     validate(config)?;
+    let mut config = config.clone();
+    config.llm = config.llm.normalized()?;
     let path = std::env::current_dir()
         .map_err(|error| format!("failed to determine current directory: {error}"))?
         .join(DEFAULT_CONFIG_FILE);
-    let text = toml::to_string_pretty(config)
+    let text = toml::to_string_pretty(&config)
         .map_err(|error| format!("failed to serialize configuration: {error}"))?;
     std::fs::write(&path, text)
         .map_err(|error| format!("failed to write configuration: {error}"))?;

@@ -87,7 +87,7 @@ fn save_api_key_at(path: &Path, provider: &str, api_key: &str) -> Result<(), Str
     Ok(())
 }
 
-fn normalize_provider(provider: &str) -> String {
+pub(crate) fn normalize_provider(provider: &str) -> String {
     provider.trim().to_ascii_lowercase()
 }
 
@@ -116,6 +116,18 @@ mod tests {
             load_api_key_at(&path, "anthropic").expect("missing provider should load"),
             None
         );
+        save_api_key_at(&path, " OpenAI-Compatible ", "compatible-key").unwrap();
+        assert_eq!(
+            load_api_key_at(&path, "OPENAI-COMPATIBLE")
+                .unwrap()
+                .as_deref(),
+            Some("compatible-key")
+        );
+        assert_eq!(
+            load_api_key_at(&path, "openai-chat").unwrap().as_deref(),
+            Some("sk-example")
+        );
+        assert_eq!(load_api_key_at(&path, "openai-responses").unwrap(), None);
         fs::remove_dir_all(root).expect("fixture should be removed");
     }
 }

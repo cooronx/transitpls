@@ -63,6 +63,9 @@ pub struct UsageRecorder {
 }
 
 impl UsageRecorder {
+    pub fn record_event(&self, event: &str, details: serde_json::Value) -> Result<(), String> {
+        state::append_log_at(&self.path.with_file_name("logs.txt"), event, details)
+    }
     pub fn record_failure(&self, stage: &str, details: serde_json::Value) -> Result<(), String> {
         state::append_log_at(
             &self.path.with_file_name("logs.txt"),

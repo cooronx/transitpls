@@ -43,7 +43,6 @@ pub struct ProjectSummary {
 pub struct CredentialStatus {
     configured: bool,
     source: Option<&'static str>,
-    last_four: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,10 +99,14 @@ fn project_summary(state_dir: &Path, project: ProjectState) -> ProjectSummary {
 
 #[tauri::command]
 pub async fn ui_verify_and_save_model(
-    value: AppConfig,
+    mut value: AppConfig,
     api_key: Option<String>,
 ) -> Result<Bootstrap, String> {
+    value.llm = value.llm.normalized()?;
     let supplied = api_key.filter(|key| !key.trim().is_empty());
+    if value.llm.allows_empty_key() && supplied.is_some() {
+        return Err("configuration_failed stage=configuration: set an API Key environment variable name to enable authentication for a local service".to_string());
+    }
     let key = match supplied.as_deref() {
         Some(key) => key.trim().to_string(),
         None => value.llm.api_key()?,
@@ -476,12 +479,17 @@ fn delete_project_at(state_dir: &Path, project_id: &str) -> Result<(), String> {
 }
 
 fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
+    if config.llm.allows_empty_key() {
+        return Ok(CredentialStatus {
+            configured: true,
+            source: Some("none"),
+        });
+    }
     if let Ok(value) = std::env::var(&config.llm.api_key_env) {
         if !value.trim().is_empty() {
             return Ok(CredentialStatus {
                 configured: true,
                 source: Some("environment"),
-                last_four: Some(last_four(&value)),
             });
         }
     }
@@ -489,19 +497,7 @@ fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
     Ok(CredentialStatus {
         configured: stored.is_some(),
         source: stored.as_ref().map(|_| "desktop"),
-        last_four: stored.as_deref().map(last_four),
     })
-}
-
-fn last_four(value: &str) -> String {
-    value
-        .chars()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect()
 }
 
 fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, String> {
@@ -593,6 +589,19 @@ mod tests {
     use crate::state;
     use serde_json::Value;
     use std::fs;
+
+    #[test]
+    fn local_no_key_configuration_is_ready_for_desktop_tasks() {
+        let mut config = crate::config::AppConfig::default();
+        config.llm.provider = "openai-compatible".into();
+        config.llm.base_url = Some("http://localhost:11434/v1".into());
+        config.llm.api_key_env.clear();
+        let status = super::credential_status(&config).unwrap();
+        assert!(status.configured);
+        assert_eq!(status.source, Some("none"));
+        let serialized = serde_json::to_string(&status).unwrap();
+        assert!(!serialized.contains("lastFour"));
+    }
 
     #[test]
     fn reads_newest_logs_first() {

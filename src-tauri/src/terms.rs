@@ -82,7 +82,7 @@ struct ExtractionResponse {
     terms: Vec<Term>,
 }
 
-const EMPTY_COMPLETION_ERROR: &str = "Response contained no message or tool call (empty)";
+use crate::llm::EMPTY_COMPLETION_ERROR;
 
 #[derive(Debug, Clone)]
 pub struct TermStore {
@@ -347,7 +347,7 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain string source and target, nullable string reading and gender, string-array aliases, integer first_chapter, nullable string note, and status=\"ok\". The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Return an empty array when nothing qualifies.";
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete(system, &user).await {
+        match client.complete_attempt(system, &user, attempt).await {
             Ok(output) if output.text.trim().is_empty() => {
                 return Err(format!("term extraction failed: {EMPTY_COMPLETION_ERROR}"));
             }

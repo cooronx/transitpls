@@ -1,0 +1,10 @@
+[
+  {"name":"OpenAI Chat","provider":"openai-chat","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key_env":"OPENAI_API_KEY","note":"Chat Completions"},
+  {"name":"OpenAI Responses","provider":"openai-responses","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key_env":"OPENAI_API_KEY","note":"Responses API"},
+  {"name":"Anthropic","provider":"anthropic","base_url":"https://api.anthropic.com","model":"claude-sonnet-4-6","api_key_env":"ANTHROPIC_API_KEY","note":"Messages API"},
+  {"name":"DeepSeek","provider":"openai-compatible","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat","api_key_env":"DEEPSEEK_API_KEY","note":"Chat Completions"},
+  {"name":"OpenRouter","provider":"openai-compatible","base_url":"https://openrouter.ai/api/v1","model":"openai/gpt-4o-mini","api_key_env":"OPENROUTER_API_KEY","note":"Chat Completions"},
+  {"name":"Ollama","provider":"openai-compatible","base_url":"http://localhost:11434/v1","model":"qwen3:8b","api_key_env":"","note":"Local service; no API key"},
+  {"name":"vLLM","provider":"openai-compatible","base_url":"http://localhost:8000/v1","model":"Qwen/Qwen3-8B","api_key_env":"","note":"Local service; use the deployed model name"},
+  {"name":"OpenAI-compatible Gateway","provider":"openai-compatible","base_url":"","model":"","api_key_env":"OPENAI_API_KEY","note":"Custom gateway"}
+]
