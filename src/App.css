@@ -109,24 +109,8 @@ button {
 .logo-mark {
     width: 27px;
     height: 27px;
-    border-radius: 7px;
-    background: linear-gradient(145deg, #0f8b80, #0b6b64);
-    color: #fff;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    align-items: center;
-    padding: 4px;
-    box-shadow: inset 0 0 0 1px #ffffff26
-}
-
-.logo-mark span {
-    font-size: 12px
-}
-
-.logo-mark b {
-    font-size: 10px;
-    align-self: end;
-    color: #98f3e6
+    display: block;
+    flex: none
 }
 
 .brand strong {
@@ -1668,17 +1652,7 @@ button:disabled {
 
 .empty-state .logo-mark {
     width: 58px;
-    height: 58px;
-    border-radius: 16px;
-    padding: 10px
-}
-
-.empty-state .logo-mark span {
-    font-size: 22px
-}
-
-.empty-state .logo-mark b {
-    font-size: 17px
+    height: 58px
 }
 
 .statusbar {

@@ -726,12 +726,7 @@ export default function App() {
 }
 
 function Logo() {
-  return (
-    <div className="logo-mark">
-      <span>文</span>
-      <b>A</b>
-    </div>
-  );
+  return <img className="logo-mark" src="/transitpls_icon.png" alt="" />;
 }
 function Header({
   project,
