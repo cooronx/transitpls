@@ -3,6 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use rig_core::completion::Usage;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -60,6 +61,7 @@ pub struct UsageFile {
 pub struct UsageRecorder {
     path: PathBuf,
     model: String,
+    lock: Arc<Mutex<()>>,
 }
 
 impl UsageRecorder {
@@ -77,10 +79,15 @@ impl UsageRecorder {
         Self {
             path: project_dir.join("usage.json"),
             model: model.into(),
+            lock: Arc::new(Mutex::new(())),
         }
     }
 
     pub fn record(&self, stage: &str, usage: Usage) -> Result<(), String> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| "usage recorder lock is poisoned".to_string())?;
         let tokens = TokenUsage::from(usage);
         let mut file = if self.path.exists() {
             state::read_json(&self.path)?
@@ -147,6 +154,37 @@ mod tests {
         assert_eq!(value.calls[1].stage, "polish");
         assert_eq!(value.calls[1].model, "test-model");
 
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn records_concurrent_calls_without_losing_usage() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "transitpls-usage-concurrent-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("temp directory should be created");
+        let recorder = UsageRecorder::new(&dir, "test-model");
+        let threads: Vec<_> = (0..3)
+            .map(|_| {
+                let recorder = recorder.clone();
+                std::thread::spawn(move || recorder.record("translation", Usage::default()))
+            })
+            .collect();
+        for thread in threads {
+            thread
+                .join()
+                .expect("recording thread should finish")
+                .unwrap();
+        }
+
+        let value: UsageFile =
+            crate::state::read_json(&dir.join("usage.json")).expect("usage file should load");
+        assert_eq!(value.calls.len(), 3);
         fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 }

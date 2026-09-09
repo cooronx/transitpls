@@ -7,10 +7,11 @@ use crate::parser;
 use crate::pipeline;
 use crate::review;
 use crate::state;
-use crate::terms::{self, PendingExtraction, TermStore};
+use crate::terms::{self, PendingExtraction, Term, TermStore};
 use crate::usage::UsageRecorder;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct RetranslationProgress {
@@ -381,7 +382,12 @@ pub async fn retranslate_project(
     let mut chapters = state::load_chapters(&loaded.state_dir, &project)?;
     let analysis =
         load_translation_analysis(&loaded.state_dir, &project, &chapters, &loaded.value)?;
-    let client = build_client(&loaded.value, mock_client, &loaded.state_dir, &project)?;
+    let client: Arc<dyn TranslationClient> = Arc::from(build_client(
+        &loaded.value,
+        mock_client,
+        &loaded.state_dir,
+        &project,
+    )?);
     let store = term_store(&loaded.state_dir, &project)?;
     let total = item_ids.len();
     let mut succeeded = 0;
@@ -393,18 +399,40 @@ pub async fn retranslate_project(
         serde_json::json!({ "total": total }),
     )?;
 
-    for (index, item_id) in item_ids.into_iter().enumerate() {
-        let result = retranslate_item(
-            client.as_ref(),
-            &store,
-            &loaded.state_dir,
-            &mut project,
-            &mut chapters,
-            &analysis,
-            &loaded.value,
-            &item_id,
-        )
-        .await;
+    let project_snapshot = Arc::new(project.clone());
+    let chapters_snapshot = Arc::new(chapters.clone());
+    let analysis = Arc::new(analysis);
+    let config = Arc::new(loaded.value);
+    let mut pending = item_ids.into_iter();
+    let mut tasks = tokio::task::JoinSet::new();
+    let concurrency = config.general.retranslation_concurrency.min(total);
+    for _ in 0..concurrency {
+        if let Some(item_id) = pending.next() {
+            spawn_retranslation(
+                &mut tasks,
+                Arc::clone(&client),
+                store.clone(),
+                Arc::clone(&project_snapshot),
+                Arc::clone(&chapters_snapshot),
+                Arc::clone(&analysis),
+                Arc::clone(&config),
+                item_id,
+            );
+        }
+    }
+
+    while let Some(result) = tasks.join_next().await {
+        let (item_id, prepared) =
+            result.map_err(|error| format!("retranslation worker failed: {error}"))?;
+        let result = prepared.and_then(|prepared| {
+            apply_retranslation(
+                &store,
+                &loaded.state_dir,
+                &mut project,
+                &mut chapters,
+                prepared,
+            )
+        });
         match result {
             Ok(()) => succeeded += 1,
             Err(error) => {
@@ -426,12 +454,24 @@ pub async fn retranslate_project(
         }
         if let Some(progress) = &progress {
             let _ = progress.send(RetranslationProgress {
-                completed: index + 1,
+                completed: succeeded + failed,
                 total,
                 succeeded,
                 failed,
-                item_id,
+                item_id: item_id.clone(),
             });
+        }
+        if let Some(next_item_id) = pending.next() {
+            spawn_retranslation(
+                &mut tasks,
+                Arc::clone(&client),
+                store.clone(),
+                Arc::clone(&project_snapshot),
+                Arc::clone(&chapters_snapshot),
+                Arc::clone(&analysis),
+                Arc::clone(&config),
+                next_item_id,
+            );
         }
     }
     save_project_progress(&loaded.state_dir, &mut project, &chapters)?;
@@ -445,6 +485,43 @@ pub async fn retranslate_project(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn spawn_retranslation(
+    tasks: &mut tokio::task::JoinSet<(String, Result<PreparedRetranslation, String>)>,
+    client: Arc<dyn TranslationClient>,
+    store: TermStore,
+    project: Arc<crate::model::ProjectState>,
+    chapters: Arc<Vec<Chapter>>,
+    analysis: Arc<analysis::BookAnalysis>,
+    config: Arc<AppConfig>,
+    item_id: String,
+) {
+    tasks.spawn(async move {
+        let result = prepare_retranslation(
+            client.as_ref(),
+            &store,
+            &project,
+            &chapters,
+            &analysis,
+            &config,
+            &item_id,
+        )
+        .await;
+        (item_id, result)
+    });
+}
+
+struct PreparedRetranslation {
+    item_id: String,
+    chapter_index: usize,
+    segment_index: Option<usize>,
+    source: String,
+    draft: Option<String>,
+    target: String,
+    extracted: Result<Vec<Term>, String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 async fn retranslate_item<C: TranslationClient + ?Sized>(
     client: &C,
     store: &TermStore,
@@ -455,6 +532,21 @@ async fn retranslate_item<C: TranslationClient + ?Sized>(
     config: &AppConfig,
     item_id: &str,
 ) -> Result<(), String> {
+    let prepared =
+        prepare_retranslation(client, store, project, chapters, analysis, config, item_id).await?;
+    apply_retranslation(store, state_dir, project, chapters, prepared)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_retranslation<C: TranslationClient + ?Sized>(
+    client: &C,
+    store: &TermStore,
+    project: &crate::model::ProjectState,
+    chapters: &[Chapter],
+    analysis: &analysis::BookAnalysis,
+    config: &AppConfig,
+    item_id: &str,
+) -> Result<PreparedRetranslation, String> {
     if let Some(chapter_id) = item_id.strip_prefix("title:") {
         let chapter_index = chapters
             .iter()
@@ -482,50 +574,24 @@ async fn retranslate_item<C: TranslationClient + ?Sized>(
         )
         .await?
         .remove(0);
-        if !chapters[chapter_index].meta.is_object() {
-            chapters[chapter_index].meta = serde_json::json!({});
-        }
-        if let Some(previous) = chapters[chapter_index].target_title.clone() {
-            chapters[chapter_index].meta["previous_target_title"] =
-                serde_json::Value::String(previous);
-        }
-        chapters[chapter_index]
-            .meta
-            .as_object_mut()
-            .unwrap()
-            .remove("retranslation_error");
-        apply_title(state_dir, project, chapters, chapter_index, translation)?;
-        let extraction = PendingExtraction {
-            chapter_id: chapters[chapter_index].id.clone(),
-            batch_key: format!("retranslate:{item_id}"),
-            source_text: chapters[chapter_index].title.clone(),
-            target_text: chapters[chapter_index]
-                .target_title
-                .clone()
-                .unwrap_or_default(),
-        };
-        record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
-        store.queue_extraction(&extraction)?;
-        if process_extraction(
+        let source = chapters[chapter_index].title.clone();
+        let extracted = terms::extract_terms_resilient(
             client,
-            store,
-            &extraction,
+            &source,
+            &translation,
             chapter_index,
             config.llm.max_retries,
         )
-        .await
-        .is_ok()
-        {
-            clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
-        }
-        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-        state::append_log(
-            state_dir,
-            project,
-            "retranslated",
-            serde_json::json!({ "item_id": item_id }),
-        )?;
-        return Ok(());
+        .await;
+        return Ok(PreparedRetranslation {
+            item_id: item_id.to_string(),
+            chapter_index,
+            segment_index: None,
+            source,
+            draft: None,
+            target: translation,
+            extracted,
+        });
     }
 
     let (chapter_index, segment_index) = chapters
@@ -588,58 +654,109 @@ async fn retranslate_item<C: TranslationClient + ?Sized>(
         draft.clone()
     };
 
-    let segment = &mut chapters[chapter_index].segments[segment_index];
-    if !segment.meta.is_object() {
-        segment.meta = serde_json::json!({});
-    }
-    if let Some(previous) = segment.target.clone() {
-        segment.meta["previous_target"] = serde_json::Value::String(previous);
-    }
-    segment
-        .meta
-        .as_object_mut()
-        .unwrap()
-        .remove("retranslation_error");
-    segment.target_before_polish = config.pipeline.polish.then_some(draft);
-    segment.target = Some(target.clone());
-    segment.status = ItemStatus::Translated;
-    if segment.kind == SegmentKind::Heading
-        && segment.source.trim() == chapters[chapter_index].title.trim()
-    {
+    let extracted = terms::extract_terms_resilient(
+        client,
+        &source,
+        &target,
+        chapter_index,
+        config.llm.max_retries,
+    )
+    .await;
+    Ok(PreparedRetranslation {
+        item_id: item_id.to_string(),
+        chapter_index,
+        segment_index: Some(segment_index),
+        source,
+        draft: config.pipeline.polish.then_some(draft),
+        target,
+        extracted,
+    })
+}
+
+fn apply_retranslation(
+    store: &TermStore,
+    state_dir: &std::path::Path,
+    project: &mut crate::model::ProjectState,
+    chapters: &mut [Chapter],
+    prepared: PreparedRetranslation,
+) -> Result<(), String> {
+    let chapter_index = prepared.chapter_index;
+    if let Some(segment_index) = prepared.segment_index {
+        let segment = &mut chapters[chapter_index].segments[segment_index];
+        if !segment.meta.is_object() {
+            segment.meta = serde_json::json!({});
+        }
+        if let Some(previous) = segment.target.clone() {
+            segment.meta["previous_target"] = serde_json::Value::String(previous);
+        }
+        segment
+            .meta
+            .as_object_mut()
+            .unwrap()
+            .remove("retranslation_error");
+        segment.target_before_polish = prepared.draft;
+        segment.target = Some(prepared.target.clone());
+        segment.status = ItemStatus::Translated;
+        if segment.kind == SegmentKind::Heading
+            && segment.source.trim() == chapters[chapter_index].title.trim()
+        {
+            if let Some(previous) = chapters[chapter_index].target_title.clone() {
+                chapters[chapter_index].meta["previous_target_title"] =
+                    serde_json::Value::String(previous);
+            }
+            chapters[chapter_index].target_title = Some(prepared.target.clone());
+        }
+        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+    } else {
+        if !chapters[chapter_index].meta.is_object() {
+            chapters[chapter_index].meta = serde_json::json!({});
+        }
         if let Some(previous) = chapters[chapter_index].target_title.clone() {
             chapters[chapter_index].meta["previous_target_title"] =
                 serde_json::Value::String(previous);
         }
-        chapters[chapter_index].target_title = Some(target.clone());
+        chapters[chapter_index]
+            .meta
+            .as_object_mut()
+            .unwrap()
+            .remove("retranslation_error");
+        apply_title(
+            state_dir,
+            project,
+            chapters,
+            chapter_index,
+            prepared.target.clone(),
+        )?;
     }
-    state::write_chapter(state_dir, project, &chapters[chapter_index])?;
 
     let extraction = PendingExtraction {
         chapter_id: chapters[chapter_index].id.clone(),
-        batch_key: format!("retranslate:{item_id}"),
-        source_text: source,
-        target_text: target,
+        batch_key: format!("retranslate:{}", prepared.item_id),
+        source_text: prepared.source,
+        target_text: prepared.target,
     };
     record_pending_extraction(&mut chapters[chapter_index], &extraction)?;
     store.queue_extraction(&extraction)?;
-    if process_extraction(
-        client,
-        store,
-        &extraction,
-        chapter_index,
-        config.llm.max_retries,
-    )
-    .await
-    .is_ok()
-    {
-        clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+    if let Ok(extracted) = prepared.extracted {
+        let stored = extracted.iter().try_for_each(|term| {
+            store
+                .insert_with_evidence(term, &extraction.source_text, &extraction.target_text)
+                .map(|_| ())
+        });
+        if stored.is_ok()
+            && store
+                .complete_extraction(&extraction.chapter_id, &extraction.batch_key)
+                .is_ok()
+        {
+            clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+        }
     }
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
     state::append_log(
         state_dir,
         project,
         "retranslated",
-        serde_json::json!({ "item_id": item_id }),
+        serde_json::json!({ "item_id": prepared.item_id }),
     )
 }
 

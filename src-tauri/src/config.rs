@@ -19,12 +19,14 @@ pub struct AppConfig {
 #[serde(default)]
 pub struct GeneralConfig {
     pub visible_segments: usize,
+    pub retranslation_concurrency: usize,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             visible_segments: 100,
+            retranslation_concurrency: 3,
         }
     }
 }
@@ -293,6 +295,9 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     if config.general.visible_segments == 0 {
         return Err("general.visible_segments must be greater than zero".to_string());
     }
+    if config.general.retranslation_concurrency == 0 {
+        return Err("general.retranslation_concurrency must be greater than zero".to_string());
+    }
     if config.llm.timeout_secs == 0 {
         return Err("llm.timeout_secs must be greater than zero".to_string());
     }
@@ -344,6 +349,7 @@ mod tests {
         assert!(!config.pipeline.polish);
         assert_eq!(config.pipeline.recent_context_chars, 2_000);
         assert_eq!(config.general.visible_segments, 100);
+        assert_eq!(config.general.retranslation_concurrency, 3);
     }
 
     #[test]

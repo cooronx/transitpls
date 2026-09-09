@@ -26,3 +26,4 @@ recent_context_chars = 2000
 
 [general]
 visible_segments = 100
+retranslation_concurrency = 3

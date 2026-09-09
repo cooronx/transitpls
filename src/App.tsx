@@ -137,7 +137,7 @@ interface Config {
   segment: { max_chars_per_segment: number; max_chars_per_batch: number };
   pipeline: { polish: boolean; recent_context_chars: number };
   analysis: { full_book: boolean };
-  general: { visible_segments: number };
+  general: { visible_segments: number; retranslation_concurrency: number };
 }
 interface TaskConfigDraft {
   sourceLanguage: string;
@@ -533,12 +533,13 @@ export default function App() {
       setBusy(null);
     }
   };
-  const saveGeneral = async (visibleSegments: number) => {
+  const saveGeneral = async (visibleSegments: number, retranslationConcurrency: number) => {
     setBusy("保存通用设置");
     setNotice(null);
     try {
       const next = await invoke<Bootstrap>("ui_save_general", {
         visibleSegments,
+        retranslationConcurrency,
       });
       setBootstrap(next);
       setNotice("通用设置已保存");
@@ -1943,12 +1944,15 @@ function SettingsView({
   configPath?: string;
   busy: string | null;
   onSaveModel: (value: Config, key: string) => Promise<void>;
-  onSaveGeneral: (visibleSegments: number) => Promise<void>;
+  onSaveGeneral: (visibleSegments: number, retranslationConcurrency: number) => Promise<void>;
 }) {
   const [tab, setTab] = useState<"model" | "general">("model");
   const [draft, setDraft] = useState(config);
   const [visibleSegments, setVisibleSegments] = useState(
     config?.general.visible_segments ?? 100,
+  );
+  const [retranslationConcurrency, setRetranslationConcurrency] = useState(
+    config?.general.retranslation_concurrency ?? 3,
   );
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -1957,6 +1961,7 @@ function SettingsView({
   useEffect(() => {
     setDraft(config);
     setVisibleSegments(config?.general.visible_segments ?? 100);
+    setRetranslationConcurrency(config?.general.retranslation_concurrency ?? 3);
     setApiKey("");
     setShowKey(false);
     const preset = providerPresets.find((item) =>
@@ -2115,7 +2120,7 @@ function SettingsView({
             <div className="settings-heading">
               <div>
                 <h2>通用设置</h2>
-                <p>调整工作台中每个章节默认加载的段落数量。</p>
+                <p>调整工作台显示和批量重译行为。</p>
               </div>
             </div>
             <Field label="每章默认显示段落数">
@@ -2130,15 +2135,29 @@ function SettingsView({
                 章节切换时先显示这些段落，点击“显示更多段落”可继续查看其余内容。
               </small>
             </Field>
+            <Field label="重译并发数量">
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={retranslationConcurrency}
+                onChange={(e) => setRetranslationConcurrency(Number(e.target.value))}
+              />
+              <small>
+                “重译全部已处理冲突”和选择性重译同时处理的最大项目数。
+              </small>
+            </Field>
             <div className="settings-actions">
               <button
                 className="primary"
                 disabled={
                   busy !== null ||
                   visibleSegments < 1 ||
-                  !Number.isInteger(visibleSegments)
+                  !Number.isInteger(visibleSegments) ||
+                  retranslationConcurrency < 1 ||
+                  !Number.isInteger(retranslationConcurrency)
                 }
-                onClick={() => void onSaveGeneral(visibleSegments)}
+                onClick={() => void onSaveGeneral(visibleSegments, retranslationConcurrency)}
               >
                 {savingGeneral ? "正在保存…" : "保存通用设置"}
               </button>
@@ -2257,7 +2276,7 @@ function browserPreview(): Bootstrap {
       segment: { max_chars_per_segment: 1200, max_chars_per_batch: 1800 },
       pipeline: { polish: false, recent_context_chars: 2000 },
       analysis: { full_book: true },
-      general: { visible_segments: 100 },
+      general: { visible_segments: 100, retranslation_concurrency: 3 },
     },
   };
 }
