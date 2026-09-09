@@ -194,6 +194,8 @@ impl AnalysisTerm {
             first_chapter: self.first_chapter,
             note: self.note,
             status: TermStatus::Ok,
+            policy: crate::terms::TermPolicy::Automatic,
+            manual_target: None,
         }
     }
 }

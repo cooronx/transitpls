@@ -4,7 +4,7 @@ use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
 use crate::parser;
 use crate::state;
-use crate::terms::{Term, TermCandidate, TermStore};
+use crate::terms::{Term, TermCandidate, TermConflict, TermPolicy, TermStore};
 use base64::Engine;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -54,7 +54,34 @@ pub struct ProjectDetail {
     logs: Vec<LogEntry>,
     terms: Vec<Term>,
     conflicts: Vec<TermCandidate>,
+    term_conflicts: Vec<TermConflict>,
+    pending_conflicts: usize,
     report: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AffectedContent {
+    id: String,
+    chapter_id: String,
+    chapter: usize,
+    kind: String,
+    source: String,
+    current_target: String,
+    previous_target: Option<String>,
+    retranslation_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetranslationProgressEvent {
+    project_id: String,
+    completed: usize,
+    total: usize,
+    succeeded: usize,
+    failed: usize,
+    item_id: String,
+    detail: ProjectDetail,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -400,7 +427,6 @@ pub fn ui_cancel_task(
 pub fn ui_resolve_term(project_id: String, source: String, target: String) -> Result<(), String> {
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
-    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
     let store =
         TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
     store.resolve(&source, &target)?;
@@ -410,6 +436,260 @@ pub fn ui_resolve_term(project_id: String, source: String, target: String) -> Re
         "term_resolved",
         serde_json::json!({ "source": source, "target": target }),
     )
+}
+
+#[tauri::command]
+pub fn ui_set_term_policy(
+    project_id: String,
+    source: String,
+    policy: TermPolicy,
+) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    store.set_policy(&source, policy)?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "term_policy_changed",
+        serde_json::json!({ "source": source, "policy": policy }),
+    )
+}
+
+#[tauri::command]
+pub fn ui_undo_term_resolution(project_id: String, source: String) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    store.undo_resolution(&source)?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "term_resolution_undone",
+        serde_json::json!({ "source": source }),
+    )
+}
+
+#[tauri::command]
+pub fn ui_scan_term_impact(
+    project_id: String,
+    source: String,
+) -> Result<Vec<AffectedContent>, String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    if !store.list()?.iter().any(|term| term.source == source) {
+        return Err(format!("term not found: {source}"));
+    }
+    let chapters = state::load_chapters(&loaded.state_dir, &project)?;
+    Ok(scan_term_impact(&chapters, &source))
+}
+
+fn scan_term_impact(chapters: &[Chapter], source: &str) -> Vec<AffectedContent> {
+    let mut affected = Vec::new();
+    for (chapter_index, chapter) in chapters.iter().enumerate() {
+        let title_matches = crate::terms::matches_text(&chapter.title, source);
+        if title_matches {
+            if let Some(target) = &chapter.target_title {
+                affected.push(AffectedContent {
+                    id: format!("title:{}", chapter.id),
+                    chapter_id: chapter.id.clone(),
+                    chapter: chapter_index,
+                    kind: "title".to_string(),
+                    source: chapter.title.clone(),
+                    current_target: target.clone(),
+                    previous_target: chapter
+                        .meta
+                        .get("previous_target_title")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    retranslation_error: chapter
+                        .meta
+                        .get("retranslation_error")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                });
+            }
+        }
+        for segment in &chapter.segments {
+            if title_matches
+                && segment.kind == crate::model::SegmentKind::Heading
+                && segment.source.trim() == chapter.title.trim()
+            {
+                continue;
+            }
+            if !crate::terms::matches_text(&segment.source, source) {
+                continue;
+            }
+            let Some(target) = &segment.target else {
+                continue;
+            };
+            affected.push(AffectedContent {
+                id: segment.id.clone(),
+                chapter_id: chapter.id.clone(),
+                chapter: chapter_index,
+                kind: format!("{:?}", segment.kind).to_ascii_lowercase(),
+                source: segment.source.clone(),
+                current_target: target.clone(),
+                previous_target: segment
+                    .meta
+                    .get("previous_target")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+                retranslation_error: segment
+                    .meta
+                    .get("retranslation_error")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string),
+            });
+        }
+    }
+    affected
+}
+
+#[tauri::command]
+pub fn ui_restore_translation(project_id: String, item_id: String) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
+    let mut chapters = state::load_chapters(&loaded.state_dir, &project)?;
+    let chapter_index = restore_translation(&mut chapters, &item_id)?;
+    state::write_chapter(&loaded.state_dir, &project, &chapters[chapter_index])?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "translation_restored",
+        serde_json::json!({ "item_id": item_id }),
+    )
+}
+
+fn restore_translation(chapters: &mut [Chapter], item_id: &str) -> Result<usize, String> {
+    if let Some(chapter_id) = item_id.strip_prefix("title:") {
+        let chapter_index = chapters
+            .iter()
+            .position(|chapter| chapter.id == chapter_id)
+            .ok_or_else(|| format!("chapter was removed: {chapter_id}"))?;
+        let chapter = &mut chapters[chapter_index];
+        let previous = chapter
+            .meta
+            .get("previous_target_title")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "没有可恢复的旧译文".to_string())?;
+        let current = chapter.target_title.replace(previous.clone());
+        if let Some(current) = current {
+            chapter.meta["previous_target_title"] = serde_json::Value::String(current);
+        }
+        for segment in &mut chapter.segments {
+            if segment.kind == crate::model::SegmentKind::Heading
+                && segment.source.trim() == chapter.title.trim()
+            {
+                segment.target = Some(previous.clone());
+            }
+        }
+        Ok(chapter_index)
+    } else {
+        let chapter_index = chapters
+            .iter()
+            .position(|chapter| chapter.segments.iter().any(|segment| segment.id == item_id))
+            .ok_or_else(|| format!("content was removed: {item_id}"))?;
+        let chapter = &mut chapters[chapter_index];
+        let segment = chapter
+            .segments
+            .iter_mut()
+            .find(|segment| segment.id == item_id)
+            .unwrap();
+        let previous = segment
+            .meta
+            .get("previous_target")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| "没有可恢复的旧译文".to_string())?;
+        let current = segment.target.replace(previous.clone());
+        if let Some(current) = current {
+            segment.meta["previous_target"] = serde_json::Value::String(current);
+        }
+        segment
+            .meta
+            .as_object_mut()
+            .map(|meta| meta.remove("retranslation_error"));
+        if segment.kind == crate::model::SegmentKind::Heading
+            && segment.source.trim() == chapter.title.trim()
+        {
+            chapter.target_title = Some(previous);
+        }
+        Ok(chapter_index)
+    }
+}
+
+#[tauri::command]
+pub async fn ui_retranslate(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, TaskRegistry>,
+    project_id: String,
+    item_ids: Vec<String>,
+    mock_client: bool,
+) -> Result<ProjectDetail, String> {
+    if item_ids.is_empty() {
+        return Err("请至少选择一项可能受影响的内容".to_string());
+    }
+    if registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .contains_key(&project_id)
+    {
+        return Err("当前翻译任务运行中，请等待任务结束后再重译".to_string());
+    }
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let task_id = project_id.clone();
+    let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let mut task = tokio::spawn(crate::cli::retranslate_project(
+        None,
+        PathBuf::from(project.source_path),
+        item_ids,
+        mock_client,
+        Some(progress_sender),
+    ));
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .insert(task_id.clone(), task.abort_handle());
+    let mut progress_open = true;
+    let result = loop {
+        tokio::select! {
+            biased;
+            progress = progress_receiver.recv(), if progress_open => match progress {
+                Some(progress) => {
+                    if let Ok(detail) = project_detail(&loaded.state_dir, &project_id) {
+                        let _ = app.emit("retranslation-progress", RetranslationProgressEvent {
+                            project_id: project_id.clone(),
+                            completed: progress.completed,
+                            total: progress.total,
+                            succeeded: progress.succeeded,
+                            failed: progress.failed,
+                            item_id: progress.item_id,
+                            detail,
+                        });
+                    }
+                }
+                None => progress_open = false,
+            },
+            result = &mut task => break result,
+        }
+    };
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .remove(&task_id);
+    let project = result.map_err(|error| format!("retranslation task failed: {error}"))??;
+    project_detail(&loaded.state_dir, &project.id)
 }
 
 #[tauri::command]
@@ -485,6 +765,13 @@ fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
             source: Some("none"),
         });
     }
+    let stored = crate::credentials::load_api_key(&config.llm.provider)?;
+    if stored.is_some() {
+        return Ok(CredentialStatus {
+            configured: true,
+            source: Some("desktop"),
+        });
+    }
     if let Ok(value) = std::env::var(&config.llm.api_key_env) {
         if !value.trim().is_empty() {
             return Ok(CredentialStatus {
@@ -493,10 +780,9 @@ fn credential_status(config: &AppConfig) -> Result<CredentialStatus, String> {
             });
         }
     }
-    let stored = crate::credentials::load_api_key(&config.llm.provider)?;
     Ok(CredentialStatus {
-        configured: stored.is_some(),
-        source: stored.as_ref().map(|_| "desktop"),
+        configured: false,
+        source: None,
     })
 }
 
@@ -505,11 +791,15 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
     let chapters = state::load_chapters(state_dir, &project)?;
     let directory = state::project_dir(state_dir, &project.id);
     let terms_path = directory.join("terms.db");
-    let (terms, conflicts) = if terms_path.exists() {
+    let (terms, conflicts, term_conflicts) = if terms_path.exists() {
         let store = TermStore::open(terms_path)?;
-        (store.list()?, store.conflicts()?)
+        (
+            store.list()?,
+            store.conflicts()?,
+            store.conflict_details(true)?,
+        )
     } else {
-        (Vec::new(), Vec::new())
+        (Vec::new(), Vec::new(), Vec::new())
     };
     let report_path = directory.join("report.json");
     let report = if report_path.exists() {
@@ -526,6 +816,11 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
         logs,
         terms,
         conflicts,
+        pending_conflicts: term_conflicts
+            .iter()
+            .map(|conflict| conflict.unresolved_events)
+            .sum(),
+        term_conflicts,
         report,
     })
 }
@@ -584,7 +879,10 @@ fn read_logs(path: &Path) -> Result<Vec<LogEntry>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{delete_project_at, project_detail, read_logs, ProgressSnapshot};
+    use super::{
+        delete_project_at, project_detail, read_logs, restore_translation, scan_term_impact,
+        ProgressSnapshot,
+    };
     use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, Segment, SegmentKind};
     use crate::state;
     use serde_json::Value;
@@ -691,6 +989,69 @@ mod tests {
         assert_ne!(pending, translated);
 
         fs::remove_dir_all(root).expect("fixture should be removed");
+    }
+
+    #[test]
+    fn restores_the_last_translation_and_keeps_titles_synchronized() {
+        let mut chapters = vec![Chapter {
+            id: "chapter-1".to_string(),
+            title: "Chapter Alice".to_string(),
+            target_title: Some("新标题".to_string()),
+            status: ItemStatus::Translated,
+            meta: serde_json::json!({ "previous_target_title": "旧标题" }),
+            segments: vec![Segment {
+                id: "heading-1".to_string(),
+                ordinal: 0,
+                source: "Chapter Alice".to_string(),
+                target: Some("新标题".to_string()),
+                target_before_polish: None,
+                kind: SegmentKind::Heading,
+                status: ItemStatus::Translated,
+                source_hash: "fixture".to_string(),
+                meta: serde_json::json!({}),
+            }],
+        }];
+
+        assert_eq!(
+            restore_translation(&mut chapters, "title:chapter-1").unwrap(),
+            0
+        );
+        assert_eq!(chapters[0].target_title.as_deref(), Some("旧标题"));
+        assert_eq!(chapters[0].segments[0].target.as_deref(), Some("旧标题"));
+        assert_eq!(chapters[0].meta["previous_target_title"], "新标题");
+    }
+
+    #[test]
+    fn impact_scan_covers_content_kinds_and_respects_word_boundaries() {
+        let segment = |id: &str, source: &str, kind: SegmentKind| Segment {
+            id: id.to_string(),
+            ordinal: 0,
+            source: source.to_string(),
+            target: Some("译文".to_string()),
+            target_before_polish: None,
+            kind,
+            status: ItemStatus::Translated,
+            source_hash: "fixture".to_string(),
+            meta: serde_json::json!({}),
+        };
+        let chapters = vec![Chapter {
+            id: "chapter-1".to_string(),
+            title: "A cat story".to_string(),
+            target_title: Some("猫的故事".to_string()),
+            status: ItemStatus::Translated,
+            meta: serde_json::json!({}),
+            segments: vec![
+                segment("paragraph", "The cat waits.", SegmentKind::Paragraph),
+                segment("quote", "\"cat\"", SegmentKind::Quote),
+                segment("metadata", "tag: cat", SegmentKind::Metadata),
+                segment("false-positive", "concatenate", SegmentKind::Paragraph),
+            ],
+        }];
+
+        let affected = scan_term_impact(&chapters, "cat");
+        assert_eq!(affected.len(), 4);
+        assert!(affected.iter().any(|item| item.kind == "title"));
+        assert!(!affected.iter().any(|item| item.id == "false-positive"));
     }
 
     #[test]

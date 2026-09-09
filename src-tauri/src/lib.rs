@@ -33,6 +33,11 @@ pub fn run() {
             ui::ui_transit,
             ui::ui_cancel_task,
             ui::ui_resolve_term,
+            ui::ui_set_term_policy,
+            ui::ui_undo_term_resolution,
+            ui::ui_scan_term_impact,
+            ui::ui_retranslate,
+            ui::ui_restore_translation,
             ui::ui_export,
         ])
         .run(tauri::generate_context!())
