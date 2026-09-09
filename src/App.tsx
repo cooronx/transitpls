@@ -518,7 +518,7 @@ export default function App() {
     }
   };
   const exportBook = async (format: "txt" | "epub") => {
-    if (!detail) return;
+    if (!detail) return [];
     setBusy("导出");
     try {
       const output = await invoke<string>("ui_export", {
