@@ -586,10 +586,16 @@ export default function App() {
         <span>{bootstrap?.projects.length ?? 0} 个项目</span>
       </footer>
       {notice && (
-        <button className="toast" onClick={() => setNotice(null)}>
-          {notice}
-          <X aria-hidden="true" />
-        </button>
+        <div className="toast">
+          <span>{notice}</span>
+          <button
+            className="toast-close"
+            aria-label="关闭消息"
+            onClick={() => setNotice(null)}
+          >
+            <X aria-hidden="true" />
+          </button>
+        </div>
       )}
       {busy && <div className="busy-line" />}
     </div>

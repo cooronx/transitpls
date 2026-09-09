@@ -1561,15 +1561,25 @@ button:disabled {
     display: flex;
     align-items: center;
     gap: 16px;
-    cursor: pointer;
     z-index: 20;
-    text-align: left
+    text-align: left;
+    padding-right: 34px
 }
 
-.toast svg {
+.toast-close {
+    position: absolute;
+    top: 5px;
+    right: 5px;
+    border: 0;
+    padding: 2px;
+    background: transparent;
+    color: #98a8b7;
+    cursor: pointer
+}
+
+.toast-close svg {
     width: 14px;
     height: 14px;
-    color: #98a8b7;
     flex: none
 }
 
