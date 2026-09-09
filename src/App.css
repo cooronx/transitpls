@@ -1600,7 +1600,6 @@ button:disabled {
     color: #899bad
 }
 
-.review-placeholder,
 .empty-state {
     margin: auto;
     display: flex;
@@ -1611,41 +1610,16 @@ button:disabled {
     color: #8294a7
 }
 
-.review-icon {
-    width: 60px;
-    height: 60px;
-    display: grid;
-    place-items: center;
-    border-radius: 18px;
-    background: #e7f7f4;
-    color: var(--teal)
-}
-
-.review-icon svg {
-    width: 30px;
-    height: 30px;
-    stroke-width: 1.7
-}
-
-.review-placeholder h1,
 .empty-state h1 {
     color: #27394e;
     margin: 17px 0 7px
 }
 
-.review-placeholder p,
 .empty-state p {
     line-height: 1.7;
     margin: 0 0 18px
 }
 
-.review-placeholder button {
-    border: 1px solid #dce4eb;
-    border-radius: 6px;
-    padding: 8px 15px
-}
-
-.review-placeholder small,
 .empty-state small {
     margin-top: 12px
 }

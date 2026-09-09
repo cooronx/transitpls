@@ -5,7 +5,6 @@ import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   ArrowRight,
-  BadgeCheck,
   BookOpen,
   Braces,
   Check,
@@ -22,7 +21,6 @@ import {
   FolderKanban,
   Languages,
   LibraryBig,
-  ListTree,
   LoaderCircle,
   MessageSquare,
   PanelTop,
@@ -31,7 +29,6 @@ import {
   RotateCcw,
   Search,
   Settings,
-  ShieldCheck,
   SquareStop,
   Trash2,
   X,
@@ -175,7 +172,6 @@ type View =
   | "projects"
   | "terms"
   | "settings"
-  | "review"
   | "history";
 type TrayName = "tasks" | "issues" | "logs";
 
@@ -183,7 +179,6 @@ const navItems: Array<{ id: View; icon: LucideIcon; label: string }> = [
   { id: "workspace", icon: Languages, label: "工作台" },
   { id: "projects", icon: FolderKanban, label: "项目" },
   { id: "terms", icon: LibraryBig, label: "术语库" },
-  // {id:"review",icon:BadgeCheck,label:"审校"},{id:"history",icon:History,label:"历史"},
 ];
 const statusText: Record<Status | ItemStatus, string> = {
   initialized: "待翻译",
@@ -677,7 +672,6 @@ export default function App() {
               onSaveGeneral={saveGeneral}
             />
           )}
-          {view === "review" && <ReviewPlaceholder />}
           {view === "workspace" && (!detail || !chapter) && (
             <EmptyState onImport={importFile} />
           )}
@@ -1022,14 +1016,6 @@ function Workspace({
         <button className="active icon-label">
           <Columns2 />
           对照翻译
-        </button>
-        <button className="icon-label">
-          <ListTree />
-          结构预览
-        </button>
-        <button className="icon-label" onClick={() => setTray("issues")}>
-          <ShieldCheck />
-          质量检查
         </button>
         <span />
         <small>
@@ -2164,21 +2150,6 @@ function SettingsView({
           </div>
         )}
       </div>
-    </div>
-  );
-}
-function ReviewPlaceholder() {
-  return (
-    <div className="review-placeholder">
-      <div className="review-icon">
-        <BadgeCheck />
-      </div>
-      <h1>审校工作区</h1>
-      <p>
-        界面已经就位。按照当前开发安排，阶段 8 的 Review 与报告能力暂不接入。
-      </p>
-      <button disabled>运行只读审校</button>
-      <small>不会对译文执行自动写回</small>
     </div>
   );
 }
