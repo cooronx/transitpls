@@ -1825,7 +1825,9 @@ function TermsView({
           </div>
         </section>
       )}
-      {detail && !conflict && <div className="panel-empty">当前没有{showResolved ? "冲突记录" : "待处理冲突"}</div>}
+      {detail && !conflict && detail.terms.length === 0 && (
+        <div className="panel-empty">当前没有{showResolved ? "冲突记录" : "待处理冲突"}</div>
+      )}
       {impact.length > 0 && (
         <section className="impact-panel">
           <header>
