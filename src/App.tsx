@@ -1718,6 +1718,7 @@ function TermsView({
     setImpactSource(null);
     setAllConflictImpacts(true);
     setSelected(selectAll ? new Set(items.map((item) => item.id)) : new Set());
+    return items;
   };
   useEffect(() => {
     if (!conflict) return;
@@ -1764,6 +1765,11 @@ function TermsView({
     await onRetranslate([...selected]);
     if (allConflictImpacts) await scanAll(false);
     else if (impactSource) await scan(impactSource);
+    await onReload();
+  });
+  const retranslateResolved = () => run("重译已处理冲突", async () => {
+    const items = await scanAll(false);
+    if (items.length) await onRetranslate(items.map((item) => item.id));
     await onReload();
   });
   const restore = (item: AffectedContent) => run("恢复译文", async () => {
@@ -1820,7 +1826,6 @@ function TermsView({
             <button className="primary" disabled={!target.trim() || Boolean(working)} onClick={() => void resolve(conflict.source)}>保存人工裁定</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "non_fixed")}>标记为非固定术语</button>
             <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "ignored")}>忽略术语</button>
-            <button disabled={Boolean(working)} onClick={() => void run("汇总影响", () => scanAll())}>汇总并全选全部已裁定冲突影响</button>
             {conflict.policy !== "automatic" && <button disabled={Boolean(working)} onClick={() => void undo(conflict.source)}>撤销并恢复待处理</button>}
           </div>
         </section>
@@ -1828,6 +1833,7 @@ function TermsView({
       {detail && !conflict && detail.terms.length === 0 && (
         <div className="panel-empty">当前没有{showResolved ? "冲突记录" : "待处理冲突"}</div>
       )}
+      {detail && <button className="primary" disabled={taskBusy || Boolean(working)} onClick={() => void retranslateResolved()}>重译全部已处理冲突</button>}
       {impact.length > 0 && (
         <section className="impact-panel">
           <header>
