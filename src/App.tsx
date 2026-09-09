@@ -1703,7 +1703,7 @@ function TermsView({
     setSelected(new Set());
   };
   const scanAll = async (selectAll = true) => {
-    if (!detail) return;
+    if (!detail) return [];
     const sources = detail.termConflicts
       .filter((item) => item.policy === "fixed")
       .map((item) => item.source);
