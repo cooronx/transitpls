@@ -1411,6 +1411,10 @@ button:disabled {
     overflow: hidden
 }
 
+.terms-retranslate {
+  margin: 16px 0;
+}
+
 .term-row {
     display: grid;
     grid-template-columns: 1.2fr 1.2fr .7fr .7fr .6fr 55px;
