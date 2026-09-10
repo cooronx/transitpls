@@ -1946,8 +1946,6 @@ function SettingsView({
     setApiKey("");
     setShowKey(false);
     const preset = providerPresets.find((item) =>
-      (item.provider === config?.llm.provider.trim().toLowerCase() ||
-        (item.name === "OpenAI" && ["openai-chat", "openai-responses"].includes(config?.llm.provider.trim().toLowerCase() ?? ""))) &&
       item.base_url === config?.llm.base_url?.replace(/\/$/, ""));
     setPresetName(preset?.name ?? "");
     setEditedFields(new Set(["model"].filter((key) => {
@@ -2039,7 +2037,6 @@ function SettingsView({
               <select
                 aria-label="协议类型"
                 value={draft.llm.provider.trim().toLowerCase() === "openai-chat" ? "openai-compatible" : draft.llm.provider.trim().toLowerCase()}
-                disabled={Boolean(presetName && presetName !== "OpenAI")}
                 onChange={(e) => {
                   field("provider", e.target.value);
                   setApiKey("");
@@ -2047,7 +2044,7 @@ function SettingsView({
               >
                 <option value="openai-compatible">OpenAI Chat Completions</option>
                 <option value="openai-responses">OpenAI Responses</option>
-                {presetName !== "OpenAI" && <option value="anthropic">Anthropic (Messages)</option>}
+                <option value="anthropic">Anthropic (Messages)</option>
               </select>
             </Field>
             <Field label="模型">
