@@ -79,6 +79,12 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 
 ## 快速开始
 
+### 下载安装
+
+支持 Windows 和 macOS，点击[这里](https://github.com/cooronx/transitpls/releases)即可直接下载最新发布版本。
+
+### 从源码编译
+
 请先安装 Node.js、Yarn、Rust，以及当前平台所需的 Tauri 系统依赖。
 
 ```bash
