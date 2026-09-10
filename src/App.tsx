@@ -760,7 +760,7 @@ export default function App() {
         )}
       </div>
       <footer className="statusbar">
-        <span>TransItPls v0.1.0</span>
+        <span>TransItPls v0.1.2</span>
         <i />
         <span>Tauri · 跨平台</span>
         <span className="status-spacer" />
@@ -2108,7 +2108,7 @@ function SettingsView({
           <div className="settings-card">
             <div className="settings-heading">
               <div>
-                <h2>服务预设</h2>
+                <h2>模型设置</h2>
                 <p>选择模型提供商，并验证用于翻译的 API Key。</p>
               </div>
               {(configured || noKey) && (
@@ -2118,9 +2118,9 @@ function SettingsView({
                 </span>
               )}
             </div>
-            <Field label="服务预设">
+            <Field label="提供商">
               <div className="preset-input">
-                <select aria-label="服务预设" value={presetName} onChange={(e) => applyPreset(e.target.value)}>
+                <select aria-label="提供商" value={presetName} onChange={(e) => applyPreset(e.target.value)}>
                   <option value="">自定义(中转站)</option>
                   {providerPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
                 </select>
