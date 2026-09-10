@@ -17,10 +17,10 @@
   </p>
 </div>
 
-TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌面应用，面向 EPUB 与 TXT 长篇内容翻译。它将全书分析、分段翻译、上下文维护、术语管理、质量检查和成品导出整合在同一套工作流中。
+TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌面应用，面向 EPUB 与 TXT 长篇内容翻译。将全书分析、分段翻译、上下文维护、术语管理和成品导出整合在同一套工作流中。
 
-> [!NOTE]
-> 平时阅读百合轻小说时，遇到的总是繁体版或台版翻译，我个人看着很难受，于是做了这样一个 App 玩玩。（百合牛逼）
+> 平时阅读百合轻小说时，遇到的总是繁体版或台版翻译，我个人看着很难受（百合牛逼）
+> 最开始其实是看到了一个叫做<a href="https://github.com/BigDawnGhost/wenyi">wenyi</a>的项目，也挺厉害的，但是cli用着翻译书籍总感觉有点不好用，于是借鉴项目的思路写了这样一个桌面端的App
 
 ![TransItPls 翻译工作台](resources/311203FBD8F1F6C610A6B924ED814008.png)
 
@@ -47,11 +47,10 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 - 自动提取术语并维护术语库，保留译名冲突供人工裁定，也可重新翻译受影响内容。
 - 支持译后润色、单段重译、运行日志和 Token 用量记录。
 - 将完成的项目导出为 TXT 或 EPUB，并同步翻译后的章节标题与目录。
-- 同时提供桌面界面和 CLI；`--mock` 模式无需 API Key 即可离线体验主要流程。
 
 <p align="right">（<a href="#readme-top">返回顶部</a>）</p>
 
-## RoadMap
+## RoadMap (持续更新中)
 
 - [ ] 支持 Word（DOCX）和 PDF 的导入、解析与导出，并尽可能保留原文档结构和排版。
 - [ ] 增加全书审校，检查漏译、错译、术语不一致、人物称谓和文风偏移，并生成可逐项处理的审校报告。
@@ -118,63 +117,11 @@ yarn build
 
 <p align="right">（<a href="#readme-top">返回顶部</a>）</p>
 
-## 命令行工具
-
-CLI 位于 `src-tauri`，可直接通过 Cargo 运行：
-
-```bash
-cd src-tauri
-
-# 初始化、查看状态与翻译
-cargo run --bin transitpls-cli -- init book.epub
-cargo run --bin transitpls-cli -- status book.epub
-cargo run --bin transitpls-cli -- transit book.epub
-
-# 离线模拟，或只翻译指定章节（章节序号从 0 开始）
-cargo run --bin transitpls-cli -- init book.epub --mock
-cargo run --bin transitpls-cli -- transit book.epub --chapter 0 --mock
-
-# 管理术语、执行质量检查并导出结果
-cargo run --bin transitpls-cli -- terms list book.epub
-cargo run --bin transitpls-cli -- terms conflicts book.epub
-cargo run --bin transitpls-cli -- terms resolve book.epub "source" "fixed target"
-cargo run --bin transitpls-cli -- review book.epub
-cargo run --bin transitpls-cli -- export --format epub book.epub
-```
-
-项目默认保存在 `projects/<source-sha256>/` 下。重复执行翻译命令时，TransItPls 会读取已经保存的章节和分段进度，不会覆盖已完成的译文。
-
-<p align="right">（<a href="#readme-top">返回顶部</a>）</p>
-
-## 配置说明
-
-CLI 默认读取当前目录下的 `transitpls.toml`。可以复制示例配置后按需修改：
-
-```bash
-cp transitpls.toml.example transitpls.toml
-```
-
-主要配置包括：
-
-- `language`：源语言与目标语言；源语言设为 `auto` 时由模型识别。
-- `llm`：协议类型、接口地址、模型、API Key 环境变量、超时和重试次数。
-- `segment`：单段与单批次的最大字符数。
-- `analysis`：是否启用全书分析。
-- `pipeline`：译后润色和近期上下文字符预算。
-- `paths`：项目状态目录。
-- `general`：界面可见段落数和重译并发数。
-
-CLI 参数优先于 TOML 配置，TOML 配置优先于内置默认值。也可以使用全局参数 `--config <path>` 指定其他配置文件。
-
-<p align="right">（<a href="#readme-top">返回顶部</a>）</p>
-
 ## 数据与隐私
 
 - 原文、译文、术语库、日志和用量数据均保存在本地项目目录中。
 - 桌面端 API Key 保存在当前用户的 TransItPls 配置目录，不会写入项目文件。
-- CLI 用户可以通过 `llm.api_key_env` 指定环境变量，例如 `OPENAI_API_KEY`。
-- 使用在线模型时，待翻译内容会发送至你所配置的模型服务商；具体数据处理方式以该服务商政策为准。
-- 同一个项目使用操作系统文件锁，避免多个任务同时写入造成状态损坏。
+
 
 <p align="right">（<a href="#readme-top">返回顶部</a>）</p>
 
