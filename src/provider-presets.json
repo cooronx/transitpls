@@ -1,6 +1,5 @@
 [
-  {"name":"OpenAI-compatible (Chat Completions)","provider":"openai-compatible","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key_env":"OPENAI_API_KEY","note":"OpenAI Chat Completions and compatible gateways"},
-  {"name":"OpenAI Responses","provider":"openai-responses","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key_env":"OPENAI_API_KEY","note":"Responses API"},
+  {"name":"OpenAI","provider":"openai-compatible","base_url":"https://api.openai.com/v1","model":"gpt-4o-mini","api_key_env":"OPENAI_API_KEY","note":"Official OpenAI API; Chat Completions or Responses"},
   {"name":"Anthropic","provider":"anthropic","base_url":"https://api.anthropic.com","model":"claude-sonnet-4-6","api_key_env":"ANTHROPIC_API_KEY","note":"Messages API"},
   {"name":"DeepSeek","provider":"openai-compatible","base_url":"https://api.deepseek.com/v1","model":"deepseek-chat","api_key_env":"DEEPSEEK_API_KEY","note":"Chat Completions"},
   {"name":"OpenRouter","provider":"openai-compatible","base_url":"https://openrouter.ai/api/v1","model":"openai/gpt-4o-mini","api_key_env":"OPENROUTER_API_KEY","note":"Chat Completions"},

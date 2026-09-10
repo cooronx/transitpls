@@ -254,7 +254,12 @@ fn configuration_normalization_and_presets() {
     assert!(RigClient::from_config_with_api_key(&LlmConfig::default(), "").is_err());
     let presets: Vec<serde_json::Value> =
         serde_json::from_str(include_str!("../../src/provider-presets.json")).unwrap();
-    assert_eq!(presets.len(), 6);
+    let openai_presets: Vec<_> = presets
+        .iter()
+        .filter(|preset| preset["base_url"] == "https://api.openai.com/v1")
+        .collect();
+    assert_eq!(openai_presets.len(), 1);
+    assert_eq!(openai_presets[0]["name"], "OpenAI");
     for preset in presets {
         if preset["base_url"] == "" {
             continue;

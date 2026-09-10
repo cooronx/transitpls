@@ -1946,10 +1946,11 @@ function SettingsView({
     setApiKey("");
     setShowKey(false);
     const preset = providerPresets.find((item) =>
-      item.provider === config?.llm.provider.trim().toLowerCase() &&
+      (item.provider === config?.llm.provider.trim().toLowerCase() ||
+        (item.name === "OpenAI" && ["openai-chat", "openai-responses"].includes(config?.llm.provider.trim().toLowerCase() ?? ""))) &&
       item.base_url === config?.llm.base_url?.replace(/\/$/, ""));
     setPresetName(preset?.name ?? "");
-    setEditedFields(new Set(["base_url", "model"].filter((key) => {
+    setEditedFields(new Set(["model"].filter((key) => {
       const value = config?.llm[key as keyof Config["llm"]];
       return value !== undefined && value !== (preset?.[key as keyof typeof preset]);
     })));
@@ -1965,7 +1966,7 @@ function SettingsView({
     if (!preset) return;
     const llm = { ...draft.llm };
     for (const key of ["provider", "base_url", "model", "api_key_env"] as const) {
-      if (reset || !editedFields.has(key)) llm[key] = preset[key];
+      if (key !== "model" || reset || !editedFields.has(key)) llm[key] = preset[key];
     }
     if (reset) setEditedFields(new Set());
     setDraft({ ...draft, llm });
@@ -2028,7 +2029,7 @@ function SettingsView({
             <Field label="服务预设">
               <div className="preset-input">
                 <select aria-label="服务预设" value={presetName} onChange={(e) => applyPreset(e.target.value)}>
-                  <option value="">自定义</option>
+                  <option value="">自定义(中转站)</option>
                   {providerPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
                 </select>
                 <button type="button" title="重置为预设默认值" aria-label="重置为预设默认值" disabled={!presetName} onClick={() => applyPreset(presetName, true)}><RotateCcw size={16} /></button>
@@ -2037,15 +2038,16 @@ function SettingsView({
             <Field label="协议类型">
               <select
                 aria-label="协议类型"
-                value={draft.llm.provider.trim().toLowerCase()}
+                value={draft.llm.provider.trim().toLowerCase() === "openai-chat" ? "openai-compatible" : draft.llm.provider.trim().toLowerCase()}
+                disabled={Boolean(presetName && presetName !== "OpenAI")}
                 onChange={(e) => {
                   field("provider", e.target.value);
                   setApiKey("");
                 }}
               >
-                <option value="openai-compatible">OpenAI-compatible (Chat Completions)</option>
+                <option value="openai-compatible">OpenAI Chat Completions</option>
                 <option value="openai-responses">OpenAI Responses</option>
-                <option value="anthropic">Anthropic(Messages)</option>
+                {presetName !== "OpenAI" && <option value="anthropic">Anthropic (Messages)</option>}
               </select>
             </Field>
             <Field label="模型">
@@ -2057,8 +2059,10 @@ function SettingsView({
             <Field label="API地址(Base URL)">
               <input
                 value={draft.llm.base_url ?? ""}
+                readOnly={Boolean(presetName)}
                 onChange={(e) => field("base_url", e.target.value)}
               />
+              {presetName && <small>此预设使用固定地址；如需修改，请选择“自定义(中转站)”。</small>}
             </Field>
             <Field label="API Key">
               <div className="secret-input">
