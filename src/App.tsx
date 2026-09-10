@@ -11,6 +11,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock3,
   Circle,
   CircleDashed,
   Columns2,
@@ -116,6 +117,15 @@ interface RetranslationProgress {
   itemId: string;
   detail: Detail;
 }
+interface TranslationTiming {
+  projectId: string;
+  startedAt: number;
+  finishedAt?: number;
+  completedRequests: number;
+  totalRequests: number;
+  maxCharsPerBatch: number;
+  chapterId?: string;
+}
 interface LogEntry {
   timestamp: string;
   event: string;
@@ -206,6 +216,9 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [retranslationProgress, setRetranslationProgress] =
     useState<RetranslationProgress | null>(null);
+  const [translationTiming, setTranslationTiming] =
+    useState<TranslationTiming | null>(null);
+  const [now, setNow] = useState(Date.now());
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [mockClient] = useState(false);
@@ -237,6 +250,26 @@ export default function App() {
     let disposed = false;
     let stop: undefined | (() => void);
     listen<Detail>("translation-progress", ({ payload }) => {
+      setTranslationTiming((current) => {
+        if (
+          !current ||
+          current.finishedAt ||
+          current.projectId !== payload.project.id
+        )
+          return current;
+        const remaining = countTranslationRequests(
+          payload.chapters,
+          current.maxCharsPerBatch,
+          current.chapterId,
+        );
+        return {
+          ...current,
+          completedRequests: Math.max(
+            current.completedRequests,
+            current.totalRequests - remaining,
+          ),
+        };
+      });
       setDetail((current) =>
         current?.project.id === payload.project.id ? payload : current,
       );
@@ -313,6 +346,20 @@ export default function App() {
     setVisibleSegmentCount(next);
     setDisplaySegmentCount(next);
   }, [bootstrap?.config.general.visible_segments]);
+  useEffect(() => {
+    if (busy !== "翻译") return;
+    setNow(Date.now());
+    const interval = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(interval);
+  }, [busy]);
+  useEffect(() => {
+    if (busy === "翻译") return;
+    setTranslationTiming((current) =>
+      current && !current.finishedAt
+        ? { ...current, finishedAt: Date.now() }
+        : current,
+    );
+  }, [busy]);
 
   const run = async (label: string, action: () => Promise<Detail | void>) => {
     setBusy(label);
@@ -456,7 +503,22 @@ export default function App() {
       setNotice("请先在设置中配置并验证 API Key");
       return;
     }
-    if (detail)
+    if (detail) {
+      const maxCharsPerBatch =
+        bootstrap?.config.segment.max_chars_per_batch ?? 1;
+      const chapterId = chapter === undefined ? undefined : detail.chapters[chapter]?.id;
+      setTranslationTiming({
+        projectId: detail.project.id,
+        startedAt: Date.now(),
+        completedRequests: 0,
+        totalRequests: countTranslationRequests(
+          detail.chapters,
+          maxCharsPerBatch,
+          chapterId,
+        ),
+        maxCharsPerBatch,
+        chapterId,
+      });
       void run("翻译", () =>
         invoke<Detail>("ui_transit", {
           projectId: detail.project.id,
@@ -464,6 +526,7 @@ export default function App() {
           mockClient,
         }),
       );
+    }
   };
   const retranslateItems = async (itemIds: string[]) => {
     if (busy || !detail || !itemIds.length) return;
@@ -682,6 +745,12 @@ export default function App() {
             detail={detail}
             busy={busy}
             retranslationProgress={retranslationProgress}
+            translationTiming={
+              translationTiming?.projectId === detail.project.id
+                ? translationTiming
+                : null
+            }
+            now={now}
             onPolish={savePipeline}
             onInitialize={initializeTask}
             onSaveConfig={saveTaskConfig}
@@ -1250,6 +1319,8 @@ function Inspector({
   detail,
   busy,
   retranslationProgress,
+  translationTiming,
+  now,
   onPolish,
   onInitialize,
   onSaveConfig,
@@ -1260,6 +1331,8 @@ function Inspector({
   detail: Detail;
   busy: string | null;
   retranslationProgress: RetranslationProgress | null;
+  translationTiming: TranslationTiming | null;
+  now: number;
   onPolish: (v: boolean) => Promise<void>;
   onInitialize: (value: TaskConfigDraft) => void;
   onSaveConfig: (value: TaskConfigDraft) => Promise<void>;
@@ -1295,6 +1368,17 @@ function Inspector({
           100,
       )
     : 0;
+  const translationElapsed = translationTiming
+    ? (translationTiming.finishedAt ?? now) - translationTiming.startedAt
+    : 0;
+  const translationRemaining = translationTiming
+    ? translationTiming.totalRequests - translationTiming.completedRequests
+    : 0;
+  const estimatedRemaining =
+    translationTiming?.completedRequests
+      ? (translationElapsed / translationTiming.completedRequests) *
+        translationRemaining
+      : null;
   return (
     <aside className="inspector">
       <div className="inspector-tabs">
@@ -1445,6 +1529,16 @@ function Inspector({
               <header><b>项目进度</b><strong>{progress}%</strong></header>
               <div className="big-progress"><i style={{ width: `${progress}%` }} /></div>
               <p className="done"><CheckCircle2 />已完成 {detail.project.chapters_completed} 章</p>
+              {translationTiming && (
+                <p className={translationTiming.finishedAt ? "done" : "active"}>
+                  <Clock3 />
+                  已用 {formatDuration(translationElapsed)} · {translationTiming.finishedAt
+                    ? "本次翻译结束"
+                    : estimatedRemaining === null
+                      ? "正在估算剩余时间"
+                      : `预计还需 ${formatDuration(estimatedRemaining)}`}
+                </p>
+              )}
               {retranslationProgress?.projectId === detail.project.id && (
                 <>
                   <header>
@@ -2202,6 +2296,75 @@ function formatDate(value: string) {
   } catch {
     return value;
   }
+}
+function countTranslationRequests(
+  chapters: Chapter[],
+  maxChars: number,
+  chapterId?: string,
+) {
+  const selected = chapterId
+    ? chapters.filter((chapter) => chapter.id === chapterId)
+    : chapters;
+  let total = selected.reduce(
+    (sum, chapter) =>
+      sum +
+      countPendingBatches(
+        chapter.segments.map((segment) => ({
+          source: segment.source,
+          pending: segment.status !== "translated" || segment.target === null,
+        })),
+        maxChars,
+      ),
+    0,
+  );
+  const completesBook = chapters.every(
+    (chapter) =>
+      chapter.id === chapterId ||
+      chapter.segments.every(
+        (segment) => segment.status === "translated" && segment.target !== null,
+      ),
+  );
+  if (!chapterId || completesBook) {
+    total += countPendingBatches(
+      chapters.map((chapter) => ({
+        source: chapter.title,
+        pending: !chapter.target_title,
+      })),
+      maxChars,
+    );
+  }
+  return total;
+}
+function countPendingBatches(
+  items: Array<{ source: string; pending: boolean }>,
+  maxChars: number,
+) {
+  let batches = 0;
+  let chars = 0;
+  let pending = false;
+  for (const item of items) {
+    const next = [...item.source].length;
+    if (chars > 0 && chars + next > maxChars) {
+      if (pending) batches += 1;
+      chars = 0;
+      pending = false;
+    }
+    chars += next;
+    pending ||= item.pending;
+    if (chars >= maxChars) {
+      if (pending) batches += 1;
+      chars = 0;
+      pending = false;
+    }
+  }
+  return batches + Number(pending);
+}
+function formatDuration(milliseconds: number) {
+  const seconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder ? `${minutes} 分 ${remainder} 秒` : `${minutes} 分钟`;
 }
 function eventText(event: string) {
   return (
