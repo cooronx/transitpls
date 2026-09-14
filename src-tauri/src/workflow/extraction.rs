@@ -53,14 +53,25 @@ pub(super) async fn extract_completed_chapter<C: TranslationClient + ?Sized>(
         config.pipeline.recent_context_chars,
     )?;
     store.queue_extraction(&extraction)?;
-    process_extraction(
+    if let Err(error) = process_extraction(
         client,
         store,
         &extraction,
         chapter_index,
         config.llm.max_retries,
     )
-    .await?;
+    .await
+    {
+        // Term extraction is auxiliary: keep the translated chapter and retry
+        // the pending extraction on a later run.
+        state::append_log(
+            state_dir,
+            project,
+            "term_extraction_failed",
+            serde_json::json!({ "chapter_id": extraction.chapter_id, "error": error }),
+        )?;
+        return Ok(());
+    }
     clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
     chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
     state::write_chapter(state_dir, project, &chapters[chapter_index])
@@ -122,12 +133,29 @@ pub(super) async fn retry_pending_extractions<C: TranslationClient + ?Sized>(
             before_segment,
             recent_context_chars,
         )?;
-        process_extraction(client, store, &extraction, chapter_index, max_retries).await?;
-        clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
-        if extraction.batch_key == "__chapter__" {
-            chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
+        match process_extraction(client, store, &extraction, chapter_index, max_retries).await {
+            Ok(()) => {
+                clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
+                if extraction.batch_key == "__chapter__" {
+                    chapters[chapter_index].meta["terms_extracted"] = serde_json::Value::Bool(true);
+                }
+                state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+            }
+            // Leave the extraction pending and keep translating; a later run
+            // retries it instead of failing the whole task.
+            Err(error) => {
+                state::append_log(
+                    state_dir,
+                    project,
+                    "term_extraction_failed",
+                    serde_json::json!({
+                        "chapter_id": extraction.chapter_id,
+                        "batch_key": extraction.batch_key,
+                        "error": error,
+                    }),
+                )?;
+            }
         }
-        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
     }
     Ok(())
 }

@@ -12,7 +12,7 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use extract::{extract_terms, extract_terms_resilient};
+pub use extract::{extract_terms, extract_terms_resilient, ExtractionError};
 pub use matching::{matches_text, relevant_terms};
 pub use store::TermStore;
 

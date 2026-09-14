@@ -121,21 +121,43 @@ pub fn validate_response(raw: &str, expected_count: usize) -> Result<Vec<String>
     Ok(response.translations)
 }
 
-/// 解析模型返回的 JSON，兼容被 ``` 代码块包裹的情况。
+/// 解析模型返回的 JSON，兼容代码块和前后说明文字。
 pub(crate) fn parse_json_response<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     let trimmed = raw.trim();
-    let json = if let Some(fenced) = trimmed.strip_prefix("```json") {
-        fenced
-            .strip_suffix("```")
-            .ok_or_else(|| "JSON code fence is not closed".to_string())?
-            .trim()
-    } else if let Some(fenced) = trimmed.strip_prefix("```") {
-        fenced
-            .strip_suffix("```")
-            .ok_or_else(|| "JSON code fence is not closed".to_string())?
-            .trim()
-    } else {
-        trimmed
+    let mut last_error = match serde_json::from_str(trimmed) {
+        Ok(value) => return Ok(value),
+        Err(error) => error.to_string(),
     };
-    serde_json::from_str(json).map_err(|error| error.to_string())
+    // Models sometimes wrap the payload in prose or a code fence despite the
+    // instructions; accept the outermost JSON value in that case.
+    for candidate in json_candidates(trimmed) {
+        match serde_json::from_str(candidate) {
+            Ok(value) => return Ok(value),
+            Err(error) => last_error = error.to_string(),
+        }
+    }
+    Err(last_error)
+}
+
+/// Candidate JSON payloads inside a model response: the body of a fenced code
+/// block and the outermost object or array.
+fn json_candidates(text: &str) -> Vec<&str> {
+    let mut candidates = Vec::new();
+    if let Some(fence_start) = text.find("```") {
+        let after_fence = &text[fence_start + 3..];
+        if let Some(line_end) = after_fence.find('\n') {
+            let body_start = fence_start + 3 + line_end + 1;
+            if let Some(fence_end) = text[body_start..].find("```") {
+                candidates.push(text[body_start..body_start + fence_end].trim());
+            }
+        }
+    }
+    for (open, close) in [('{', '}'), ('[', ']')] {
+        if let (Some(start), Some(end)) = (text.find(open), text.rfind(close)) {
+            if start < end {
+                candidates.push(text[start..=end].trim());
+            }
+        }
+    }
+    candidates
 }

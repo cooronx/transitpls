@@ -438,14 +438,29 @@ async fn finalize_segments<C: TranslationClient + ?Sized>(
     )?;
     save_project_progress(state_dir, project, chapters)?;
     store.queue_extraction(&extraction)?;
-    process_extraction(
+    if let Err(error) = process_extraction(
         client,
         store,
         &extraction,
         chapter_index,
         config.llm.max_retries,
     )
-    .await?;
+    .await
+    {
+        // Term extraction is auxiliary: keep translation progress and retry
+        // the pending extraction on a later run.
+        state::append_log(
+            state_dir,
+            project,
+            "term_extraction_failed",
+            serde_json::json!({
+                "chapter_id": extraction.chapter_id,
+                "batch_key": extraction.batch_key,
+                "error": error,
+            }),
+        )?;
+        return Ok(());
+    }
     clear_pending_extraction(&mut chapters[chapter_index], &extraction.batch_key);
     state::write_chapter(state_dir, project, &chapters[chapter_index])
 }

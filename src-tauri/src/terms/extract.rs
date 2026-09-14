@@ -84,7 +84,7 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     target_text: &str,
     chapter: usize,
     max_retries: usize,
-) -> Result<Vec<Term>, String> {
+) -> Result<Vec<Term>, ExtractionError> {
     let user = serde_json::json!({
         "source": source_text,
         "target": target_text,
@@ -92,14 +92,16 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     .to_string();
     let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
     let schema = crate::schema::response_schema::<ExtractionResponse>();
-    let mut last_error = String::new();
+    let mut last_error = None;
     for attempt in 0..=max_retries {
         match client
             .complete_attempt(system, &user, attempt, Some(schema.clone()))
             .await
         {
             Ok(output) if output.text.trim().is_empty() => {
-                return Err(format!("term extraction failed: {EMPTY_COMPLETION_ERROR}"));
+                return Err(ExtractionError::Response(
+                    EMPTY_COMPLETION_ERROR.to_string(),
+                ));
             }
             Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
             {
@@ -111,26 +113,60 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
                         .collect::<Vec<_>>();
                     match terms.iter().try_for_each(validate_term) {
                         Ok(()) => return Ok(terms),
-                        Err(error) => last_error = error,
+                        Err(error) => last_error = Some(ExtractionError::Response(error)),
                     }
                 }
-                Err(error) => last_error = format!("invalid term extraction JSON: {error}"),
+                Err(error) => {
+                    last_error = Some(ExtractionError::Response(format!(
+                        "invalid term extraction JSON: {error}"
+                    )));
+                }
             },
             Err(error) if is_empty_completion_error(&error) => {
-                return Err(format!("term extraction failed: {error}"));
+                return Err(ExtractionError::Response(error));
             }
-            Err(error) => last_error = error,
+            Err(error) => last_error = Some(ExtractionError::Request(error)),
         }
         if attempt < max_retries {
             tokio::time::sleep(Duration::from_secs(1_u64 << attempt.min(6))).await;
         }
     }
-    Err(format!(
-        "term extraction failed after {max_retries} retries: {last_error}"
-    ))
+    Err(last_error
+        .unwrap_or_else(|| ExtractionError::Response("no extraction attempt was made".to_string()))
+        .with_retries(max_retries))
 }
 
-/// 带降级的抽取：整批返回空补全时按段落对半拆分重试，单段仍失败则记录并跳过。
+/// A failed term extraction, split by whether retrying could help.
+#[derive(Debug)]
+pub enum ExtractionError {
+    /// The model answered, but the payload was empty or unusable; callers can
+    /// retry the batch in smaller pieces or skip it without losing translation
+    /// progress.
+    Response(String),
+    /// The request itself failed; the caller should surface the error.
+    Request(String),
+}
+
+impl ExtractionError {
+    fn with_retries(self, max_retries: usize) -> Self {
+        let message = format!(
+            "term extraction failed after {max_retries} retries: {}",
+            self.message()
+        );
+        match self {
+            Self::Response(_) => Self::Response(message),
+            Self::Request(_) => Self::Request(message),
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Response(message) | Self::Request(message) => message,
+        }
+    }
+}
+
+/// 带降级的抽取：整批返回空补全或无效响应时按段落对半拆分重试，单段仍失败则记录并跳过。
 pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
     client: &C,
     source_text: &str,
@@ -154,14 +190,14 @@ pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
             .join("\n");
         match extract_terms(client, &source, &target, chapter, max_retries).await {
             Ok(terms) => merged.extend(terms),
-            Err(error) if is_empty_completion_error(&error) && batch.len() > 1 => {
+            Err(ExtractionError::Response(_)) if batch.len() > 1 => {
                 let midpoint = batch.len() / 2;
                 let mut left = batch;
                 let right = left.split_off(midpoint);
                 batches.push(right);
                 batches.push(left);
             }
-            Err(error) if is_empty_completion_error(&error) => {
+            Err(ExtractionError::Response(error)) => {
                 let _ = client.record_failure(
                     "term_extraction",
                     serde_json::json!({
@@ -173,7 +209,7 @@ pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
                     }),
                 );
             }
-            Err(error) => return Err(error),
+            Err(ExtractionError::Request(error)) => return Err(error),
         }
     }
 

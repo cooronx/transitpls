@@ -382,3 +382,53 @@ async fn empty_single_paragraph_is_recorded_without_blocking() {
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0]["kind"], "term_extraction_skipped");
 }
+
+struct ProseBatchClient;
+
+#[async_trait]
+impl TranslationClient for ProseBatchClient {
+    async fn complete(
+        &self,
+        _system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        let request: serde_json::Value = serde_json::from_str(user_prompt).unwrap();
+        let source = request["source"].as_str().unwrap();
+        if source.contains('\n') {
+            return Ok(CompletionOutput {
+                text: format!("Here are the requested terms, formatted below.\n{source}"),
+                usage: Usage::default(),
+            });
+        }
+        let terms = match source {
+            "Alice arrived." => vec![json_term("Alice", "爱丽丝")],
+            "Alice met Bob." => vec![json_term("Alice", "爱丽丝"), json_term("Bob", "鲍勃")],
+            _ => Vec::new(),
+        };
+        Ok(CompletionOutput {
+            text: serde_json::json!({ "terms": terms }).to_string(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn invalid_json_batch_splits_instead_of_failing() {
+    let terms = extract_terms_resilient(
+        &ProseBatchClient,
+        "Alice arrived.\nAlice met Bob.",
+        "爱丽丝到了。\n爱丽丝遇见了鲍勃。",
+        1,
+        0,
+    )
+    .await
+    .expect("invalid JSON should split and recover the extraction");
+
+    assert_eq!(
+        terms
+            .iter()
+            .map(|term| term.source.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Alice", "Bob"]
+    );
+}

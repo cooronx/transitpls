@@ -850,3 +850,102 @@ fn test_segment(id: &str, source: &str) -> Segment {
         meta: serde_json::json!({}),
     }
 }
+
+struct ExtractionFailingClient;
+
+#[async_trait]
+impl TranslationClient for ExtractionFailingClient {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        if system_prompt.contains("TASK:TERM_EXTRACTION") {
+            return Err("request_failed stage=term_extraction: provider unavailable".to_string());
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(user_prompt).expect("prompt should be JSON");
+        let segments = value["segments"]
+            .as_array()
+            .expect("prompt should contain segments");
+        Ok(output(
+            serde_json::json!({
+                "translations": segments.iter().map(|segment| format!("translated {}", segment["source"].as_str().unwrap_or_default())).collect::<Vec<_>>()
+            })
+            .to_string(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn extraction_failure_does_not_fail_translation() {
+    let dir = temp_dir();
+    let source = dir.join("book.txt");
+    fs::write(&source, "book").expect("source should be written");
+    let state_dir = dir.join("projects");
+    let document = Document {
+        metadata: DocumentMetadata {
+            title: "Book".to_string(),
+            source_language: "en".to_string(),
+            target_language: "zh-CN".to_string(),
+            source_format: "txt".to_string(),
+        },
+        chapters: vec![crate::model::Chapter {
+            id: "chapter-1".to_string(),
+            title: "Opening".to_string(),
+            target_title: None,
+            status: ItemStatus::Pending,
+            meta: serde_json::json!({ "source_digest": "digest" }),
+            segments: vec![test_segment("one", "First paragraph.")],
+        }],
+    };
+    let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+        .expect("project should initialize");
+    let mut project = initialized.project;
+    let mut chapters = state::load_chapters(&state_dir, &project).expect("chapters should load");
+    let store = TermStore::open(state::project_dir(&state_dir, &project.id).join("terms.db"))
+        .expect("term store should open");
+    let analysis = BookAnalysis {
+        genre: "fiction".to_string(),
+        tone: "neutral".to_string(),
+        style_guide: vec!["Natural Chinese".to_string()],
+        narration: "third person".to_string(),
+        pacing: "steady".to_string(),
+        register: "neutral".to_string(),
+        dialogue_style: "plain".to_string(),
+        rhetoric: "plain".to_string(),
+        characters: Vec::new(),
+        terms: Vec::new(),
+        book_synopsis: Some("synopsis".to_string()),
+    };
+    let mut config = AppConfig::default();
+    config.llm.max_retries = 0;
+
+    run_transit(
+        &ExtractionFailingClient,
+        &store,
+        &state_dir,
+        &mut project,
+        &mut chapters,
+        &analysis,
+        &config,
+        None,
+    )
+    .await
+    .expect("translation should succeed despite extraction failure");
+
+    assert!(chapters[0]
+        .segments
+        .iter()
+        .all(|segment| segment.status == ItemStatus::Translated));
+    let log = fs::read_to_string(state::project_dir(&state_dir, &project.id).join("logs.txt"))
+        .expect("logs should be readable");
+    assert!(log.contains("term_extraction_failed"));
+    // The failed extraction stays pending so a later run can retry it.
+    assert!(store
+        .pending_extractions()
+        .expect("pending extractions should list")
+        .iter()
+        .any(|extraction| extraction.chapter_id == "chapter-1"));
+    fs::remove_dir_all(dir).expect("temp directory should be removed");
+}

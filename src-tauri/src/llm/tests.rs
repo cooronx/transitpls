@@ -129,7 +129,11 @@ fn validates_count_and_rejects_empty_translation() {
         validate_response(&fenced, 2).expect("fenced JSON should be accepted"),
         vec!["甲", "乙"]
     );
-    assert!(validate_response(&format!("Result:\n{valid}"), 2).is_err());
+    assert_eq!(
+        validate_response(&format!("Result:\n{valid}"), 2).unwrap(),
+        vec!["甲", "乙"]
+    );
+    assert!(validate_response("no JSON in this response", 2).is_err());
 }
 
 #[test]
