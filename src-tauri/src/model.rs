@@ -34,6 +34,14 @@ pub enum ItemStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PolishStatus {
+    Pending,
+    Succeeded,
+    Failed,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     pub id: String,
@@ -42,6 +50,8 @@ pub struct Segment {
     pub target: Option<String>,
     #[serde(default)]
     pub target_before_polish: Option<String>,
+    #[serde(default)]
+    pub polish_status: Option<PolishStatus>,
     pub kind: SegmentKind,
     pub status: ItemStatus,
     pub source_hash: String,

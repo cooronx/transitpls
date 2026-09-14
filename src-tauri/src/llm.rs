@@ -849,7 +849,7 @@ struct PolishRequest<'a> {
     book_synopsis: Option<&'a str>,
     chapter_digest: Option<&'a str>,
     terms: &'a [Term],
-    recent_targets: &'a [RecentTarget],
+    reference_targets: &'a [RecentTarget],
     segments: Vec<PolishSource<'a>>,
 }
 
@@ -871,13 +871,13 @@ pub async fn polish_batch<C: TranslationClient + ?Sized>(
         .iter()
         .map(|segment| segment.id.clone())
         .collect::<Vec<_>>();
-    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep items in numbered input order and never omit an item.";
+    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. The reference_targets section is earlier draft context for consistency only: do not translate, return, or modify it. Only the segments array is processed. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep the processed segments in numbered input order and never omit an item.";
     let user = serde_json::to_string(&PolishRequest {
         style: context.style_guide,
         book_synopsis: context.book_synopsis,
         chapter_digest: context.chapter_digest,
         terms: context.terms,
-        recent_targets: context.recent_targets,
+        reference_targets: context.recent_targets,
         segments: segments
             .iter()
             .enumerate()
@@ -994,6 +994,7 @@ mod tests {
                     source: source.to_string(),
                     target: None,
                     target_before_polish: None,
+                    polish_status: None,
                     kind: SegmentKind::Paragraph,
                     status: ItemStatus::Pending,
                     source_hash: "hash".to_string(),

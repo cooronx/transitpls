@@ -41,6 +41,48 @@ pub fn recent_targets(
     before_segment: usize,
     max_chars: usize,
 ) -> Vec<RecentTarget> {
+    collect_recent(
+        chapters,
+        before_chapter,
+        before_segment,
+        max_chars,
+        |segment| segment.target.as_deref(),
+    )
+}
+
+/// Reference context for polish rounds: always reads the frozen draft
+/// (`target_before_polish`) so parallel batches cannot influence each other
+/// through the polished `target`.
+pub fn recent_drafts(
+    chapters: &[Chapter],
+    before_chapter: usize,
+    before_segment: usize,
+    max_chars: usize,
+) -> Vec<RecentTarget> {
+    collect_recent(
+        chapters,
+        before_chapter,
+        before_segment,
+        max_chars,
+        |segment| {
+            segment
+                .target_before_polish
+                .as_deref()
+                .or(segment.target.as_deref())
+        },
+    )
+}
+
+fn collect_recent<F>(
+    chapters: &[Chapter],
+    before_chapter: usize,
+    before_segment: usize,
+    max_chars: usize,
+    mut value_of: F,
+) -> Vec<RecentTarget>
+where
+    F: FnMut(&Segment) -> Option<&str>,
+{
     let mut nearest_first = Vec::new();
     let mut remaining = max_chars;
     for chapter_index in (0..=before_chapter).rev() {
@@ -54,7 +96,7 @@ pub fn recent_targets(
             if segment.status != ItemStatus::Translated {
                 return chronological(nearest_first);
             }
-            let Some(target) = segment.target.as_deref() else {
+            let Some(target) = value_of(segment) else {
                 return chronological(nearest_first);
             };
             if remaining == 0 {
@@ -113,6 +155,7 @@ mod tests {
             source: source.to_string(),
             target: target.map(str::to_string),
             target_before_polish: None,
+            polish_status: None,
             kind: SegmentKind::Paragraph,
             status,
             source_hash: "hash".to_string(),

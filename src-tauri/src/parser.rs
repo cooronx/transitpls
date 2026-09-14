@@ -301,6 +301,7 @@ fn build_chapter_from_blocks(
                 source: chunk.clone(),
                 target: None,
                 target_before_polish: None,
+                polish_status: None,
                 kind: kind.clone(),
                 status: ItemStatus::Pending,
                 source_hash: hash_text(&chunk),

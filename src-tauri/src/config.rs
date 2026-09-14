@@ -20,6 +20,7 @@ pub struct AppConfig {
 pub struct GeneralConfig {
     pub visible_segments: usize,
     pub retranslation_concurrency: usize,
+    pub polish_concurrency: usize,
 }
 
 impl Default for GeneralConfig {
@@ -27,6 +28,7 @@ impl Default for GeneralConfig {
         Self {
             visible_segments: 100,
             retranslation_concurrency: 3,
+            polish_concurrency: 3,
         }
     }
 }
@@ -298,6 +300,9 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     if config.general.retranslation_concurrency == 0 {
         return Err("general.retranslation_concurrency must be greater than zero".to_string());
     }
+    if config.general.polish_concurrency == 0 {
+        return Err("general.polish_concurrency must be greater than zero".to_string());
+    }
     if config.llm.timeout_secs == 0 {
         return Err("llm.timeout_secs must be greater than zero".to_string());
     }
@@ -350,6 +355,7 @@ mod tests {
         assert_eq!(config.pipeline.recent_context_chars, 2_000);
         assert_eq!(config.general.visible_segments, 100);
         assert_eq!(config.general.retranslation_concurrency, 3);
+        assert_eq!(config.general.polish_concurrency, 3);
     }
 
     #[test]

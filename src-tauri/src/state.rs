@@ -1,4 +1,4 @@
-use crate::model::{Chapter, Document, ItemStatus, ProjectState, ProjectStatus};
+use crate::model::{Chapter, Document, ItemStatus, PolishStatus, ProjectState, ProjectStatus};
 use chrono::{SecondsFormat, Utc};
 use fs2::FileExt;
 use sha2::{Digest, Sha256};
@@ -205,7 +205,36 @@ pub fn load_chapters(state_dir: &Path, project: &ProjectState) -> Result<Vec<Cha
             .and_then(|ordinal| ordinal.parse::<usize>().ok())
             .unwrap_or(usize::MAX)
     });
+    normalize_polish_state(&mut chapters);
     Ok(chapters)
+}
+
+/// Projects written before polish was split out of the translation pipeline stored
+/// the draft only in `target_before_polish` while `target` stayed empty. Restore the
+/// draft as the readable translation and infer the old polish outcome so legacy
+/// projects load without re-translating or re-polishing.
+pub fn normalize_polish_state(chapters: &mut [Chapter]) {
+    for chapter in chapters.iter_mut() {
+        for segment in chapter.segments.iter_mut() {
+            let Some(draft) = segment
+                .target_before_polish
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if segment.target.is_none() {
+                segment.target = Some(draft);
+                segment.status = ItemStatus::Translated;
+                if segment.polish_status.is_none() {
+                    segment.polish_status = Some(PolishStatus::Pending);
+                }
+            } else if segment.polish_status.is_none() {
+                segment.polish_status = Some(PolishStatus::Succeeded);
+            }
+        }
+    }
 }
 
 pub fn save_progress(
@@ -474,7 +503,7 @@ fn timestamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::{acquire_project_lock, hash_file, initialize, load_export_snapshot, save_project};
-    use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus};
+    use crate::model::{Chapter, Document, DocumentMetadata, ItemStatus, PolishStatus};
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -563,6 +592,51 @@ mod tests {
             .expect("lock should be released when writer exits");
 
         fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[test]
+    fn normalizes_legacy_polish_state_without_retranslating() {
+        let segment = |id: &str, target: Option<&str>, draft: Option<&str>| crate::model::Segment {
+            id: id.to_string(),
+            ordinal: 0,
+            source: "source".to_string(),
+            target: target.map(str::to_string),
+            target_before_polish: draft.map(str::to_string),
+            polish_status: None,
+            kind: crate::model::SegmentKind::Paragraph,
+            status: if target.is_some() {
+                ItemStatus::Translated
+            } else {
+                ItemStatus::Pending
+            },
+            source_hash: "hash".to_string(),
+            meta: serde_json::json!({}),
+        };
+        let mut chapters = vec![Chapter {
+            id: "chapter-1".to_string(),
+            title: "Chapter 1".to_string(),
+            target_title: None,
+            status: ItemStatus::Pending,
+            meta: serde_json::json!({}),
+            segments: vec![
+                segment("pending-polish", None, Some("初稿")),
+                segment("polished", Some("润色稿"), Some("初稿")),
+                segment("plain", Some("译文"), None),
+                segment("untranslated", None, None),
+            ],
+        }];
+
+        super::normalize_polish_state(&mut chapters);
+
+        let segments = &chapters[0].segments;
+        assert_eq!(segments[0].target.as_deref(), Some("初稿"));
+        assert_eq!(segments[0].status, ItemStatus::Translated);
+        assert_eq!(segments[0].polish_status, Some(PolishStatus::Pending));
+        assert_eq!(segments[1].target.as_deref(), Some("润色稿"));
+        assert_eq!(segments[1].polish_status, Some(PolishStatus::Succeeded));
+        assert_eq!(segments[2].polish_status, None);
+        assert!(segments[3].target.is_none());
+        assert!(segments[3].polish_status.is_none());
     }
 
     #[test]

@@ -817,6 +817,30 @@ button:disabled {
     color: #d5533c
 }
 
+.segment-card header em {
+    margin-left: auto;
+    margin-right: 8px;
+    font-style: normal;
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 8px
+}
+
+.segment-card header em.polish-succeeded {
+    color: #176f67;
+    background: #e2f3f0
+}
+
+.segment-card header em.polish-pending {
+    color: #8a6d1f;
+    background: #f7f0d8
+}
+
+.segment-card header em.polish-failed {
+    color: #b0472f;
+    background: #fbe4de
+}
+
 .segment-card p {
     white-space: pre-wrap;
     font-size: 13px;
@@ -1217,6 +1241,31 @@ button:disabled {
     margin-left: auto;
     font-style: normal;
     font-size: 10px
+}
+
+.polish-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 0 2px
+}
+
+.polish-actions button {
+    flex: none
+}
+
+.polish-actions .polish-done {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: #278f85;
+    font-size: 12px;
+    font-weight: 600
+}
+
+.polish-actions .polish-done svg {
+    width: 14px;
+    height: 14px
 }
 
 .page-view {

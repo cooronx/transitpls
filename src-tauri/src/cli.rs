@@ -2,9 +2,10 @@ use crate::analysis;
 use crate::config::{self, AppConfig};
 use crate::export::{self, ExportFormat};
 use crate::llm::{self, MockClient, RecordingClient, RigClient, TranslationClient};
-use crate::model::{Chapter, ItemStatus, ProjectStatus, Segment, SegmentKind};
+use crate::model::{Chapter, ItemStatus, PolishStatus, ProjectStatus, Segment, SegmentKind};
 use crate::parser;
 use crate::pipeline;
+use crate::polish;
 use crate::review;
 use crate::state;
 use crate::terms::{self, PendingExtraction, Term, TermStore};
@@ -39,6 +40,7 @@ pub struct Cli {
 enum Command {
     Init(InitArgs),
     Transit(TransitArgs),
+    Polish(PolishArgs),
     Review(ReviewArgs),
     Export(ExportArgs),
     Status(ProjectArgs),
@@ -63,6 +65,15 @@ struct TransitArgs {
     input: PathBuf,
     #[arg(long)]
     chapter: Option<usize>,
+    #[arg(long)]
+    mock: bool,
+}
+
+#[derive(Debug, Args)]
+struct PolishArgs {
+    input: PathBuf,
+    #[arg(long)]
+    retry_failed: bool,
     #[arg(long)]
     mock: bool,
 }
@@ -195,6 +206,7 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             Ok(0)
         }
         Command::Transit(args) => transit(args, &state_dir, &config).await,
+        Command::Polish(args) => polish_command(args, &state_dir, &config).await,
         Command::Review(args) => review_command(args, &state_dir).await,
         Command::Export(args) => export_file(args, &state_dir),
         Command::Terms(args) => terms(args, &state_dir),
@@ -318,6 +330,10 @@ pub async fn initialize_project(
         "analysis_completed",
         serde_json::json!({ "full_book": config.analysis.full_book }),
     )?;
+    if force_analysis {
+        // Reanalysis changes the style guide and synopsis used by polish snapshots.
+        polish::invalidate_round(&state_dir, &project.id)?;
+    }
     Ok((project, created))
 }
 
@@ -367,6 +383,130 @@ pub async fn transit_project(
     )
     .await?;
     state::load_for_source(&loaded.state_dir, &input)
+}
+
+pub async fn polish_project(
+    config_path: Option<PathBuf>,
+    input: PathBuf,
+    retry_failed: bool,
+    mock_client: bool,
+) -> Result<crate::model::ProjectState, String> {
+    let loaded = config::load(config_path.as_deref())?;
+    let mut project = state::load_for_source(&loaded.state_dir, &input)?;
+    let _lock = state::acquire_project_lock(&loaded.state_dir, &project)?;
+    let mut chapters = state::load_chapters(&loaded.state_dir, &project)?;
+    let analysis =
+        load_translation_analysis(&loaded.state_dir, &project, &chapters, &loaded.value)?;
+    let client: Arc<dyn TranslationClient> = Arc::from(build_client(
+        &loaded.value,
+        mock_client,
+        &loaded.state_dir,
+        &project,
+    )?);
+    let store = term_store(&loaded.state_dir, &project)?;
+    let terms = store.list()?;
+    if retry_failed {
+        state::append_log(
+            &loaded.state_dir,
+            &project,
+            "polish_retry_requested",
+            serde_json::json!({}),
+        )?;
+    }
+    let result = polish::run_round(
+        Arc::clone(&client),
+        &loaded.state_dir,
+        &project,
+        &mut chapters,
+        &analysis,
+        &terms,
+        &loaded.value,
+        retry_failed,
+    )
+    .await;
+    match result {
+        Ok(summary) => {
+            save_project_progress(&loaded.state_dir, &mut project, &chapters)?;
+            println!(
+                "polished {} of {} batches ({} failed)",
+                summary.succeeded, summary.total, summary.failed
+            );
+            Ok(project)
+        }
+        Err(error) => {
+            state::append_log(
+                &loaded.state_dir,
+                &project,
+                "polish_failed",
+                serde_json::json!({ "error": error }),
+            )?;
+            Err(error)
+        }
+    }
+}
+
+async fn polish_command(
+    args: PolishArgs,
+    state_dir: &std::path::Path,
+    config: &AppConfig,
+) -> Result<i32, String> {
+    let mut project = state::load_for_source(state_dir, &args.input)?;
+    let _lock = state::acquire_project_lock(state_dir, &project)?;
+    let mut chapters = state::load_chapters(state_dir, &project)?;
+    let analysis = load_translation_analysis(state_dir, &project, &chapters, config)?;
+    let client: Arc<dyn TranslationClient> =
+        Arc::from(build_client(config, args.mock, state_dir, &project)?);
+    let store = term_store(state_dir, &project)?;
+    let terms = store.list()?;
+    if args.retry_failed {
+        state::append_log(
+            state_dir,
+            &project,
+            "polish_retry_requested",
+            serde_json::json!({}),
+        )?;
+    }
+    let result = polish::run_round(
+        Arc::clone(&client),
+        state_dir,
+        &project,
+        &mut chapters,
+        &analysis,
+        &terms,
+        config,
+        args.retry_failed,
+    )
+    .await;
+    match result {
+        Ok(summary) => {
+            save_project_progress(state_dir, &mut project, &chapters)?;
+            state::append_log(
+                state_dir,
+                &project,
+                "polish_summary",
+                serde_json::json!({
+                    "round_id": summary.round_id,
+                    "total": summary.total,
+                    "succeeded": summary.succeeded,
+                    "failed": summary.failed,
+                }),
+            )?;
+            println!(
+                "polished {} of {} batches ({} failed)",
+                summary.succeeded, summary.total, summary.failed
+            );
+            Ok(if summary.failed == 0 { 0 } else { 2 })
+        }
+        Err(error) => {
+            state::append_log(
+                state_dir,
+                &project,
+                "polish_failed",
+                serde_json::json!({ "error": error }),
+            )?;
+            Err(error)
+        }
+    }
 }
 
 pub async fn retranslate_project(
@@ -558,6 +698,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
             source: chapters[chapter_index].title.clone(),
             target: chapters[chapter_index].target_title.clone(),
             target_before_polish: None,
+            polish_status: None,
             kind: SegmentKind::Heading,
             status: ItemStatus::Translated,
             source_hash: String::new(),
@@ -632,32 +773,11 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
     )
     .await?
     .remove(0);
-    let target = if config.pipeline.polish {
-        let relevant_terms = store.relevant(&source)?;
-        let mut polish_request = request.clone();
-        polish_request.target_before_polish = Some(draft.clone());
-        llm::polish_batch(
-            client,
-            &[polish_request],
-            &llm::TranslationContext {
-                style_guide: &analysis.style_guide,
-                book_synopsis: analysis.book_synopsis.as_deref(),
-                chapter_digest: digest,
-                terms: &relevant_terms,
-                recent_targets: &recent,
-            },
-            config.llm.max_retries,
-        )
-        .await?
-        .remove(0)
-    } else {
-        draft.clone()
-    };
 
     let extracted = terms::extract_terms_resilient(
         client,
         &source,
-        &target,
+        &draft,
         chapter_index,
         config.llm.max_retries,
     )
@@ -667,8 +787,8 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
         chapter_index,
         segment_index: Some(segment_index),
         source,
-        draft: config.pipeline.polish.then_some(draft),
-        target,
+        draft: Some(draft.clone()),
+        target: draft,
         extracted,
     })
 }
@@ -696,6 +816,7 @@ fn apply_retranslation(
             .remove("retranslation_error");
         segment.target_before_polish = prepared.draft;
         segment.target = Some(prepared.target.clone());
+        segment.polish_status = Some(PolishStatus::Pending);
         segment.status = ItemStatus::Translated;
         if segment.kind == SegmentKind::Heading
             && segment.source.trim() == chapters[chapter_index].title.trim()
@@ -752,6 +873,8 @@ fn apply_retranslation(
         }
     }
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+    // A changed draft invalidates the fixed polish input snapshot.
+    polish::invalidate_round(state_dir, &project.id)?;
     state::append_log(
         state_dir,
         project,
@@ -872,6 +995,7 @@ fn terms(args: TermsArgs, state_dir: &std::path::Path) -> Result<i32, String> {
             };
             let store = term_store(state_dir, &project)?;
             store.resolve(source, target)?;
+            polish::invalidate_round(state_dir, &project.id)?;
             state::append_log(
                 state_dir,
                 &project,
@@ -908,7 +1032,8 @@ async fn transit(
         }
     }
     let analysis = load_translation_analysis(state_dir, &project, &chapters, config)?;
-    let client = build_client(config, args.mock, state_dir, &project)?;
+    let client: Arc<dyn TranslationClient> =
+        Arc::from(build_client(config, args.mock, state_dir, &project)?);
     let store = term_store(state_dir, &project)?;
     state::append_log(
         state_dir,
@@ -940,6 +1065,34 @@ async fn transit(
         "transit_completed",
         serde_json::json!({ "chapters": project.chapters_completed }),
     )?;
+    if args.chapter.is_none()
+        && config.pipeline.polish
+        && polish::book_translation_complete(&chapters)
+    {
+        let terms = store.list()?;
+        if let Err(error) = polish::run_round(
+            Arc::clone(&client),
+            state_dir,
+            &project,
+            &mut chapters,
+            &analysis,
+            &terms,
+            config,
+            false,
+        )
+        .await
+        {
+            // Translation is already saved; a polish failure must not mark the project failed.
+            state::append_log(
+                state_dir,
+                &project,
+                "polish_failed",
+                serde_json::json!({ "error": error }),
+            )?;
+            return Err(error);
+        }
+        save_project_progress(state_dir, &mut project, &chapters)?;
+    }
     println!(
         "translated {} chapters ({} segments)",
         project.chapters_completed,
@@ -1021,33 +1174,6 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
     );
 
     for range in ranges {
-        let promoted = range
-            .clone()
-            .filter(|&index| {
-                !config.pipeline.polish
-                    && chapters[chapter_index].segments[index].target.is_none()
-                    && chapters[chapter_index].segments[index]
-                        .target_before_polish
-                        .is_some()
-            })
-            .collect::<Vec<_>>();
-        for &index in &promoted {
-            let segment = &mut chapters[chapter_index].segments[index];
-            segment.target = segment.target_before_polish.clone();
-            segment.status = ItemStatus::Translated;
-        }
-        finalize_segments(
-            client,
-            store,
-            state_dir,
-            project,
-            chapters,
-            chapter_index,
-            &promoted,
-            config,
-        )
-        .await?;
-
         let untranslated = range
             .clone()
             .filter(|&index| {
@@ -1084,26 +1210,20 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
             {
                 Ok(translations) => {
                     for (&index, translation) in untranslated.iter().zip(translations) {
-                        store_draft_or_final(
-                            &mut chapters[chapter_index].segments[index],
-                            translation,
-                            config.pipeline.polish,
-                        );
+                        store_draft(&mut chapters[chapter_index].segments[index], translation);
                     }
                     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-                    if !config.pipeline.polish {
-                        finalize_segments(
-                            client,
-                            store,
-                            state_dir,
-                            project,
-                            chapters,
-                            chapter_index,
-                            &untranslated,
-                            config,
-                        )
-                        .await?;
-                    }
+                    finalize_segments(
+                        client,
+                        store,
+                        state_dir,
+                        project,
+                        chapters,
+                        chapter_index,
+                        &untranslated,
+                        config,
+                    )
+                    .await?;
                 }
                 Err(_) => {
                     for &index in &untranslated {
@@ -1123,29 +1243,6 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                     }
                 }
             }
-        }
-
-        if config.pipeline.polish {
-            let unpolished = range
-                .clone()
-                .filter(|&index| {
-                    let segment = &chapters[chapter_index].segments[index];
-                    segment.target.is_none() && segment.target_before_polish.is_some()
-                })
-                .collect::<Vec<_>>();
-            polish_segments(
-                client,
-                store,
-                state_dir,
-                project,
-                chapters,
-                chapter_index,
-                &unpolished,
-                analysis,
-                digest.as_deref(),
-                config,
-            )
-            .await?;
         }
 
         pipeline::write_context(
@@ -1176,15 +1273,14 @@ fn cloned_segments(chapters: &[Chapter], chapter_index: usize, indices: &[usize]
         .collect()
 }
 
-fn store_draft_or_final(segment: &mut Segment, value: String, polish: bool) {
-    if polish {
-        segment.target_before_polish = Some(value);
-        segment.target = None;
-        segment.status = ItemStatus::Pending;
-    } else {
-        segment.target = Some(value);
-        segment.status = ItemStatus::Translated;
-    }
+/// The draft is always kept as the readable, exportable target and as the fixed
+/// input for a later polish round; `polish_status` tracks whether that draft has
+/// already been polished.
+fn store_draft(segment: &mut Segment, value: String) {
+    segment.target_before_polish = Some(value.clone());
+    segment.target = Some(value);
+    segment.polish_status = Some(PolishStatus::Pending);
+    segment.status = ItemStatus::Translated;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1255,147 +1351,22 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
             return Err(format!("segment {} failed: {error}", segment.id));
         }
     };
-    store_draft_or_final(
+    store_draft(
         &mut chapters[chapter_index].segments[segment_index],
         translation,
-        config.pipeline.polish,
     );
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-
-    if config.pipeline.polish {
-        polish_segments(
-            client,
-            store,
-            state_dir,
-            project,
-            chapters,
-            chapter_index,
-            &[segment_index],
-            analysis,
-            digest,
-            config,
-        )
-        .await
-    } else {
-        finalize_segments(
-            client,
-            store,
-            state_dir,
-            project,
-            chapters,
-            chapter_index,
-            &[segment_index],
-            config,
-        )
-        .await
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn polish_segments<C: TranslationClient + ?Sized>(
-    client: &C,
-    store: &TermStore,
-    state_dir: &std::path::Path,
-    project: &mut crate::model::ProjectState,
-    chapters: &mut [Chapter],
-    chapter_index: usize,
-    indices: &[usize],
-    analysis: &analysis::BookAnalysis,
-    digest: Option<&str>,
-    config: &AppConfig,
-) -> Result<(), String> {
-    if indices.is_empty() {
-        return Ok(());
-    }
-    let request = cloned_segments(chapters, chapter_index, indices);
-    let terms = store.relevant(
-        &request
-            .iter()
-            .map(|segment| segment.source.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )?;
-    let recent = pipeline::recent_targets(
+    finalize_segments(
+        client,
+        store,
+        state_dir,
+        project,
         chapters,
         chapter_index,
-        indices[0],
-        config.pipeline.recent_context_chars,
-    );
-    let context = llm::TranslationContext {
-        style_guide: &analysis.style_guide,
-        book_synopsis: analysis.book_synopsis.as_deref(),
-        chapter_digest: digest,
-        terms: &terms,
-        recent_targets: &recent,
-    };
-    match llm::polish_batch(client, &request, &context, config.llm.max_retries).await {
-        Ok(translations) => {
-            for (&index, translation) in indices.iter().zip(translations) {
-                let segment = &mut chapters[chapter_index].segments[index];
-                segment.target = Some(translation);
-                segment.status = ItemStatus::Translated;
-            }
-            finalize_segments(
-                client,
-                store,
-                state_dir,
-                project,
-                chapters,
-                chapter_index,
-                indices,
-                config,
-            )
-            .await
-        }
-        Err(_) => {
-            for &index in indices {
-                let request = chapters[chapter_index].segments[index].clone();
-                let terms = store.relevant(&request.source)?;
-                let recent = pipeline::recent_targets(
-                    chapters,
-                    chapter_index,
-                    index,
-                    config.pipeline.recent_context_chars,
-                );
-                let context = llm::TranslationContext {
-                    style_guide: &analysis.style_guide,
-                    book_synopsis: analysis.book_synopsis.as_deref(),
-                    chapter_digest: digest,
-                    terms: &terms,
-                    recent_targets: &recent,
-                };
-                let polished = llm::polish_batch(
-                    client,
-                    std::slice::from_ref(&request),
-                    &context,
-                    config.llm.max_retries,
-                )
-                .await;
-                let polished = match polished {
-                    Ok(mut values) => values.remove(0),
-                    Err(error) => {
-                        chapters[chapter_index].segments[index].status = ItemStatus::Failed;
-                        state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-                        return Err(format!("segment {} polish failed: {error}", request.id));
-                    }
-                };
-                chapters[chapter_index].segments[index].target = Some(polished);
-                chapters[chapter_index].segments[index].status = ItemStatus::Translated;
-                finalize_segments(
-                    client,
-                    store,
-                    state_dir,
-                    project,
-                    chapters,
-                    chapter_index,
-                    &[index],
-                    config,
-                )
-                .await?;
-            }
-            Ok(())
-        }
-    }
+        &[segment_index],
+        config,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1536,6 +1507,7 @@ async fn translate_missing_titles<C: TranslationClient + ?Sized>(
             source: chapter.title.clone(),
             target: chapter.target_title.clone(),
             target_before_polish: None,
+            polish_status: None,
             kind: SegmentKind::Heading,
             status: if chapter.target_title.is_some() {
                 ItemStatus::Translated
@@ -1621,6 +1593,8 @@ fn sync_heading_title(chapter: &mut Chapter, target_title: &str) {
     for segment in &mut chapter.segments {
         if segment.kind == SegmentKind::Heading && segment.source.trim() == chapter.title.trim() {
             segment.target = Some(target_title.to_string());
+            segment.target_before_polish = None;
+            segment.polish_status = None;
             segment.status = ItemStatus::Translated;
         }
     }
@@ -1888,7 +1862,7 @@ fn print_status(project: &crate::model::ProjectState, chapters: &[Chapter]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        export_file, import_project, mark_retranslation_error, retranslate_item,
+        export_file, import_project, mark_retranslation_error, polish_project, retranslate_item,
         retranslate_project, run_transit, transit, Cli, Command, ExportArgs, ExportFormatArg,
         TransitArgs,
     };
@@ -1896,8 +1870,9 @@ mod tests {
     use crate::config::AppConfig;
     use crate::llm::{CompletionOutput, MockClient, TranslationClient};
     use crate::model::{
-        Document, DocumentMetadata, ItemStatus, ProjectStatus, Segment, SegmentKind,
+        Document, DocumentMetadata, ItemStatus, PolishStatus, ProjectStatus, Segment, SegmentKind,
     };
+    use crate::polish;
     use crate::terms::TermStore;
     use crate::usage::UsageFile;
     use crate::{parser, state};
@@ -2010,6 +1985,24 @@ mod tests {
         };
         assert_eq!(args.chapter, Some(0));
         assert!(args.mock);
+    }
+
+    #[test]
+    fn accepts_polish_command_flags() {
+        let cli = Cli::try_parse_from([
+            "transitpls-cli",
+            "polish",
+            "book.txt",
+            "--retry-failed",
+            "--mock",
+        ])
+        .expect("polish arguments should parse");
+        let Command::Polish(args) = cli.command else {
+            panic!("polish command should parse");
+        };
+        assert!(args.retry_failed);
+        assert!(args.mock);
+        assert_eq!(args.input, PathBuf::from("book.txt"));
     }
 
     #[test]
@@ -2228,6 +2221,168 @@ mod tests {
             .target
             .as_deref()
             .is_some_and(|value| value.starts_with("[mock polished zh-CN]")));
+        assert_eq!(segment.polish_status, Some(PolishStatus::Succeeded));
+        let summary = polish::read_summary(&state_dir, &initialized.project.id, &chapters)
+            .expect("polish summary should load")
+            .expect("auto polish should create a round");
+        assert!(summary.finished);
+        assert_eq!(summary.failed, 0);
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[tokio::test]
+    async fn manual_polish_polishes_saved_drafts_without_auto_enabled() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        let state_dir = dir.join("projects");
+        let config_path = dir.join("config.toml");
+        fs::write(&source, "Chapter 1\n\nAlice arrived.").expect("source should be written");
+        fs::write(
+            &config_path,
+            format!("[paths]\nstate_dir = {state_dir:?}\n[pipeline]\npolish = false\n"),
+        )
+        .expect("config should be written");
+        let document =
+            parser::parse_document(&source, Some("en"), 1_200).expect("document should parse");
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+            .expect("project should initialize");
+        let mut project = initialized.project.clone();
+        let mut chapters =
+            state::load_chapters(&state_dir, &project).expect("chapters should load");
+        crate::analysis::prepare(
+            &MockClient,
+            &state_dir,
+            &mut project,
+            &mut chapters,
+            true,
+            false,
+            0,
+        )
+        .await
+        .expect("mock analysis should complete");
+
+        transit(
+            TransitArgs {
+                input: source.clone(),
+                chapter: None,
+                mock: true,
+            },
+            &state_dir,
+            &AppConfig::default(),
+        )
+        .await
+        .expect("transit should complete");
+
+        let chapters =
+            state::load_chapters(&state_dir, &initialized.project).expect("chapters should reload");
+        let draft = chapters[0].segments[0]
+            .target_before_polish
+            .clone()
+            .expect("draft should be saved");
+        assert_eq!(
+            chapters[0].segments[0].target.as_deref(),
+            Some(draft.as_str())
+        );
+        assert!(
+            polish::read_summary(&state_dir, &initialized.project.id, &chapters)
+                .expect("summary should load")
+                .is_none()
+        );
+
+        polish_project(Some(config_path), source, false, true)
+            .await
+            .expect("manual polish should complete");
+
+        let chapters =
+            state::load_chapters(&state_dir, &initialized.project).expect("chapters should reload");
+        assert_eq!(
+            chapters[0].segments[0].target_before_polish.as_deref(),
+            Some(draft.as_str())
+        );
+        assert!(chapters[0].segments[0]
+            .target
+            .as_deref()
+            .is_some_and(|value| value.starts_with("[mock polished zh-CN]")));
+        assert_eq!(
+            chapters[0].segments[0].polish_status,
+            Some(PolishStatus::Succeeded)
+        );
+        fs::remove_dir_all(dir).expect("temp directory should be removed");
+    }
+
+    #[tokio::test]
+    async fn single_chapter_translation_does_not_auto_polish() {
+        let dir = temp_dir();
+        let source = dir.join("book.txt");
+        fs::write(&source, "book").expect("source should be written");
+        let state_dir = dir.join("projects");
+        let document = Document {
+            metadata: DocumentMetadata {
+                title: "Book".to_string(),
+                source_language: "en".to_string(),
+                target_language: "zh-CN".to_string(),
+                source_format: "txt".to_string(),
+            },
+            chapters: vec![
+                crate::model::Chapter {
+                    id: "chapter-1".to_string(),
+                    title: "First".to_string(),
+                    target_title: None,
+                    status: ItemStatus::Pending,
+                    meta: serde_json::json!({}),
+                    segments: vec![test_segment("one", "First paragraph.")],
+                },
+                crate::model::Chapter {
+                    id: "chapter-2".to_string(),
+                    title: "Second".to_string(),
+                    target_title: None,
+                    status: ItemStatus::Pending,
+                    meta: serde_json::json!({}),
+                    segments: vec![test_segment("two", "Second paragraph.")],
+                },
+            ],
+        };
+        let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+            .expect("project should initialize");
+        let mut project = initialized.project.clone();
+        let mut chapters =
+            state::load_chapters(&state_dir, &project).expect("chapters should load");
+        crate::analysis::prepare(
+            &MockClient,
+            &state_dir,
+            &mut project,
+            &mut chapters,
+            false,
+            false,
+            0,
+        )
+        .await
+        .expect("mock analysis should complete");
+        let mut config = AppConfig::default();
+        config.pipeline.polish = true;
+        config.analysis.full_book = false;
+
+        transit(
+            TransitArgs {
+                input: source,
+                chapter: Some(0),
+                mock: true,
+            },
+            &state_dir,
+            &config,
+        )
+        .await
+        .expect("single chapter transit should complete");
+
+        let chapters =
+            state::load_chapters(&state_dir, &initialized.project).expect("chapters should reload");
+        assert!(chapters[0].segments[0].target.is_some());
+        assert!(chapters[1].segments[0].target.is_none());
+        assert!(
+            polish::read_summary(&state_dir, &initialized.project.id, &chapters)
+                .expect("summary should load")
+                .is_none()
+        );
         fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 
@@ -2332,6 +2487,7 @@ mod tests {
         };
         let mut config = AppConfig::default();
         config.llm.max_retries = 0;
+        config.pipeline.polish = true;
 
         run_transit(
             &client,
@@ -2352,6 +2508,14 @@ mod tests {
             .iter()
             .all(|segment| segment.status == ItemStatus::Translated));
         assert_eq!(project.status, ProjectStatus::Translated);
+        // The fallback path must not run polish inline even when auto polish is enabled.
+        assert!(chapters[0].segments.iter().all(|segment| {
+            segment.target == segment.target_before_polish
+                && segment.polish_status == Some(PolishStatus::Pending)
+        }));
+        assert!(polish::read_summary(&state_dir, &project.id, &chapters)
+            .expect("summary should load")
+            .is_none());
         fs::remove_dir_all(dir).expect("temp directory should be removed");
     }
 
@@ -2586,6 +2750,7 @@ mod tests {
             source: source.to_string(),
             target: None,
             target_before_polish: None,
+            polish_status: None,
             kind: SegmentKind::Paragraph,
             status: ItemStatus::Pending,
             source_hash: "hash".to_string(),

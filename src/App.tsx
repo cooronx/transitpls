@@ -40,6 +40,7 @@ import providerPresets from "./provider-presets.json";
 
 type Status = "initialized" | "translating" | "translated" | "failed";
 type ItemStatus = "pending" | "translated" | "failed";
+type PolishStatus = "pending" | "succeeded" | "failed";
 interface Project {
   id: string;
   title: string;
@@ -59,6 +60,8 @@ interface Segment {
   ordinal: number;
   source: string;
   target: string | null;
+  target_before_polish?: string | null;
+  polish_status?: PolishStatus | null;
   kind: string;
   status: ItemStatus;
   meta?: Record<string, unknown>;
@@ -144,7 +147,11 @@ interface Config {
   segment: { max_chars_per_segment: number; max_chars_per_batch: number };
   pipeline: { polish: boolean; recent_context_chars: number };
   analysis: { full_book: boolean };
-  general: { visible_segments: number; retranslation_concurrency: number };
+  general: {
+    visible_segments: number;
+    retranslation_concurrency: number;
+    polish_concurrency: number;
+  };
 }
 interface TaskConfigDraft {
   sourceLanguage: string;
@@ -166,6 +173,17 @@ interface Bootstrap {
   stateDir: string;
   projects: Project[];
 }
+interface PolishSummary {
+  roundId: string;
+  finished: boolean;
+  total: number;
+  succeeded: number;
+  failed: number;
+  pending: number;
+  pendingSegments: number;
+  lastError?: string | null;
+  updatedAt: string;
+}
 interface Detail {
   project: Project;
   taskInitialized: boolean;
@@ -176,6 +194,7 @@ interface Detail {
   termConflicts: TermConflict[];
   pendingConflicts: number;
   report?: unknown;
+  polish: PolishSummary | null;
 }
 type View =
   | "workspace"
@@ -196,6 +215,11 @@ const statusText: Record<Status | ItemStatus, string> = {
   translated: "已完成",
   failed: "失败",
   pending: "待处理",
+};
+const polishStatusText: Record<PolishStatus, string> = {
+  pending: "待润色",
+  succeeded: "已润色",
+  failed: "润色失败",
 };
 const termTypeText: Record<string, string> = {
   person: "人名",
@@ -320,6 +344,43 @@ export default function App() {
                 project.id === payload.projectId
                   ? {
                       ...payload.detail.project,
+                      cover_data_url: project.cover_data_url,
+                      task_initialized: project.task_initialized,
+                    }
+                  : project,
+              ),
+            }
+          : current,
+      );
+    })
+      .then((unlisten) => {
+        if (disposed) unlisten();
+        else stop = unlisten;
+      })
+      .catch((error) => {
+        if (!String(error).includes("invoke")) setNotice(String(error));
+      });
+    return () => {
+      disposed = true;
+      stop?.();
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    let stop: undefined | (() => void);
+    listen<Detail>("polish-progress", ({ payload }) => {
+      setDetail((current) =>
+        current?.project.id === payload.project.id ? payload : current,
+      );
+      setBootstrap((current) =>
+        current
+          ? {
+              ...current,
+              projects: current.projects.map((project) =>
+                project.id === payload.project.id
+                  ? {
+                      ...payload.project,
                       cover_data_url: project.cover_data_url,
                       task_initialized: project.task_initialized,
                     }
@@ -559,6 +620,37 @@ export default function App() {
       setBusy(null);
     }
   };
+  const startPolish = async (retryFailed: boolean) => {
+    if (busy || !detail) return;
+    if (!bootstrap?.credential.configured && !mockClient) {
+      setView("settings");
+      setNotice("请先在设置中配置并验证 API Key");
+      return;
+    }
+    const projectId = detail.project.id;
+    const label = retryFailed ? "重试润色" : "润色";
+    setBusy(label);
+    setNotice(null);
+    try {
+      const next = await invoke<Detail>("ui_polish", {
+        projectId,
+        retryFailed,
+        mockClient,
+      });
+      setDetail(next);
+      await reload(projectId);
+      const failed = next.polish?.failed ?? 0;
+      setNotice(
+        failed > 0
+          ? `润色结束，仍有 ${failed} 个批次失败，可重试失败批次`
+          : "润色已完成",
+      );
+    } catch (error) {
+      setNotice(String(error));
+    } finally {
+      setBusy(null);
+    }
+  };
   const saveModel = async (value: Config, apiKey: string) => {
     setBusy("验证模型");
     setNotice(null);
@@ -577,6 +669,14 @@ export default function App() {
   };
   const exportBook = async (format: "txt" | "epub") => {
     if (!detail) return [];
+    const polish = detail.polish;
+    if (polish && !(polish.finished && polish.failed === 0)) {
+      const confirmed = await confirmDialog(
+        "润色尚未全部完成，导出的内容可能同时包含初稿和已润色译文。仍要导出吗？",
+        { title: "导出提醒", kind: "warning", okLabel: "继续导出", cancelLabel: "取消" },
+      );
+      if (!confirmed) return [];
+    }
     setBusy("导出");
     try {
       const output = await invoke<string>("ui_export", {
@@ -591,13 +691,18 @@ export default function App() {
       setBusy(null);
     }
   };
-  const saveGeneral = async (visibleSegments: number, retranslationConcurrency: number) => {
+  const saveGeneral = async (
+    visibleSegments: number,
+    retranslationConcurrency: number,
+    polishConcurrency: number,
+  ) => {
     setBusy("保存通用设置");
     setNotice(null);
     try {
       const next = await invoke<Bootstrap>("ui_save_general", {
         visibleSegments,
         retranslationConcurrency,
+        polishConcurrency,
       });
       setBootstrap(next);
       setNotice("通用设置已保存");
@@ -692,6 +797,7 @@ export default function App() {
               tray={tray}
               setTray={setTray}
               translating={busy === "翻译"}
+              busy={Boolean(busy)}
               ready={detail.taskInitialized}
               onTranslate={() => translate(chapterIndex)}
               onExport={exportBook}
@@ -718,7 +824,6 @@ export default function App() {
           {view === "terms" && (
             <TermsView
               detail={detail}
-              config={bootstrap?.config}
               taskBusy={Boolean(busy)}
               retranslationProgress={retranslationProgress}
               onRetranslate={retranslateItems}
@@ -752,6 +857,9 @@ export default function App() {
             }
             now={now}
             onPolish={savePipeline}
+            onPolishStart={(retryFailed) => void startPolish(retryFailed)}
+            onCancel={() => void cancelTask()}
+            polishing={busy === "润色" || busy === "重试润色"}
             onInitialize={initializeTask}
             onSaveConfig={saveTaskConfig}
             onReanalyze={reanalyze}
@@ -1060,6 +1168,7 @@ function Workspace({
   tray,
   setTray,
   translating,
+  busy,
   ready,
   onTranslate,
   onExport,
@@ -1074,6 +1183,7 @@ function Workspace({
   tray: TrayName;
   setTray: (t: TrayName) => void;
   translating: boolean;
+  busy: boolean;
   ready: boolean;
   onTranslate: () => void;
   onExport: (f: "txt" | "epub") => void;
@@ -1132,7 +1242,14 @@ function Workspace({
           </button>
         )}
       </section>
-      <Tray detail={detail} tray={tray} setTray={setTray} onExport={onExport} onOpenTerms={onOpenTerms} />
+      <Tray
+        detail={detail}
+        tray={tray}
+        setTray={setTray}
+        busy={busy}
+        onExport={onExport}
+        onOpenTerms={onOpenTerms}
+      />
     </div>
   );
 }
@@ -1154,6 +1271,11 @@ function SegmentCard({ segment }: { segment: Segment }) {
       <div className="segment-target">
         <header>
           <span>{segment.target?.length ?? 0} 字</span>
+          {segment.polish_status && (
+            <em className={`polish-${segment.polish_status}`}>
+              {polishStatusText[segment.polish_status]}
+            </em>
+          )}
           <b className={segment.status}>{statusText[segment.status]}</b>
         </header>
         {segment.target ? (
@@ -1186,12 +1308,14 @@ function Tray({
   detail,
   tray,
   setTray,
+  busy,
   onExport,
   onOpenTerms,
 }: {
   detail: Detail;
   tray: TrayName;
   setTray: (t: TrayName) => void;
+  busy: boolean;
   onExport: (f: "txt" | "epub") => void;
   onOpenTerms: () => void;
 }) {
@@ -1219,11 +1343,19 @@ function Tray({
           </button>
         </div>
         <div className="export-menu">
-          <button className="icon-label" onClick={() => onExport("txt")}>
+          <button
+            className="icon-label"
+            disabled={busy}
+            onClick={() => onExport("txt")}
+          >
             <Download />
             TXT
           </button>
-          <button className="icon-label" onClick={() => onExport("epub")}>
+          <button
+            className="icon-label"
+            disabled={busy}
+            onClick={() => onExport("epub")}
+          >
             <Download />
             EPUB
           </button>
@@ -1322,6 +1454,9 @@ function Inspector({
   translationTiming,
   now,
   onPolish,
+  onPolishStart,
+  onCancel,
+  polishing,
   onInitialize,
   onSaveConfig,
   onReanalyze,
@@ -1334,6 +1469,9 @@ function Inspector({
   translationTiming: TranslationTiming | null;
   now: number;
   onPolish: (v: boolean) => Promise<void>;
+  onPolishStart: (retryFailed: boolean) => void;
+  onCancel: () => void;
+  polishing: boolean;
   onInitialize: (value: TaskConfigDraft) => void;
   onSaveConfig: (value: TaskConfigDraft) => Promise<void>;
   onReanalyze: (value: TaskConfigDraft) => Promise<void>;
@@ -1379,6 +1517,13 @@ function Inspector({
       ? (translationElapsed / translationTiming.completedRequests) *
         translationRemaining
       : null;
+  const polish = detail.polish;
+  const translationComplete = detail.project.status === "translated";
+  const polishPercent = polish
+    ? Math.round(
+        ((polish.succeeded + polish.failed) / Math.max(1, polish.total)) * 100,
+      )
+    : 0;
   return (
     <aside className="inspector">
       <div className="inspector-tabs">
@@ -1483,13 +1628,13 @@ function Inspector({
               </div>
             </details>
             <label className="switch-row">
-              <span>译后润色</span>
+              <span>全书翻译完成后自动润色</span>
               <button
                 type="button"
                 className={`toggle ${config?.pipeline.polish ? "on" : ""}`}
                 disabled={!config || Boolean(busy)}
                 aria-pressed={Boolean(config?.pipeline.polish)}
-                aria-label="译后润色"
+                aria-label="全书翻译完成后自动润色"
                 onClick={() => void onPolish(!config?.pipeline.polish)}
               >
                 <i />
@@ -1555,6 +1700,82 @@ function Inspector({
                   </p>
                 </>
               )}
+              <hr />
+              <header><b>润色进度</b><strong>{polish ? `${polishPercent}%` : "未开始"}</strong></header>
+              {polish ? (
+                <>
+                  <div className="big-progress">
+                    <i style={{ width: `${polishPercent}%` }} />
+                  </div>
+                  <p className={polish.failed > 0 ? "error" : polish.pending > 0 ? "active" : "done"}>
+                    <CircleDashed />
+                    共 {polish.total} 批 · 成功 {polish.succeeded} · 失败 {polish.failed} · 待处理 {polish.pending}
+                    {polish.pendingSegments > 0 && ` · 待润色段落 ${polish.pendingSegments}`}
+                  </p>
+                  {polish.lastError && <p className="error"><Circle />{polish.lastError}</p>}
+                </>
+              ) : (
+                <p className="active">
+                  <CircleDashed />
+                  {translationComplete ? "全书初稿已完成，可开始润色" : "全书翻译完成后可开始润色"}
+                </p>
+              )}
+              <div className="polish-actions">
+                {polishing ? (
+                  <button type="button" className="cancel icon-label" onClick={onCancel}>
+                    <SquareStop />
+                    停止润色
+                  </button>
+                ) : (
+                  <>
+                    {polish && !polish.finished && (
+                      <button
+                        type="button"
+                        className="primary icon-label"
+                        disabled={Boolean(busy)}
+                        onClick={() => onPolishStart(false)}
+                      >
+                        <Play />
+                        继续润色
+                      </button>
+                    )}
+                    {(!polish ||
+                      (polish.finished &&
+                        polish.failed === 0 &&
+                        polish.pendingSegments > 0)) && (
+                      <button
+                        type="button"
+                        className="primary icon-label"
+                        disabled={Boolean(busy) || !translationComplete}
+                        onClick={() => onPolishStart(false)}
+                      >
+                        <Play />
+                        开始润色
+                      </button>
+                    )}
+                    {polish && polish.failed > 0 && (
+                      <button
+                        type="button"
+                        className="secondary icon-label"
+                        disabled={Boolean(busy)}
+                        onClick={() => onPolishStart(true)}
+                      >
+                        <RotateCcw />
+                        重试失败批次
+                      </button>
+                    )}
+                    {polish &&
+                      polish.finished &&
+                      polish.failed === 0 &&
+                      polish.pendingSegments === 0 && (
+                        <span className="polish-done">
+                          <CheckCircle2 />
+                          全部段落已润色
+                        </span>
+                      )}
+                  </>
+                )}
+              </div>
               <p className={detail.project.status === "failed" ? "error" : "active"}>
                 <CircleDashed />
                 {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
@@ -1729,14 +1950,12 @@ function ProjectCover({
 }
 function TermsView({
   detail,
-  config,
   taskBusy,
   retranslationProgress,
   onRetranslate,
   onReload,
 }: {
   detail: Detail | null;
-  config?: Config;
   taskBusy: boolean;
   retranslationProgress: RetranslationProgress | null;
   onRetranslate: (itemIds: string[]) => Promise<void>;
@@ -1835,7 +2054,7 @@ function TermsView({
     if (!detail || !selected.size) return;
     const chapters = new Set(impact.filter((item) => selected.has(item.id)).map((item) => item.chapter)).size;
     const confirmed = await confirmDialog(
-      `将重译 ${selected.size} 项、涉及 ${chapters} 章${config?.pipeline.polish ? "，并重新执行润色" : ""}。此操作会消耗 API Token，是否继续？`,
+      `将重译 ${selected.size} 项、涉及 ${chapters} 章；已有润色结果会失效，可在之后重新润色。此操作会消耗 API Token，是否继续？`,
       { title: "确认选择性重译", kind: "warning" },
     );
     if (!confirmed) return;
@@ -2019,7 +2238,11 @@ function SettingsView({
   configPath?: string;
   busy: string | null;
   onSaveModel: (value: Config, key: string) => Promise<void>;
-  onSaveGeneral: (visibleSegments: number, retranslationConcurrency: number) => Promise<void>;
+  onSaveGeneral: (
+    visibleSegments: number,
+    retranslationConcurrency: number,
+    polishConcurrency: number,
+  ) => Promise<void>;
 }) {
   const [tab, setTab] = useState<"model" | "general">("model");
   const [draft, setDraft] = useState(config);
@@ -2029,6 +2252,9 @@ function SettingsView({
   const [retranslationConcurrency, setRetranslationConcurrency] = useState(
     config?.general.retranslation_concurrency ?? 3,
   );
+  const [polishConcurrency, setPolishConcurrency] = useState(
+    config?.general.polish_concurrency ?? 3,
+  );
   const [apiKey, setApiKey] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [presetName, setPresetName] = useState("");
@@ -2037,6 +2263,7 @@ function SettingsView({
     setDraft(config);
     setVisibleSegments(config?.general.visible_segments ?? 100);
     setRetranslationConcurrency(config?.general.retranslation_concurrency ?? 3);
+    setPolishConcurrency(config?.general.polish_concurrency ?? 3);
     setApiKey("");
     setShowKey(false);
     const preset = providerPresets.find((item) =>
@@ -2223,6 +2450,18 @@ function SettingsView({
                 “重译全部已处理冲突”和选择性重译同时处理的最大项目数。
               </small>
             </Field>
+            <Field label="润色并发数量">
+              <input
+                type="number"
+                min="1"
+                step="1"
+                value={polishConcurrency}
+                onChange={(e) => setPolishConcurrency(Number(e.target.value))}
+              />
+              <small>
+                并行润色批次的最大数量，默认 3；该设置独立于重译并发。
+              </small>
+            </Field>
             <div className="settings-actions">
               <button
                 className="primary"
@@ -2231,9 +2470,17 @@ function SettingsView({
                   visibleSegments < 1 ||
                   !Number.isInteger(visibleSegments) ||
                   retranslationConcurrency < 1 ||
-                  !Number.isInteger(retranslationConcurrency)
+                  !Number.isInteger(retranslationConcurrency) ||
+                  polishConcurrency < 1 ||
+                  !Number.isInteger(polishConcurrency)
                 }
-                onClick={() => void onSaveGeneral(visibleSegments, retranslationConcurrency)}
+                onClick={() =>
+                  void onSaveGeneral(
+                    visibleSegments,
+                    retranslationConcurrency,
+                    polishConcurrency,
+                  )
+                }
               >
                 {savingGeneral ? "正在保存…" : "保存通用设置"}
               </button>
@@ -2381,6 +2628,14 @@ function eventText(event: string) {
         retranslation_completed: "选择性重译完成",
         retranslated: "内容已重译",
         retranslation_failed: "内容重译失败",
+        polish_started: "开始润色",
+        polish_batch_completed: "润色批次完成",
+        polish_batch_failed: "润色批次失败",
+        polish_completed: "润色完成",
+        polish_failed: "润色失败",
+        polish_cancelled: "润色已取消",
+        polish_invalidated: "润色快照已失效",
+        polish_retry_requested: "重试润色失败批次",
         translation_restored: "旧译文已恢复",
         exported: "成品已导出",
         failed: "任务失败",
@@ -2406,7 +2661,11 @@ function browserPreview(): Bootstrap {
       segment: { max_chars_per_segment: 1200, max_chars_per_batch: 1800 },
       pipeline: { polish: false, recent_context_chars: 2000 },
       analysis: { full_book: true },
-      general: { visible_segments: 100, retranslation_concurrency: 3 },
+      general: {
+        visible_segments: 100,
+        retranslation_concurrency: 3,
+        polish_concurrency: 3,
+      },
     },
   };
 }

@@ -535,35 +535,7 @@ impl TermStore {
     }
 
     pub fn relevant(&self, source_text: &str) -> Result<Vec<Term>, String> {
-        let terms = self.list()?;
-        let direct = terms
-            .iter()
-            .filter(|term| matches_text(source_text, &term.source))
-            .map(|term| term.source.clone())
-            .collect::<HashSet<_>>();
-        let mut aliases = HashMap::<String, Vec<usize>>::new();
-        for (index, term) in terms.iter().enumerate() {
-            for alias in &term.aliases {
-                if matches_text(source_text, alias) {
-                    aliases.entry(normalize(alias)).or_default().push(index);
-                }
-            }
-        }
-        let unambiguous = aliases
-            .values()
-            .filter(|matches| matches.len() == 1)
-            .map(|matches| matches[0])
-            .collect::<HashSet<_>>();
-        Ok(terms
-            .into_iter()
-            .enumerate()
-            .filter(|(index, term)| {
-                term.policy != TermPolicy::NonFixed
-                    && term.policy != TermPolicy::Ignored
-                    && (direct.contains(&term.source) || unambiguous.contains(index))
-            })
-            .map(|(_, term)| term)
-            .collect())
+        Ok(relevant_terms(&self.list()?, source_text))
     }
 
     pub fn alias_conflicts(&self) -> Result<Vec<AliasConflict>, String> {
@@ -638,6 +610,37 @@ impl TermStore {
             .map_err(|error| format!("failed to complete term extraction: {error}"))?;
         Ok(())
     }
+}
+
+pub fn relevant_terms(terms: &[Term], source_text: &str) -> Vec<Term> {
+    let direct = terms
+        .iter()
+        .filter(|term| matches_text(source_text, &term.source))
+        .map(|term| term.source.clone())
+        .collect::<HashSet<_>>();
+    let mut aliases = HashMap::<String, Vec<usize>>::new();
+    for (index, term) in terms.iter().enumerate() {
+        for alias in &term.aliases {
+            if matches_text(source_text, alias) {
+                aliases.entry(normalize(alias)).or_default().push(index);
+            }
+        }
+    }
+    let unambiguous = aliases
+        .values()
+        .filter(|matches| matches.len() == 1)
+        .map(|matches| matches[0])
+        .collect::<HashSet<_>>();
+    terms
+        .iter()
+        .enumerate()
+        .filter(|(index, term)| {
+            term.policy != TermPolicy::NonFixed
+                && term.policy != TermPolicy::Ignored
+                && (direct.contains(&term.source) || unambiguous.contains(index))
+        })
+        .map(|(_, term)| term.clone())
+        .collect()
 }
 
 pub async fn extract_terms<C: TranslationClient + ?Sized>(

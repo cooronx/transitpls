@@ -3,6 +3,7 @@ use crate::export::{self, ExportFormat};
 use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
 use crate::parser;
+use crate::polish::{self, PolishSummary};
 use crate::state;
 use crate::terms::{Term, TermCandidate, TermConflict, TermPolicy, TermStore};
 use base64::Engine;
@@ -57,6 +58,7 @@ pub struct ProjectDetail {
     term_conflicts: Vec<TermConflict>,
     pending_conflicts: usize,
     report: Option<serde_json::Value>,
+    polish: Option<PolishSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -157,10 +159,12 @@ pub async fn ui_verify_and_save_model(
 pub fn ui_save_general(
     visible_segments: usize,
     retranslation_concurrency: usize,
+    polish_concurrency: usize,
 ) -> Result<Bootstrap, String> {
     let mut loaded = config::load(None)?;
     loaded.value.general.visible_segments = visible_segments;
     loaded.value.general.retranslation_concurrency = retranslation_concurrency;
+    loaded.value.general.polish_concurrency = polish_concurrency;
     config::save_default(&loaded.value)?;
     ui_bootstrap()
 }
@@ -337,6 +341,14 @@ pub async fn ui_transit(
     chapter: Option<usize>,
     mock_client: bool,
 ) -> Result<ProjectDetail, String> {
+    if registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .contains_key(&project_id)
+    {
+        return Err("当前项目有任务运行中，请等待任务结束后再翻译".to_string());
+    }
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
@@ -410,6 +422,94 @@ pub async fn ui_transit(
 }
 
 #[tauri::command]
+pub async fn ui_polish(
+    app: tauri::AppHandle,
+    registry: tauri::State<'_, TaskRegistry>,
+    project_id: String,
+    retry_failed: bool,
+    mock_client: bool,
+) -> Result<ProjectDetail, String> {
+    if registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .contains_key(&project_id)
+    {
+        return Err("当前项目有任务运行中，请等待任务结束后再润色".to_string());
+    }
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let task_id = project_id.clone();
+    let mut task = tokio::spawn(crate::cli::polish_project(
+        None,
+        PathBuf::from(&project.source_path),
+        retry_failed,
+        mock_client,
+    ));
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .insert(task_id.clone(), task.abort_handle());
+    let mut interval = tokio::time::interval(Duration::from_millis(500));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_snapshot = None;
+    let result = loop {
+        tokio::select! {
+            result = &mut task => break result,
+            _ = interval.tick() => {
+                if let Ok(detail) = project_detail(&loaded.state_dir, &project_id) {
+                    let snapshot = ProgressSnapshot::from(&detail);
+                    if last_snapshot.as_ref() != Some(&snapshot) {
+                        let _ = app.emit("polish-progress", &detail);
+                        last_snapshot = Some(snapshot);
+                    }
+                }
+            }
+        }
+    };
+    registry
+        .tasks
+        .lock()
+        .map_err(|_| "task registry lock is poisoned".to_string())?
+        .remove(&task_id);
+    let project = match result {
+        Ok(Ok(project)) => project,
+        Ok(Err(error)) => {
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "polish_failed",
+                serde_json::json!({ "error": error }),
+            );
+            return Err(error);
+        }
+        Err(error) if error.is_cancelled() => {
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "polish_cancelled",
+                serde_json::json!({}),
+            );
+            return Err("润色任务已取消，已保存的结果会保留".to_string());
+        }
+        Err(error) => {
+            let detail = format!("polish task failed: {error}");
+            let _ = state::append_log(
+                &loaded.state_dir,
+                &project,
+                "polish_failed",
+                serde_json::json!({ "error": detail }),
+            );
+            return Err(detail);
+        }
+    };
+    let detail = project_detail(&loaded.state_dir, &project.id)?;
+    let _ = app.emit("polish-progress", &detail);
+    Ok(detail)
+}
+
+#[tauri::command]
 pub fn ui_cancel_task(
     registry: tauri::State<'_, TaskRegistry>,
     task_id: String,
@@ -434,6 +534,7 @@ pub fn ui_resolve_term(project_id: String, source: String, target: String) -> Re
     let store =
         TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
     store.resolve(&source, &target)?;
+    polish::invalidate_round(&loaded.state_dir, &project.id)?;
     state::append_log(
         &loaded.state_dir,
         &project,
@@ -453,6 +554,7 @@ pub fn ui_set_term_policy(
     let store =
         TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
     store.set_policy(&source, policy)?;
+    polish::invalidate_round(&loaded.state_dir, &project.id)?;
     state::append_log(
         &loaded.state_dir,
         &project,
@@ -468,6 +570,7 @@ pub fn ui_undo_term_resolution(project_id: String, source: String) -> Result<(),
     let store =
         TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
     store.undo_resolution(&source)?;
+    polish::invalidate_round(&loaded.state_dir, &project.id)?;
     state::append_log(
         &loaded.state_dir,
         &project,
@@ -562,6 +665,7 @@ pub fn ui_restore_translation(project_id: String, item_id: String) -> Result<(),
     let mut chapters = state::load_chapters(&loaded.state_dir, &project)?;
     let chapter_index = restore_translation(&mut chapters, &item_id)?;
     state::write_chapter(&loaded.state_dir, &project, &chapters[chapter_index])?;
+    polish::invalidate_round(&loaded.state_dir, &project.id)?;
     state::append_log(
         &loaded.state_dir,
         &project,
@@ -592,6 +696,10 @@ fn restore_translation(chapters: &mut [Chapter], item_id: &str) -> Result<usize,
                 && segment.source.trim() == chapter.title.trim()
             {
                 segment.target = Some(previous.clone());
+                segment.polish_status = segment
+                    .target_before_polish
+                    .is_some()
+                    .then_some(crate::model::PolishStatus::Pending);
             }
         }
         Ok(chapter_index)
@@ -616,6 +724,10 @@ fn restore_translation(chapters: &mut [Chapter], item_id: &str) -> Result<usize,
         if let Some(current) = current {
             segment.meta["previous_target"] = serde_json::Value::String(current);
         }
+        segment.polish_status = segment
+            .target_before_polish
+            .is_some()
+            .then_some(crate::model::PolishStatus::Pending);
         segment
             .meta
             .as_object_mut()
@@ -813,6 +925,7 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
     };
     let logs = read_logs(&directory.join("logs.txt"))?;
     let task_initialized = initialization_completed(state_dir, &project);
+    let polish = polish::read_summary(state_dir, &project.id, &chapters).unwrap_or(None);
     Ok(ProjectDetail {
         project,
         task_initialized,
@@ -826,6 +939,7 @@ fn project_detail(state_dir: &Path, project_id: &str) -> Result<ProjectDetail, S
             .sum(),
         term_conflicts,
         report,
+        polish,
     })
 }
 
@@ -842,6 +956,8 @@ struct ProgressSnapshot {
     updated_at: String,
     translated_segments: usize,
     log_entries: usize,
+    polish_succeeded: usize,
+    polish_pending: usize,
 }
 
 impl From<&ProjectDetail> for ProgressSnapshot {
@@ -855,6 +971,8 @@ impl From<&ProjectDetail> for ProgressSnapshot {
                 .filter(|segment| segment.target.is_some())
                 .count(),
             log_entries: detail.logs.len(),
+            polish_succeeded: detail.polish.as_ref().map_or(0, |polish| polish.succeeded),
+            polish_pending: detail.polish.as_ref().map_or(0, |polish| polish.pending),
         }
     }
 }
@@ -958,6 +1076,7 @@ mod tests {
                     source: "Hello world".to_string(),
                     target: None,
                     target_before_polish: None,
+                    polish_status: None,
                     kind: SegmentKind::Paragraph,
                     status: ItemStatus::Pending,
                     source_hash: "fixture".to_string(),
@@ -1009,6 +1128,7 @@ mod tests {
                 source: "Chapter Alice".to_string(),
                 target: Some("新标题".to_string()),
                 target_before_polish: None,
+                polish_status: None,
                 kind: SegmentKind::Heading,
                 status: ItemStatus::Translated,
                 source_hash: "fixture".to_string(),
@@ -1033,6 +1153,7 @@ mod tests {
             source: source.to_string(),
             target: Some("译文".to_string()),
             target_before_polish: None,
+            polish_status: None,
             kind,
             status: ItemStatus::Translated,
             source_hash: "fixture".to_string(),

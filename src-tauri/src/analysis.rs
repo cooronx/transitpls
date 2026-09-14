@@ -366,6 +366,7 @@ mod tests {
                     source: "Alice entered the city.".to_string(),
                     target: None,
                     target_before_polish: None,
+                    polish_status: None,
                     kind: SegmentKind::Paragraph,
                     status: ItemStatus::Pending,
                     source_hash: "hash".to_string(),

@@ -7,6 +7,7 @@ pub mod llm;
 pub mod model;
 pub mod parser;
 pub mod pipeline;
+pub mod polish;
 pub mod review;
 pub mod state;
 pub mod terms;
@@ -31,6 +32,7 @@ pub fn run() {
             ui::ui_initialize,
             ui::ui_reanalyze,
             ui::ui_transit,
+            ui::ui_polish,
             ui::ui_cancel_task,
             ui::ui_resolve_term,
             ui::ui_set_term_policy,

@@ -45,7 +45,7 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 - 按章节和字符预算分批翻译，保存每批结果；任务中断后可以从已有进度继续。
 - 支持 OpenAI Chat Completions、OpenAI Responses 和 Anthropic Messages 协议，可配置兼容接口、模型、超时与重试策略。
 - 自动提取术语并维护术语库，保留译名冲突供人工裁定，也可重新翻译受影响内容。
-- 支持译后润色、单段重译、运行日志和 Token 用量记录。
+- 支持全书翻译完成后并行润色、单段重译、运行日志和 Token 用量记录。
 - 将完成的项目导出为 TXT 或 EPUB，并同步翻译后的章节标题与目录。
 
 <p align="right">（<a href="#readme-top">返回顶部</a>）</p>
