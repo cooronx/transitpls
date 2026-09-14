@@ -1060,54 +1060,6 @@ button:disabled {
     color: #74889e
 }
 
-.live-streams {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 10px 13px
-}
-
-.live-streams>div {
-    border: 1px solid #e4ebf1;
-    border-radius: 6px;
-    background: #fbfdfe
-}
-
-.live-streams>div.done {
-    opacity: .68
-}
-
-.live-streams header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 5px 10px;
-    border-bottom: 1px solid #edf1f4;
-    color: #5d7488
-}
-
-.live-streams header b {
-    color: var(--teal)
-}
-
-.live-streams header span {
-    font-family: monospace;
-    color: #9aabbc
-}
-
-.live-streams pre {
-    margin: 0;
-    padding: 8px 10px;
-    max-height: 132px;
-    overflow: auto;
-    font-family: monospace;
-    font-size: 12px;
-    line-height: 1.5;
-    color: #43586c;
-    white-space: pre-wrap;
-    word-break: break-all
-}
-
 .inspector {
     width: 292px;
     flex: none;

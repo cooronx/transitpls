@@ -1,6 +1,6 @@
 use crate::config::{self, AppConfig};
 use crate::export::{self, ExportFormat};
-use crate::llm::{RigClient, StreamChunk, StreamObserver, TranslationClient};
+use crate::llm::{RigClient, TranslationClient};
 use crate::model::{Chapter, ProjectState};
 use crate::parser;
 use crate::polish::{self, PolishSummary};
@@ -11,7 +11,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::Emitter;
 use tokio::task::AbortHandle;
@@ -91,71 +91,6 @@ pub struct LogEntry {
     timestamp: String,
     event: String,
     details: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LlmStreamEvent {
-    project_id: String,
-    request_id: u64,
-    stage: String,
-    delta: String,
-    done: bool,
-}
-
-/// Coalesces token-level deltas per request and forwards them to the webview.
-/// Emitting every delta would flood the IPC channel during long batches, so
-/// pending text flushes on a fixed cadence instead.
-fn spawn_stream_forwarder(app: tauri::AppHandle, project_id: String) -> StreamObserver {
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<StreamChunk>();
-    tokio::spawn(async move {
-        let mut pending: HashMap<u64, (String, String, bool)> = HashMap::new();
-        let mut ticker = tokio::time::interval(Duration::from_millis(120));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            tokio::select! {
-                chunk = receiver.recv() => match chunk {
-                    Some(chunk) => {
-                        let entry = pending
-                            .entry(chunk.request_id)
-                            .or_insert_with(|| (chunk.stage.to_string(), String::new(), false));
-                        entry.1.push_str(&chunk.delta);
-                        entry.2 |= chunk.done;
-                    }
-                    None => {
-                        flush_stream_events(&app, &project_id, &mut pending);
-                        break;
-                    }
-                },
-                _ = ticker.tick() => flush_stream_events(&app, &project_id, &mut pending),
-            }
-        }
-    });
-    Arc::new(move |chunk| {
-        let _ = sender.send(chunk);
-    })
-}
-
-fn flush_stream_events(
-    app: &tauri::AppHandle,
-    project_id: &str,
-    pending: &mut HashMap<u64, (String, String, bool)>,
-) {
-    for (request_id, (stage, delta, done)) in pending.drain() {
-        if delta.is_empty() && !done {
-            continue;
-        }
-        let _ = app.emit(
-            "llm-stream",
-            LlmStreamEvent {
-                project_id: project_id.to_string(),
-                request_id,
-                stage,
-                delta,
-                done,
-            },
-        );
-    }
 }
 
 #[tauri::command]
@@ -320,7 +255,6 @@ pub async fn ui_import(
 
 #[tauri::command]
 pub async fn ui_initialize(
-    app: tauri::AppHandle,
     registry: tauri::State<'_, TaskRegistry>,
     project_id: String,
     mock_client: bool,
@@ -329,7 +263,6 @@ pub async fn ui_initialize(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let source_language = loaded.value.language.source;
     let task_id = "initialize".to_string();
-    let observer = spawn_stream_forwarder(app, project_id.clone());
     let task = tokio::spawn(crate::cli::initialize_project(
         None,
         PathBuf::from(project.source_path),
@@ -337,7 +270,6 @@ pub async fn ui_initialize(
         None,
         mock_client,
         false,
-        Some(observer),
     ));
     registry
         .tasks
@@ -363,7 +295,6 @@ pub async fn ui_initialize(
 
 #[tauri::command]
 pub async fn ui_reanalyze(
-    app: tauri::AppHandle,
     registry: tauri::State<'_, TaskRegistry>,
     project_id: String,
     mock_client: bool,
@@ -372,7 +303,6 @@ pub async fn ui_reanalyze(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let source_language = loaded.value.language.source;
     let task_id = "initialize".to_string();
-    let observer = spawn_stream_forwarder(app, project_id.clone());
     let task = tokio::spawn(crate::cli::initialize_project(
         None,
         PathBuf::from(project.source_path),
@@ -380,7 +310,6 @@ pub async fn ui_reanalyze(
         None,
         mock_client,
         true,
-        Some(observer),
     ));
     registry
         .tasks
@@ -423,13 +352,11 @@ pub async fn ui_transit(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let observer = spawn_stream_forwarder(app.clone(), project_id.clone());
     let mut task = tokio::spawn(crate::cli::transit_project(
         None,
         PathBuf::from(&project.source_path),
         chapter,
         mock_client,
-        Some(observer),
     ));
     registry
         .tasks
@@ -513,13 +440,11 @@ pub async fn ui_polish(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let observer = spawn_stream_forwarder(app.clone(), project_id.clone());
     let mut task = tokio::spawn(crate::cli::polish_project(
         None,
         PathBuf::from(&project.source_path),
         retry_failed,
         mock_client,
-        Some(observer),
     ));
     registry
         .tasks
@@ -839,14 +764,12 @@ pub async fn ui_retranslate(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
     let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let observer = spawn_stream_forwarder(app.clone(), project_id.clone());
     let mut task = tokio::spawn(crate::cli::retranslate_project(
         None,
         PathBuf::from(project.source_path),
         item_ids,
         mock_client,
         Some(progress_sender),
-        Some(observer),
     ));
     registry
         .tasks

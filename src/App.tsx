@@ -134,20 +134,6 @@ interface LogEntry {
   event: string;
   details: unknown;
 }
-interface LlmStream {
-  projectId: string;
-  requestId: number;
-  stage: string;
-  delta: string;
-  done: boolean;
-}
-interface LiveStream {
-  key: string;
-  requestId: number;
-  stage: string;
-  text: string;
-  done: boolean;
-}
 interface Config {
   language: { source: string; target: string };
   llm: {
@@ -216,7 +202,7 @@ type View =
   | "terms"
   | "settings"
   | "history";
-type TrayName = "tasks" | "issues" | "streams" | "logs";
+type TrayName = "tasks" | "issues" | "logs";
 
 const navItems: Array<{ id: View; icon: LucideIcon; label: string }> = [
   { id: "workspace", icon: Languages, label: "工作台" },
@@ -244,17 +230,6 @@ const termTypeText: Record<string, string> = {
   speech: "语言习惯",
   fixed_expr: "固定表达",
 };
-const stageText: Record<string, string> = {
-  model_verification: "连接测试",
-  language_identification: "语言识别",
-  book_style_analysis: "全书分析",
-  chapter_digest: "章节摘要",
-  book_synopsis: "全书梗概",
-  term_extraction: "术语提取",
-  polish: "润色",
-  title_translation: "标题翻译",
-  translation: "翻译",
-};
 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -265,7 +240,6 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [retranslationProgress, setRetranslationProgress] =
     useState<RetranslationProgress | null>(null);
-  const [liveStreams, setLiveStreams] = useState<Record<string, LiveStream>>({});
   const [translationTiming, setTranslationTiming] =
     useState<TranslationTiming | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -429,39 +403,6 @@ export default function App() {
     };
   }, []);
   useEffect(() => {
-    if (!isTauri()) return;
-    let disposed = false;
-    let stop: undefined | (() => void);
-    listen<LlmStream>("llm-stream", ({ payload }) => {
-      const key = `${payload.projectId}:${payload.requestId}`;
-      setLiveStreams((current) => {
-        const entry: LiveStream = {
-          key,
-          requestId: payload.requestId,
-          stage: payload.stage,
-          text: ((current[key]?.text ?? "") + payload.delta).slice(-4_000),
-          done: payload.done,
-        };
-        const entries = Object.values({ ...current, [key]: entry }).sort(
-          (left, right) => left.requestId - right.requestId,
-        );
-        while (entries.length > 6) entries.shift();
-        return Object.fromEntries(entries.map((value) => [value.key, value]));
-      });
-    })
-      .then((unlisten) => {
-        if (disposed) unlisten();
-        else stop = unlisten;
-      })
-      .catch((error) => {
-        if (!String(error).includes("invoke")) setNotice(String(error));
-      });
-    return () => {
-      disposed = true;
-      stop?.();
-    };
-  }, []);
-  useEffect(() => {
     const next = bootstrap?.config.general.visible_segments ?? 100;
     setVisibleSegmentCount(next);
     setDisplaySegmentCount(next);
@@ -479,9 +420,6 @@ export default function App() {
         ? { ...current, finishedAt: Date.now() }
         : current,
     );
-  }, [busy]);
-  useEffect(() => {
-    if (!busy) setLiveStreams({});
   }, [busy]);
 
   const run = async (label: string, action: () => Promise<Detail | void>) => {
@@ -815,12 +753,6 @@ export default function App() {
     () => matchingSegments.slice(0, displaySegmentCount),
     [matchingSegments, displaySegmentCount],
   );
-  const activeStreams = useMemo(() => {
-    const prefix = detail ? `${detail.project.id}:` : null;
-    return Object.values(liveStreams)
-      .filter((stream) => !prefix || stream.key.startsWith(prefix))
-      .sort((left, right) => left.requestId - right.requestId);
-  }, [liveStreams, detail?.project.id]);
   useEffect(() => {
     setDisplaySegmentCount(visibleSegmentCount);
   }, [chapterIndex, search, visibleSegmentCount]);
@@ -864,7 +796,6 @@ export default function App() {
               }
               tray={tray}
               setTray={setTray}
-              liveStreams={activeStreams}
               translating={busy === "翻译"}
               busy={Boolean(busy)}
               ready={detail.taskInitialized}
@@ -1236,7 +1167,6 @@ function Workspace({
   onShowMore,
   tray,
   setTray,
-  liveStreams,
   translating,
   busy,
   ready,
@@ -1252,7 +1182,6 @@ function Workspace({
   onShowMore: () => void;
   tray: TrayName;
   setTray: (t: TrayName) => void;
-  liveStreams: LiveStream[];
   translating: boolean;
   busy: boolean;
   ready: boolean;
@@ -1318,7 +1247,6 @@ function Workspace({
         tray={tray}
         setTray={setTray}
         busy={busy}
-        liveStreams={liveStreams}
         onExport={onExport}
         onOpenTerms={onOpenTerms}
       />
@@ -1381,7 +1309,6 @@ function Tray({
   tray,
   setTray,
   busy,
-  liveStreams,
   onExport,
   onOpenTerms,
 }: {
@@ -1389,7 +1316,6 @@ function Tray({
   tray: TrayName;
   setTray: (t: TrayName) => void;
   busy: boolean;
-  liveStreams: LiveStream[];
   onExport: (f: "txt" | "epub") => void;
   onOpenTerms: () => void;
 }) {
@@ -1408,12 +1334,6 @@ function Tray({
             onClick={() => setTray("issues")}
           >
             问题列表 <b>{detail.pendingConflicts}</b>
-          </button>
-          <button
-            className={tray === "streams" ? "active" : ""}
-            onClick={() => setTray("streams")}
-          >
-            实时输出 {liveStreams.length > 0 && <b>{liveStreams.length}</b>}
           </button>
           <button
             className={tray === "logs" ? "active" : ""}
@@ -1444,30 +1364,9 @@ function Tray({
       <div className="tray-content">
         {tray === "tasks" && <TaskTable detail={detail} />}{" "}
         {tray === "issues" && <IssueList detail={detail} onOpenTerms={onOpenTerms} />}{" "}
-        {tray === "streams" && <LiveOutput streams={liveStreams} />}
         {tray === "logs" && <LogList logs={detail.logs} />}
       </div>
     </section>
-  );
-}
-function LiveOutput({ streams }: { streams: LiveStream[] }) {
-  return streams.length ? (
-    <div className="live-streams">
-      {streams.map((stream) => (
-        <div key={stream.key} className={stream.done ? "done" : ""}>
-          <header>
-            <b>{stageText[stream.stage] ?? stream.stage}</b>
-            <span>
-              #{stream.requestId}
-              {stream.done && " · 已结束"}
-            </span>
-          </header>
-          <pre>{stream.text}</pre>
-        </div>
-      ))}
-    </div>
-  ) : (
-    <div className="panel-empty">模型逐字生成时会在这里实时显示输出</div>
   );
 }
 function TaskTable({ detail }: { detail: Detail }) {

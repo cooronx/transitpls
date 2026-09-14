@@ -1,7 +1,7 @@
 use crate::analysis;
 use crate::config::{self, AppConfig};
 use crate::export::{self, ExportFormat};
-use crate::llm::{self, MockClient, RecordingClient, RigClient, StreamObserver, TranslationClient};
+use crate::llm::{self, MockClient, RecordingClient, RigClient, TranslationClient};
 use crate::model::{Chapter, ItemStatus, PolishStatus, ProjectStatus, Segment, SegmentKind};
 use crate::parser;
 use crate::pipeline;
@@ -181,7 +181,6 @@ async fn execute(cli: Cli) -> Result<i32, String> {
                 args.max_segment_chars,
                 args.mock,
                 args.force_analysis,
-                None,
             )
             .await?;
             println!(
@@ -206,7 +205,7 @@ async fn execute(cli: Cli) -> Result<i32, String> {
             print_status(&project, &chapters);
             Ok(0)
         }
-        Command::Transit(args) => transit(args, &state_dir, &config, None).await,
+        Command::Transit(args) => transit(args, &state_dir, &config).await,
         Command::Polish(args) => polish_command(args, &state_dir, &config).await,
         Command::Review(args) => review_command(args, &state_dir).await,
         Command::Export(args) => export_file(args, &state_dir),
@@ -277,7 +276,6 @@ pub async fn initialize_project(
     max_segment_chars: Option<usize>,
     mock_client: bool,
     force_analysis: bool,
-    observer: Option<StreamObserver>,
 ) -> Result<(crate::model::ProjectState, bool), String> {
     if !input.is_file() {
         return Err(format!("input file does not exist: {}", input.display()));
@@ -307,7 +305,7 @@ pub async fn initialize_project(
         state::save_project(&state_dir, &project)?;
     }
     let result = async {
-        let client = build_client(&config, mock_client, &state_dir, &project, observer)?;
+        let client = build_client(&config, mock_client, &state_dir, &project)?;
         analysis::prepare(
             client.as_ref(),
             &state_dir,
@@ -372,7 +370,6 @@ pub async fn transit_project(
     input: PathBuf,
     chapter: Option<usize>,
     mock_client: bool,
-    observer: Option<StreamObserver>,
 ) -> Result<crate::model::ProjectState, String> {
     let loaded = config::load(config_path.as_deref())?;
     transit(
@@ -383,7 +380,6 @@ pub async fn transit_project(
         },
         &loaded.state_dir,
         &loaded.value,
-        observer,
     )
     .await?;
     state::load_for_source(&loaded.state_dir, &input)
@@ -394,7 +390,6 @@ pub async fn polish_project(
     input: PathBuf,
     retry_failed: bool,
     mock_client: bool,
-    observer: Option<StreamObserver>,
 ) -> Result<crate::model::ProjectState, String> {
     let loaded = config::load(config_path.as_deref())?;
     let mut project = state::load_for_source(&loaded.state_dir, &input)?;
@@ -407,7 +402,6 @@ pub async fn polish_project(
         mock_client,
         &loaded.state_dir,
         &project,
-        observer,
     )?);
     let store = term_store(&loaded.state_dir, &project)?;
     let terms = store.list()?;
@@ -461,7 +455,7 @@ async fn polish_command(
     let mut chapters = state::load_chapters(state_dir, &project)?;
     let analysis = load_translation_analysis(state_dir, &project, &chapters, config)?;
     let client: Arc<dyn TranslationClient> =
-        Arc::from(build_client(config, args.mock, state_dir, &project, None)?);
+        Arc::from(build_client(config, args.mock, state_dir, &project)?);
     let store = term_store(state_dir, &project)?;
     let terms = store.list()?;
     if args.retry_failed {
@@ -521,7 +515,6 @@ pub async fn retranslate_project(
     item_ids: Vec<String>,
     mock_client: bool,
     progress: Option<tokio::sync::mpsc::UnboundedSender<RetranslationProgress>>,
-    observer: Option<StreamObserver>,
 ) -> Result<crate::model::ProjectState, String> {
     let loaded = config::load(config_path.as_deref())?;
     let mut project = state::load_for_source(&loaded.state_dir, &input)?;
@@ -534,7 +527,6 @@ pub async fn retranslate_project(
         mock_client,
         &loaded.state_dir,
         &project,
-        observer,
     )?);
     let store = term_store(&loaded.state_dir, &project)?;
     let total = item_ids.len();
@@ -1027,7 +1019,6 @@ async fn transit(
     args: TransitArgs,
     state_dir: &std::path::Path,
     config: &AppConfig,
-    observer: Option<StreamObserver>,
 ) -> Result<i32, String> {
     let mut project = state::load_for_source(state_dir, &args.input)?;
     let _lock = state::acquire_project_lock(state_dir, &project)?;
@@ -1041,9 +1032,8 @@ async fn transit(
         }
     }
     let analysis = load_translation_analysis(state_dir, &project, &chapters, config)?;
-    let client: Arc<dyn TranslationClient> = Arc::from(build_client(
-        config, args.mock, state_dir, &project, observer,
-    )?);
+    let client: Arc<dyn TranslationClient> =
+        Arc::from(build_client(config, args.mock, state_dir, &project)?);
     let store = term_store(state_dir, &project)?;
     state::append_log(
         state_dir,
@@ -1808,7 +1798,6 @@ fn build_client(
     mock: bool,
     state_dir: &std::path::Path,
     project: &crate::model::ProjectState,
-    observer: Option<StreamObserver>,
 ) -> Result<Box<dyn TranslationClient>, String> {
     let recorder = UsageRecorder::new(
         &state::project_dir(state_dir, &project.id),
@@ -1824,10 +1813,6 @@ fn build_client(
             );
             error
         })?;
-        let client = match observer {
-            Some(observer) => client.with_observer(observer),
-            None => client,
-        };
         Box::new(client.with_recorder(recorder.clone()))
     };
     Ok(Box::new(RecordingClient::new(inner, recorder)))
@@ -1966,10 +1951,9 @@ mod tests {
         fs::write(project_dir.join("analysis.json"), "invalid JSON").unwrap();
         let config_path = dir.join("config.toml");
         fs::write(&config_path, "[paths]\nstate_dir = 'projects'\n").unwrap();
-        let error =
-            super::initialize_project(Some(config_path), source, None, None, true, false, None)
-                .await
-                .unwrap_err();
+        let error = super::initialize_project(Some(config_path), source, None, None, true, false)
+            .await
+            .unwrap_err();
         let log = fs::read_to_string(project_dir.join("logs.txt")).unwrap();
         let entry: serde_json::Value =
             serde_json::from_str(log.lines().last().unwrap().splitn(3, '\t').nth(2).unwrap())
@@ -2126,7 +2110,6 @@ mod tests {
             },
             &state_dir,
             &AppConfig::default(),
-            None,
         )
         .await
         .expect("mock transit should complete");
@@ -2176,7 +2159,6 @@ mod tests {
             },
             &state_dir,
             &AppConfig::default(),
-            None,
         )
         .await
         .expect("completed transit should be resumable");
@@ -2224,7 +2206,6 @@ mod tests {
             },
             &state_dir,
             &config,
-            None,
         )
         .await
         .expect("polished transit should complete");
@@ -2288,7 +2269,6 @@ mod tests {
             },
             &state_dir,
             &AppConfig::default(),
-            None,
         )
         .await
         .expect("transit should complete");
@@ -2309,7 +2289,7 @@ mod tests {
                 .is_none()
         );
 
-        polish_project(Some(config_path), source, false, true, None)
+        polish_project(Some(config_path), source, false, true)
             .await
             .expect("manual polish should complete");
 
@@ -2390,7 +2370,6 @@ mod tests {
             },
             &state_dir,
             &config,
-            None,
         )
         .await
         .expect("single chapter transit should complete");
@@ -2734,7 +2713,6 @@ mod tests {
             vec!["segment-1".to_string()],
             true,
             Some(sender),
-            None,
         )
         .await
         .unwrap();

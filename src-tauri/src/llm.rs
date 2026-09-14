@@ -10,11 +10,9 @@ use rig_core::completion::{
     CompletionResponse, Message, Usage,
 };
 use rig_core::http_client::ReqwestClient;
-use rig_core::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
+use rig_core::streaming::StreamingCompletionResponse;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
@@ -47,18 +45,6 @@ pub struct CompletionOutput {
     pub text: String,
     pub usage: Usage,
 }
-
-/// One incremental slice of a streamed completion, forwarded to optional
-/// observers (the desktop UI) while the full response is still assembled.
-#[derive(Debug, Clone)]
-pub struct StreamChunk {
-    pub request_id: u64,
-    pub stage: &'static str,
-    pub delta: String,
-    pub done: bool,
-}
-
-pub type StreamObserver = Arc<dyn Fn(StreamChunk) + Send + Sync>;
 
 pub struct MockClient;
 
@@ -225,8 +211,6 @@ pub struct RigClient {
     model_name: String,
     host: String,
     recorder: Option<crate::usage::UsageRecorder>,
-    observer: Option<StreamObserver>,
-    request_seq: AtomicU64,
 }
 
 pub struct RecordingClient {
@@ -307,11 +291,6 @@ fn stage_from_prompt(system_prompt: &str) -> &'static str {
 impl RigClient {
     pub fn with_recorder(mut self, recorder: crate::usage::UsageRecorder) -> Self {
         self.recorder = Some(recorder);
-        self
-    }
-
-    pub fn with_observer(mut self, observer: StreamObserver) -> Self {
-        self.observer = Some(observer);
         self
     }
 
@@ -399,8 +378,6 @@ impl RigClient {
             model_name,
             host,
             recorder: None,
-            observer: None,
-            request_seq: AtomicU64::new(0),
         })
     }
 
@@ -427,8 +404,7 @@ impl RigClient {
 }
 
 /// Opens a streamed completion; the caller drains it. Streaming keeps long
-/// batches alive on providers that drop unary requests, and lets observers
-/// surface progress while the response is still being generated.
+/// batches alive on providers that drop unary requests.
 async fn stream_completion<M: CompletionModel>(
     model: M,
     system_prompt: &str,
@@ -460,7 +436,6 @@ impl TranslationClient for RigClient {
     ) -> Result<CompletionOutput, String> {
         let started = std::time::Instant::now();
         let stage = stage_from_prompt(system_prompt);
-        let request_id = self.request_seq.fetch_add(1, Ordering::Relaxed);
         let response = match &self.model {
             RigModel::OpenAiChat(model) => {
                 stream_completion(model.clone(), system_prompt, user_prompt).await
@@ -482,31 +457,10 @@ impl TranslationClient for RigClient {
         };
         let mut stream_error = None;
         while let Some(item) = response.next().await {
-            match item {
-                Ok(StreamedAssistantContent::Text(text)) => {
-                    if let Some(observer) = &self.observer {
-                        observer(StreamChunk {
-                            request_id,
-                            stage,
-                            delta: text.text,
-                            done: false,
-                        });
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    stream_error = Some(error);
-                    break;
-                }
+            if let Err(error) = item {
+                stream_error = Some(error);
+                break;
             }
-        }
-        if let Some(observer) = &self.observer {
-            observer(StreamChunk {
-                request_id,
-                stage,
-                delta: String::new(),
-                done: true,
-            });
         }
         if let Some(error) = stream_error {
             let (event, message) = safe_completion_error(&error);

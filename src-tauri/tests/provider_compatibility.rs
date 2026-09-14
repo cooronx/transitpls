@@ -1,9 +1,8 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transitpls_lib::config::LlmConfig;
-use transitpls_lib::llm::{RecordingClient, RigClient, StreamObserver, TranslationClient};
+use transitpls_lib::llm::{RecordingClient, RigClient, TranslationClient};
 use transitpls_lib::usage::UsageRecorder;
 
 fn server(status: u16, body: String) -> (String, std::thread::JoinHandle<String>) {
@@ -176,28 +175,12 @@ async fn streaming_reports_deltas_and_assembles_the_final_text() {
         model: "fixture-model".into(),
         ..LlmConfig::default()
     };
-    let chunks = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&chunks);
-    let observer: StreamObserver = Arc::new(move |chunk| {
-        captured.lock().unwrap().push(chunk);
-    });
-    let client = RigClient::from_config_with_api_key(&config, "fixture-key")
-        .unwrap()
-        .with_observer(observer);
+    let client = RigClient::from_config_with_api_key(&config, "fixture-key").unwrap();
     let output = client.complete("system", "user").await.unwrap();
     let request = server.join().unwrap();
     assert!(request.contains("\"stream\":true"));
     assert_eq!(output.text, "translated");
     assert_eq!(output.usage.total_tokens, 14);
-    let chunks = chunks.lock().unwrap();
-    let deltas = chunks
-        .iter()
-        .filter(|chunk| !chunk.done)
-        .map(|chunk| chunk.delta.as_str())
-        .collect::<Vec<_>>();
-    assert_eq!(deltas, ["trans", "lated"]);
-    assert!(chunks.iter().all(|chunk| chunk.stage == "translation"));
-    assert!(chunks.last().unwrap().done);
 }
 
 #[tokio::test]
