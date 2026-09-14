@@ -1,11 +1,25 @@
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transitpls_lib::config::LlmConfig;
-use transitpls_lib::llm::{RecordingClient, RigClient, TranslationClient};
+use transitpls_lib::llm::{RecordingClient, RigClient, StreamObserver, TranslationClient};
 use transitpls_lib::usage::UsageRecorder;
 
 fn server(status: u16, body: String) -> (String, std::thread::JoinHandle<String>) {
+    server_with_content_type(status, "application/json", body)
+}
+
+fn sse_server(body: String) -> (String, std::thread::JoinHandle<String>) {
+    server_with_content_type(200, "text/event-stream", body)
+}
+
+fn server_with_content_type(
+    status: u16,
+    content_type: &str,
+    body: String,
+) -> (String, std::thread::JoinHandle<String>) {
+    let content_type = content_type.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
@@ -24,6 +38,7 @@ fn server(status: u16, body: String) -> (String, std::thread::JoinHandle<String>
                 Err(error) => panic!("{error}"),
             }
         };
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();
@@ -48,10 +63,43 @@ fn server(status: u16, body: String) -> (String, std::thread::JoinHandle<String>
                 }
             }
         }
-        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
         String::from_utf8(request).unwrap()
     });
     (url, handle)
+}
+
+/// Converts a complete Chat Completions fixture body into the SSE frames the
+/// streaming transport expects, so the compatibility matrix keeps exercising
+/// paths, headers, metadata and usage through the streaming client.
+fn chat_sse(response: &serde_json::Value) -> String {
+    let id = response["id"].as_str().unwrap_or("chatcmpl-test");
+    let model = response["model"].as_str().unwrap_or("fixture-model");
+    let choice = &response["choices"][0];
+    let content = choice["message"]["content"].as_str().unwrap_or_default();
+    let finish = choice["finish_reason"].as_str().unwrap_or("stop");
+    let mut terminal = serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]
+    });
+    if let Some(usage) = response.get("usage") {
+        terminal["usage"] = usage.clone();
+    }
+    format!(
+        "data: {}\n\ndata: {terminal}\n\ndata: [DONE]\n\n",
+        serde_json::json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": content},
+                "finish_reason": null
+            }]
+        })
+    )
 }
 
 #[tokio::test]
@@ -59,7 +107,7 @@ async fn chat_compatibility_matrix_records_usage_and_request_metadata() {
     let fixtures: serde_json::Value =
         serde_json::from_str(include_str!("fixtures/chat-compatible.json")).unwrap();
     for fixture in fixtures.as_array().unwrap() {
-        let (url, server) = server(200, fixture["response"].to_string());
+        let (url, server) = sse_server(chat_sse(&fixture["response"]));
         let root = std::env::temp_dir().join(format!(
             "transitpls-provider-{}-{}",
             std::process::id(),
@@ -115,6 +163,44 @@ async fn chat_compatibility_matrix_records_usage_and_request_metadata() {
 }
 
 #[tokio::test]
+async fn streaming_reports_deltas_and_assembles_the_final_text() {
+    let body = concat!(
+        "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"trans\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lated\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chatcmpl-test\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let (url, server) = sse_server(body.to_string());
+    let config = LlmConfig {
+        base_url: Some(format!("{url}/v1")),
+        model: "fixture-model".into(),
+        ..LlmConfig::default()
+    };
+    let chunks = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&chunks);
+    let observer: StreamObserver = Arc::new(move |chunk| {
+        captured.lock().unwrap().push(chunk);
+    });
+    let client = RigClient::from_config_with_api_key(&config, "fixture-key")
+        .unwrap()
+        .with_observer(observer);
+    let output = client.complete("system", "user").await.unwrap();
+    let request = server.join().unwrap();
+    assert!(request.contains("\"stream\":true"));
+    assert_eq!(output.text, "translated");
+    assert_eq!(output.usage.total_tokens, 14);
+    let chunks = chunks.lock().unwrap();
+    let deltas = chunks
+        .iter()
+        .filter(|chunk| !chunk.done)
+        .map(|chunk| chunk.delta.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(deltas, ["trans", "lated"]);
+    assert!(chunks.iter().all(|chunk| chunk.stage == "translation"));
+    assert!(chunks.last().unwrap().done);
+}
+
+#[tokio::test]
 async fn errors_are_contextual_redacted_and_recorded() {
     for (index, (status, body, expected)) in [
         (401, "<html>secret-key private prompt</html>", "authentication failed"),
@@ -132,7 +218,7 @@ async fn errors_are_contextual_redacted_and_recorded() {
         let client = RecordingClient::new(Box::new(client), recorder);
         let error = client.complete("private prompt", "private prompt").await.unwrap_err();
         server.join().unwrap();
-        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(expected), "case {index}: {error}");
         assert!(error.contains("provider=openai-chat") && error.contains("model=fixture-model") && error.contains("stage=translation"));
         let logs = std::fs::read_to_string(root.join("logs.txt")).unwrap();
         assert!(logs.contains("llm_failed"));
@@ -143,29 +229,56 @@ async fn errors_are_contextual_redacted_and_recorded() {
 
 #[tokio::test]
 async fn native_protocols_keep_their_paths_authentication_and_usage() {
+    let responses_body = serde_json::json!({
+        "id":"resp-test", "object":"response", "created_at":1, "status":"completed", "model":"fixture-model",
+        "output":[{"id":"msg-test","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK","annotations":[]}]}],
+        "usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}
+    });
+    let responses_sse = format!(
+        "data: {}\n\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.output_text.delta",
+            "item_id": "msg-test",
+            "output_index": 0,
+            "content_index": 0,
+            "sequence_number": 0,
+            "delta": "OK"
+        }),
+        serde_json::json!({
+            "type": "response.completed",
+            "sequence_number": 1,
+            "response": responses_body
+        })
+    );
+    let anthropic_sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-test\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"fixture-model\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":4}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
     for (provider, suffix, header, body) in [
         (
             "openai-responses",
             "/v1/responses",
             "authorization: bearer fixture-key",
-            serde_json::json!({
-                "id":"resp-test", "object":"response", "created_at":1, "status":"completed", "model":"fixture-model",
-                "output":[{"id":"msg-test","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"OK","annotations":[]}]}],
-                "usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}
-            }),
+            responses_sse,
         ),
         (
             "anthropic",
             "/v1/messages",
             "x-api-key: fixture-key",
-            serde_json::json!({
-                "id":"msg-test", "type":"message", "role":"assistant", "model":"fixture-model",
-                "content":[{"type":"text","text":"OK"}], "stop_reason":"end_turn", "stop_sequence":null,
-                "usage":{"input_tokens":10,"output_tokens":4}
-            }),
+            anthropic_sse.to_string(),
         ),
     ] {
-        let (url, server) = server(200, body.to_string());
+        let (url, server) = sse_server(body);
         let config = LlmConfig {
             provider: provider.into(),
             base_url: Some(format!("{url}{suffix}")),

@@ -5180,6 +5180,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs2",
+ "futures",
  "quick-xml 0.42.0",
  "rand 0.10.2",
  "rig-core",

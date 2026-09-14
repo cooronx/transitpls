@@ -28,6 +28,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 fs2 = "0.4"
+futures = "0.3"
 quick-xml = "0.42"
 rig-core = "0.42"
 rand = "0.10"

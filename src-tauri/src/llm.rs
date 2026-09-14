@@ -2,14 +2,19 @@ use crate::config::LlmConfig;
 use crate::model::{Document, Segment, SegmentKind};
 use crate::terms::Term;
 use async_trait::async_trait;
+use futures::StreamExt;
 use rand::RngExt;
 use rig_core::client::CompletionClient;
 use rig_core::completion::{
-    AssistantContent, CompletionError, CompletionRequestBuilder, Message, Usage,
+    AssistantContent, CompletionError, CompletionModel, CompletionRequestBuilder,
+    CompletionResponse, Message, Usage,
 };
 use rig_core::http_client::ReqwestClient;
+use rig_core::streaming::{StreamedAssistantContent, StreamingCompletionResponse};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
@@ -42,6 +47,18 @@ pub struct CompletionOutput {
     pub text: String,
     pub usage: Usage,
 }
+
+/// One incremental slice of a streamed completion, forwarded to optional
+/// observers (the desktop UI) while the full response is still assembled.
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    pub request_id: u64,
+    pub stage: &'static str,
+    pub delta: String,
+    pub done: bool,
+}
+
+pub type StreamObserver = Arc<dyn Fn(StreamChunk) + Send + Sync>;
 
 pub struct MockClient;
 
@@ -208,6 +225,8 @@ pub struct RigClient {
     model_name: String,
     host: String,
     recorder: Option<crate::usage::UsageRecorder>,
+    observer: Option<StreamObserver>,
+    request_seq: AtomicU64,
 }
 
 pub struct RecordingClient {
@@ -288,6 +307,11 @@ fn stage_from_prompt(system_prompt: &str) -> &'static str {
 impl RigClient {
     pub fn with_recorder(mut self, recorder: crate::usage::UsageRecorder) -> Self {
         self.recorder = Some(recorder);
+        self
+    }
+
+    pub fn with_observer(mut self, observer: StreamObserver) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -375,6 +399,8 @@ impl RigClient {
             model_name,
             host,
             recorder: None,
+            observer: None,
+            request_seq: AtomicU64::new(0),
         })
     }
 
@@ -400,6 +426,22 @@ impl RigClient {
     }
 }
 
+/// Opens a streamed completion; the caller drains it. Streaming keeps long
+/// batches alive on providers that drop unary requests, and lets observers
+/// surface progress while the response is still being generated.
+async fn stream_completion<M: CompletionModel>(
+    model: M,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<StreamingCompletionResponse, CompletionError> {
+    CompletionRequestBuilder::new(model, Message::user(user_prompt))
+        .preamble(system_prompt.to_string())
+        .max_tokens(8_192)
+        .temperature(0.1)
+        .stream()
+        .await
+}
+
 #[async_trait]
 impl TranslationClient for RigClient {
     async fn complete(
@@ -418,33 +460,19 @@ impl TranslationClient for RigClient {
     ) -> Result<CompletionOutput, String> {
         let started = std::time::Instant::now();
         let stage = stage_from_prompt(system_prompt);
+        let request_id = self.request_seq.fetch_add(1, Ordering::Relaxed);
         let response = match &self.model {
             RigModel::OpenAiChat(model) => {
-                CompletionRequestBuilder::new(model.clone(), Message::user(user_prompt))
-                    .preamble(system_prompt.to_string())
-                    .max_tokens(8_192)
-                    .temperature(0.1)
-                    .send()
-                    .await
+                stream_completion(model.clone(), system_prompt, user_prompt).await
             }
             RigModel::OpenAiResponses(model) => {
-                CompletionRequestBuilder::new(model.clone(), Message::user(user_prompt))
-                    .preamble(system_prompt.to_string())
-                    .max_tokens(8_192)
-                    .temperature(0.1)
-                    .send()
-                    .await
+                stream_completion(model.clone(), system_prompt, user_prompt).await
             }
             RigModel::Anthropic(model) => {
-                CompletionRequestBuilder::new(model.clone(), Message::user(user_prompt))
-                    .preamble(system_prompt.to_string())
-                    .max_tokens(8_192)
-                    .temperature(0.1)
-                    .send()
-                    .await
+                stream_completion(model.clone(), system_prompt, user_prompt).await
             }
         };
-        let response = match response {
+        let mut response = match response {
             Ok(response) => response,
             Err(error) => {
                 let (event, message) = safe_completion_error(&error);
@@ -452,11 +480,41 @@ impl TranslationClient for RigClient {
                 return Err(self.context(event, stage, message));
             }
         };
-        if response
-            .raw
-            .get("usage")
-            .is_none_or(serde_json::Value::is_null)
-        {
+        let mut stream_error = None;
+        while let Some(item) = response.next().await {
+            match item {
+                Ok(StreamedAssistantContent::Text(text)) => {
+                    if let Some(observer) = &self.observer {
+                        observer(StreamChunk {
+                            request_id,
+                            stage,
+                            delta: text.text,
+                            done: false,
+                        });
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    stream_error = Some(error);
+                    break;
+                }
+            }
+        }
+        if let Some(observer) = &self.observer {
+            observer(StreamChunk {
+                request_id,
+                stage,
+                delta: String::new(),
+                done: true,
+            });
+        }
+        if let Some(error) = stream_error {
+            let (event, message) = safe_completion_error(&error);
+            self.event(event, stage, retry, started.elapsed().as_millis())?;
+            return Err(self.context(event, stage, message));
+        }
+        let response: CompletionResponse = response.into();
+        if !response.usage.has_values() {
             self.event("usage_missing", stage, retry, started.elapsed().as_millis())?;
         }
         let usage = response.usage;
@@ -532,9 +590,13 @@ fn safe_completion_error(error: &CompletionError) -> (&'static str, &'static str
         None => match error {
             CompletionError::JsonError(_)
             | CompletionError::ResponseError(_)
-            | CompletionError::ProviderResponse(_) => (
+            | CompletionError::ProviderResponse(_)
+            // A streamed response that is not SSE, carries corrupt frames, or
+            // ends without a terminal record is a format/protocol problem, not
+            // a connection failure.
+            | CompletionError::ProviderError(_) => (
                 "response_parse_failed",
-                "invalid JSON or unsupported response format; check protocol and model",
+                "invalid or incomplete response; check protocol and model",
             ),
             _ => (
                 "request_failed",
