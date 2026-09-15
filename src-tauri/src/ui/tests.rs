@@ -168,6 +168,11 @@ fn impact_scan_covers_content_kinds_and_respects_word_boundaries() {
             segment("quote", "\"cat\"", SegmentKind::Quote),
             segment("metadata", "tag: cat", SegmentKind::Metadata),
             segment("false-positive", "concatenate", SegmentKind::Paragraph),
+            segment(
+                "legacy-ruby",
+                "『今日の 安 あ 達 だち さん』",
+                SegmentKind::Paragraph,
+            ),
         ],
     }];
 
@@ -175,6 +180,9 @@ fn impact_scan_covers_content_kinds_and_respects_word_boundaries() {
     assert_eq!(affected.len(), 4);
     assert!(affected.iter().any(|item| item.kind == "title"));
     assert!(!affected.iter().any(|item| item.id == "false-positive"));
+    let ruby_affected = scan_term_impact(&chapters, "今日の安達さん");
+    assert_eq!(ruby_affected.len(), 1);
+    assert_eq!(ruby_affected[0].id, "legacy-ruby");
 }
 
 #[test]

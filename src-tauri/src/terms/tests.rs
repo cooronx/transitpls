@@ -2,8 +2,8 @@
 
 use super::extract::ExtractionResponse;
 use super::{
-    extract_terms, extract_terms_resilient, PendingExtraction, Term, TermPolicy, TermStatus,
-    TermStore,
+    extract_terms, extract_terms_resilient, matches_text, PendingExtraction, Term, TermPolicy,
+    TermStatus, TermStore,
 };
 use crate::llm::{CompletionOutput, MockClient, TranslationClient};
 use async_trait::async_trait;
@@ -431,4 +431,13 @@ async fn invalid_json_batch_splits_instead_of_failing() {
             .collect::<Vec<_>>(),
         vec!["Alice", "Bob"]
     );
+}
+
+#[test]
+fn matches_terms_in_legacy_text_with_flattened_ruby_readings() {
+    assert!(matches_text(
+        "『今日の 安 あ 達 だち さん』",
+        "今日の安達さん"
+    ));
+    assert!(!matches_text("今日は安達さんに会った", "今日の安達さん"));
 }

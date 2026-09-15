@@ -42,7 +42,8 @@ pub fn relevant_terms(terms: &[Term], source_text: &str) -> Vec<Term> {
 
 /// 判断 `needle` 是否作为独立词出现在 `haystack` 中。
 ///
-/// CJK 术语按连续子串匹配；拉丁文字要求两侧不是字母或数字，
+/// CJK 术语按连续子串匹配，并兼容旧版展平的 Ruby 注音；
+/// 拉丁文字要求两侧不是字母或数字，
 /// 因此 "cat" 不会命中 "concatenate"。
 pub fn matches_text(haystack: &str, needle: &str) -> bool {
     let haystack = normalize(haystack);
@@ -51,7 +52,7 @@ pub fn matches_text(haystack: &str, needle: &str) -> bool {
         return false;
     }
     if needle.chars().any(is_cjk) {
-        return haystack.contains(&needle);
+        return haystack.contains(&needle) || matches_legacy_ruby_text(&haystack, &needle);
     }
     haystack.match_indices(&needle).any(|(start, value)| {
         let before = haystack[..start].chars().next_back();
@@ -60,6 +61,47 @@ pub fn matches_text(haystack: &str, needle: &str) -> bool {
         before.is_none_or(|value| !value.is_alphanumeric())
             && after.is_none_or(|value| !value.is_alphanumeric())
     })
+}
+
+fn matches_legacy_ruby_text(haystack: &str, needle: &str) -> bool {
+    // Older projects flattened <ruby> base and <rt> reading nodes into separate words.
+    let tokens = haystack.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 2 {
+        return false;
+    }
+    let needle = needle.split_whitespace().collect::<String>();
+    tokens.iter().enumerate().any(|(index, token)| {
+        token
+            .char_indices()
+            .any(|(offset, _)| match_ruby_tokens(&tokens, index, &token[offset..], &needle))
+    })
+}
+
+fn match_ruby_tokens(tokens: &[&str], index: usize, token: &str, needle: &str) -> bool {
+    if token.starts_with(needle) {
+        return true;
+    }
+    let Some(remaining) = needle.strip_prefix(token) else {
+        return false;
+    };
+    match_following_ruby_tokens(tokens, index + 1, remaining)
+}
+
+fn match_following_ruby_tokens(tokens: &[&str], index: usize, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    if index > 0
+        && token.chars().all(is_kana)
+        && tokens[index - 1].chars().any(is_han)
+        && match_following_ruby_tokens(tokens, index + 1, needle)
+    {
+        return true;
+    }
+    match_ruby_tokens(tokens, index, token, needle)
 }
 
 /// 术语比较前统一做 NFKC 归一化并转小写，兼容全角与大小写差异。
@@ -77,5 +119,19 @@ fn is_cjk(value: char) -> bool {
             | '\u{4e00}'..='\u{9fff}'
             | '\u{ac00}'..='\u{d7af}'
             | '\u{f900}'..='\u{faff}'
+    )
+}
+
+fn is_han(value: char) -> bool {
+    matches!(
+        value,
+        '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'
+    )
+}
+
+fn is_kana(value: char) -> bool {
+    matches!(
+        value,
+        '\u{3040}'..='\u{30ff}' | '\u{31f0}'..='\u{31ff}' | '\u{ff66}'..='\u{ff9f}'
     )
 }
