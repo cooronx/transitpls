@@ -1,9 +1,42 @@
 use std::io::{Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 use transitpls_lib::config::LlmConfig;
 use transitpls_lib::llm::{RecordingClient, RigClient, TranslationClient};
 use transitpls_lib::usage::UsageRecorder;
+
+fn read_request(stream: &mut TcpStream) -> String {
+    stream.set_nonblocking(false).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut request = Vec::new();
+    loop {
+        let mut buffer = [0; 4096];
+        let count = stream.read(&mut buffer).unwrap();
+        assert_ne!(count, 0);
+        request.extend_from_slice(&buffer[..count]);
+        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..end]);
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            if request.len() >= end + 4 + length {
+                break;
+            }
+        }
+    }
+    String::from_utf8(request).unwrap()
+}
+
+fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
+    write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+}
 
 fn server(status: u16, body: String) -> (String, std::thread::JoinHandle<String>) {
     server_with_content_type(status, "application/json", body)
@@ -37,33 +70,42 @@ fn server_with_content_type(
                 Err(error) => panic!("{error}"),
             }
         };
-        stream.set_nonblocking(false).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        let mut request = Vec::new();
-        loop {
-            let mut buffer = [0; 4096];
-            let count = stream.read(&mut buffer).unwrap();
-            assert_ne!(count, 0);
-            request.extend_from_slice(&buffer[..count]);
-            if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
-                let headers = String::from_utf8_lossy(&request[..end]);
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse().unwrap())
-                    })
-                    .unwrap();
-                if request.len() >= end + 4 + length {
-                    break;
+        let request = read_request(&mut stream);
+        write_response(&mut stream, status, &content_type, &body);
+        request
+    });
+    (url, handle)
+}
+
+fn server_many(
+    content_type: &str,
+    responses: Vec<(u16, String)>,
+) -> (String, std::thread::JoinHandle<Vec<String>>) {
+    let content_type = content_type.to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let handle = std::thread::spawn(move || {
+        let started = Instant::now();
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            started.elapsed() < Duration::from_secs(10),
+                            "no request received"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("{error}"),
                 }
-            }
+            };
+            requests.push(read_request(&mut stream));
+            write_response(&mut stream, status, &content_type, &body);
         }
-        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-        String::from_utf8(request).unwrap()
+        requests
     });
     (url, handle)
 }
@@ -126,7 +168,7 @@ async fn chat_compatibility_matrix_records_usage_and_request_metadata() {
             .with_recorder(recorder.clone());
         let client = RecordingClient::new(Box::new(client), recorder);
         let result = client
-            .complete_attempt("private system prompt", "private user prompt", 2)
+            .complete_attempt("private system prompt", "private user prompt", 2, None)
             .await;
         let request = server.join().unwrap();
         let output = result.unwrap_or_else(|error| panic!("{}: {error}", fixture["name"]));
@@ -277,6 +319,103 @@ async fn native_protocols_keep_their_paths_authentication_and_usage() {
         assert_eq!(result.text, "OK");
         assert_eq!(result.usage.input_tokens, 10);
         assert_eq!(result.usage.output_tokens, 4);
+    }
+}
+
+#[tokio::test]
+async fn structured_output_is_sent_as_json_schema() {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct TranslationResponse {
+        translations: Vec<String>,
+    }
+
+    let body = serde_json::json!({
+        "id":"test", "model":"fixture-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"translated text"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+    });
+    let (url, server) = sse_server(chat_sse(&body));
+    let config = LlmConfig {
+        base_url: Some(url),
+        model: "fixture-model".into(),
+        ..LlmConfig::default()
+    };
+    let client = RigClient::from_config_with_api_key(&config, "fixture-key").unwrap();
+    let schema = transitpls_lib::schema::response_schema::<TranslationResponse>();
+    let result = client
+        .complete_attempt("system", "user", 0, Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(result.text, "translated text");
+
+    let request = server.join().unwrap();
+    let body: serde_json::Value =
+        serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert_eq!(body["response_format"]["type"], "json_schema");
+    assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["properties"]["translations"]["items"]
+            ["type"],
+        "string"
+    );
+    assert_eq!(
+        body["response_format"]["json_schema"]["schema"]["additionalProperties"],
+        false
+    );
+}
+
+#[tokio::test]
+async fn schema_rejection_degrades_to_prompt_level_json() {
+    #[derive(serde::Deserialize, schemars::JsonSchema)]
+    #[allow(dead_code)]
+    struct TranslationResponse {
+        translations: Vec<String>,
+    }
+
+    let completion = chat_sse(&serde_json::json!({
+        "id":"test", "model":"fixture-model",
+        "choices":[{"index":0,"message":{"role":"assistant","content":"translated text"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+    }));
+    let rejection =
+        r#"{"error":{"message":"response_format json_schema is not supported by this model"}}"#
+            .to_string();
+    let (url, server) = server_many(
+        "text/event-stream",
+        vec![
+            (400, rejection),
+            (200, completion.clone()),
+            (200, completion),
+        ],
+    );
+    let config = LlmConfig {
+        base_url: Some(url),
+        model: "fixture-model".into(),
+        ..LlmConfig::default()
+    };
+    let client = RigClient::from_config_with_api_key(&config, "fixture-key").unwrap();
+    let schema = transitpls_lib::schema::response_schema::<TranslationResponse>();
+    let result = client
+        .complete_attempt("system", "user", 0, Some(schema.clone()))
+        .await
+        .expect("rejected schema should degrade instead of failing");
+    assert_eq!(result.text, "translated text");
+    let next = client
+        .complete_attempt("system", "user", 0, Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(next.text, "translated text");
+
+    let requests = server.join().unwrap();
+    assert_eq!(requests.len(), 3);
+    let first: serde_json::Value =
+        serde_json::from_str(requests[0].split_once("\r\n\r\n").unwrap().1).unwrap();
+    assert!(first.get("response_format").is_some());
+    for request in &requests[1..] {
+        let body: serde_json::Value =
+            serde_json::from_str(request.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert!(body.get("response_format").is_none());
     }
 }
 

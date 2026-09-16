@@ -1,5 +1,6 @@
 use crate::llm::TranslationClient;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -137,10 +138,72 @@ pub struct PendingExtraction {
     pub target_text: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ExtractionResponse {
-    terms: Vec<Term>,
+    terms: Vec<ExtractedTerm>,
+}
+
+/// Fixed vocabulary the extraction prompt and response schema agree on; the
+/// database stores the same values as plain strings.
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+enum TermType {
+    Person,
+    Place,
+    Organization,
+    Term,
+    Appellation,
+    Speech,
+    FixedExpr,
+}
+
+impl TermType {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Place => "place",
+            Self::Organization => "organization",
+            Self::Term => "term",
+            Self::Appellation => "appellation",
+            Self::Speech => "speech",
+            Self::FixedExpr => "fixed_expr",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(inline)]
+struct ExtractedTerm {
+    source: String,
+    target: String,
+    reading: Option<String>,
+    #[serde(rename = "type")]
+    term_type: TermType,
+    gender: Option<String>,
+    #[serde(default)]
+    aliases: Vec<String>,
+    note: Option<String>,
+}
+
+impl ExtractedTerm {
+    fn into_term(self, chapter: usize) -> Term {
+        Term {
+            source: self.source,
+            target: self.target,
+            reading: self.reading,
+            term_type: self.term_type.as_str().to_string(),
+            gender: self.gender,
+            aliases: self.aliases,
+            first_chapter: chapter,
+            note: self.note,
+            status: TermStatus::Ok,
+            policy: TermPolicy::Automatic,
+            manual_target: None,
+        }
+    }
 }
 
 use crate::llm::EMPTY_COMPLETION_ERROR;
@@ -651,28 +714,31 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
     max_retries: usize,
 ) -> Result<Vec<Term>, String> {
     let user = serde_json::json!({
-        "chapter": chapter,
         "source": source_text,
         "target": target_text,
     })
     .to_string();
-    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[...]}. Every term must contain string source and target, nullable string reading and gender, string-array aliases, integer first_chapter, nullable string note, and status=\"ok\". The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Return an empty array when nothing qualifies.";
+    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
+    let schema = crate::schema::response_schema::<ExtractionResponse>();
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete_attempt(system, &user, attempt).await {
+        match client
+            .complete_attempt(system, &user, attempt, Some(schema.clone()))
+            .await
+        {
             Ok(output) if output.text.trim().is_empty() => {
                 return Err(format!("term extraction failed: {EMPTY_COMPLETION_ERROR}"));
             }
             Ok(output) => match crate::llm::parse_json_response::<ExtractionResponse>(&output.text)
             {
-                Ok(mut response) => {
-                    let validation = response.terms.iter_mut().try_for_each(|term| {
-                        term.first_chapter = chapter;
-                        term.status = TermStatus::Ok;
-                        validate_term(term)
-                    });
-                    match validation {
-                        Ok(()) => return Ok(response.terms),
+                Ok(response) => {
+                    let terms = response
+                        .terms
+                        .into_iter()
+                        .map(|term| term.into_term(chapter))
+                        .collect::<Vec<_>>();
+                    match terms.iter().try_for_each(validate_term) {
+                        Ok(()) => return Ok(terms),
                         Err(error) => last_error = error,
                     }
                 }
@@ -1196,8 +1262,8 @@ fn is_cjk(value: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_terms, extract_terms_resilient, PendingExtraction, Term, TermPolicy, TermStatus,
-        TermStore,
+        extract_terms, extract_terms_resilient, ExtractionResponse, PendingExtraction, Term,
+        TermPolicy, TermStatus, TermStore,
     };
     use crate::llm::{CompletionOutput, MockClient, TranslationClient};
     use async_trait::async_trait;
@@ -1232,6 +1298,18 @@ mod tests {
             policy: TermPolicy::Automatic,
             manual_target: None,
         }
+    }
+
+    fn json_term(source: &str, target: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source": source,
+            "target": target,
+            "reading": null,
+            "type": "person",
+            "gender": null,
+            "aliases": [],
+            "note": null,
+        })
     }
 
     #[test]
@@ -1463,6 +1541,18 @@ mod tests {
         assert_eq!(terms[0].first_chapter, 2);
     }
 
+    #[test]
+    fn extraction_schema_constrains_term_types_and_wire_fields() {
+        let schema = crate::schema::response_schema::<ExtractionResponse>().to_value();
+        let properties = &schema["properties"]["terms"]["items"]["properties"];
+        let types = properties["type"]["enum"]
+            .as_array()
+            .expect("type enum should be present");
+        assert_eq!(types.len(), 7);
+        assert!(properties.get("first_chapter").is_none());
+        assert!(properties.get("status").is_none());
+    }
+
     struct EmptyBatchClient;
 
     #[async_trait]
@@ -1480,8 +1570,8 @@ mod tests {
                 );
             }
             let terms = match source {
-                "Alice arrived." => vec![term("Alice", "爱丽丝")],
-                "Alice met Bob." => vec![term("Alice", "爱丽丝"), term("Bob", "鲍勃")],
+                "Alice arrived." => vec![json_term("Alice", "爱丽丝")],
+                "Alice met Bob." => vec![json_term("Alice", "爱丽丝"), json_term("Bob", "鲍勃")],
                 _ => Vec::new(),
             };
             Ok(CompletionOutput {

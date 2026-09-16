@@ -2416,13 +2416,9 @@ mod tests {
             }
             Ok(output(
                 serde_json::json!({
-                    "translations": segments.iter().enumerate().map(|(index, segment)| {
-                        serde_json::json!({
-                            "number": index + 1,
-                            "id": segment["id"],
-                            "translation": format!("translated {}", segment["source"].as_str().unwrap_or_default()),
-                        })
-                    }).collect::<Vec<_>>()
+                    "translations": segments.iter()
+                        .map(|segment| format!("translated {}", segment["source"].as_str().unwrap_or_default()))
+                        .collect::<Vec<_>>()
                 })
                 .to_string(),
             ))

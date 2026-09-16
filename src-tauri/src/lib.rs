@@ -9,6 +9,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod polish;
 pub mod review;
+pub mod schema;
 pub mod state;
 pub mod terms;
 pub mod ui;

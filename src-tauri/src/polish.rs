@@ -845,7 +845,7 @@ mod tests {
             .await;
             self.active.fetch_sub(1, Ordering::SeqCst);
             let mut translations = Vec::new();
-            for (index, segment) in segments.iter().enumerate() {
+            for segment in segments.iter() {
                 let id = segment["id"].as_str().unwrap_or_default().to_string();
                 if self.fail_ids.contains(&id) {
                     return Err("planned polish failure".to_string());
@@ -854,14 +854,10 @@ mod tests {
                     .lock()
                     .expect("processed mutex")
                     .push(id.clone());
-                translations.push(serde_json::json!({
-                    "number": index + 1,
-                    "id": id,
-                    "translation": format!(
-                        "已润色：{}",
-                        segment["translation"].as_str().unwrap_or_default()
-                    ),
-                }));
+                translations.push(format!(
+                    "已润色：{}",
+                    segment["translation"].as_str().unwrap_or_default()
+                ));
             }
             Ok(CompletionOutput {
                 text: serde_json::json!({ "translations": translations }).to_string(),

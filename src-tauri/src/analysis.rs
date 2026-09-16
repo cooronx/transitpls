@@ -2,6 +2,7 @@ use crate::llm::TranslationClient;
 use crate::model::{Chapter, Document, DocumentMetadata, ProjectState};
 use crate::state;
 use crate::terms::{Term, TermStatus, TermStore};
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -10,7 +11,7 @@ use std::time::Duration;
 const BOOK_SAMPLE_CHARS: usize = 4_000;
 const CHAPTER_SAMPLE_CHARS: usize = 12_000;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BookAnalysis {
     pub genre: String,
@@ -26,8 +27,9 @@ pub struct BookAnalysis {
     pub book_synopsis: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
+#[schemars(inline)]
 pub struct AnalysisTerm {
     pub source: String,
     pub target: String,
@@ -41,13 +43,13 @@ pub struct AnalysisTerm {
     pub note: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DigestResponse {
     source_digest: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SynopsisResponse {
     book_synopsis: String,
@@ -232,11 +234,15 @@ async fn call_json<C, T>(
 ) -> Result<T, String>
 where
     C: TranslationClient + ?Sized,
-    T: DeserializeOwned,
+    T: DeserializeOwned + JsonSchema,
 {
+    let schema = crate::schema::response_schema::<T>();
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete_attempt(system, user, attempt).await {
+        match client
+            .complete_attempt(system, user, attempt, Some(schema.clone()))
+            .await
+        {
             Ok(output) => match crate::llm::parse_json_response(&output.text) {
                 Ok(value) => return Ok(value),
                 Err(error) => last_error = format!("LLM response is not valid JSON: {error}"),

@@ -11,8 +11,10 @@ use rig_core::completion::{
 };
 use rig_core::http_client::ReqwestClient;
 use rig_core::streaming::StreamingCompletionResponse;
+use schemars::{JsonSchema, Schema};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 pub const LANGUAGE_SAMPLE_COUNT: usize = 3;
@@ -22,11 +24,15 @@ pub(crate) const EMPTY_COMPLETION_ERROR: &str =
 
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
+    /// Sends one completion attempt. Clients that cannot request structured
+    /// output ignore the schema and rely on prompt-level JSON instructions;
+    /// production clients forward it to the provider.
     async fn complete_attempt(
         &self,
         system: &str,
         user: &str,
         _retry: usize,
+        _schema: Option<Schema>,
     ) -> Result<CompletionOutput, String> {
         self.complete(system, user).await
     }
@@ -127,7 +133,6 @@ impl TranslationClient for MockClient {
                     format!("mock client received invalid term extraction prompt: {error}")
                 })?;
             let source = request["source"].as_str().unwrap_or_default();
-            let chapter = request["chapter"].as_u64().unwrap_or_default();
             let terms = if source.contains("Alice") {
                 vec![serde_json::json!({
                     "source": "Alice",
@@ -136,9 +141,7 @@ impl TranslationClient for MockClient {
                     "type": "person",
                     "gender": null,
                     "aliases": [],
-                    "first_chapter": chapter,
-                    "note": "stable mock extraction",
-                    "status": "ok"
+                    "note": "stable mock extraction"
                 })]
             } else {
                 Vec::new()
@@ -152,11 +155,9 @@ impl TranslationClient for MockClient {
                 .map_err(|error| format!("mock client received invalid polish prompt: {error}"))?;
             return Ok(mock_output(
                 serde_json::json!({
-                    "translations": request.segments.into_iter().map(|segment| serde_json::json!({
-                        "number": segment.number,
-                        "id": segment.id,
-                        "translation": format!("[mock polished zh-CN] {}", segment.translation),
-                    })).collect::<Vec<_>>()
+                    "translations": request.segments.into_iter()
+                        .map(|segment| format!("[mock polished zh-CN] {}", segment.translation))
+                        .collect::<Vec<_>>()
                 })
                 .to_string(),
             ));
@@ -166,11 +167,9 @@ impl TranslationClient for MockClient {
                 .map_err(|error| format!("mock client received invalid title prompt: {error}"))?;
             return Ok(mock_output(
                 serde_json::json!({
-                    "translations": request.segments.into_iter().map(|segment| serde_json::json!({
-                        "number": segment.number,
-                        "id": segment.id,
-                        "translation": format!("[mock title zh-CN] {}", segment.source),
-                    })).collect::<Vec<_>>()
+                    "translations": request.segments.into_iter()
+                        .map(|segment| format!("[mock title zh-CN] {}", segment.source))
+                        .collect::<Vec<_>>()
                 })
                 .to_string(),
             ));
@@ -179,11 +178,9 @@ impl TranslationClient for MockClient {
             .map_err(|error| format!("mock client received invalid prompt: {error}"))?;
         Ok(mock_output(
             serde_json::json!({
-                "translations": request.segments.into_iter().map(|segment| serde_json::json!({
-                    "number": segment.number,
-                    "id": segment.id,
-                    "translation": format!("[mock zh-CN] {}", segment.source),
-                })).collect::<Vec<_>>()
+                "translations": request.segments.into_iter()
+                    .map(|segment| format!("[mock zh-CN] {}", segment.source))
+                    .collect::<Vec<_>>()
             })
             .to_string(),
         ))
@@ -211,6 +208,7 @@ pub struct RigClient {
     model_name: String,
     host: String,
     recorder: Option<crate::usage::UsageRecorder>,
+    structured_output_disabled: AtomicBool,
 }
 
 pub struct RecordingClient {
@@ -234,7 +232,8 @@ impl TranslationClient for RecordingClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
-        self.complete_attempt(system_prompt, user_prompt, 0).await
+        self.complete_attempt(system_prompt, user_prompt, 0, None)
+            .await
     }
 
     async fn complete_attempt(
@@ -242,10 +241,11 @@ impl TranslationClient for RecordingClient {
         system_prompt: &str,
         user_prompt: &str,
         retry: usize,
+        schema: Option<Schema>,
     ) -> Result<CompletionOutput, String> {
         let output = match self
             .inner
-            .complete_attempt(system_prompt, user_prompt, retry)
+            .complete_attempt(system_prompt, user_prompt, retry, schema)
             .await
         {
             Ok(output) => output,
@@ -378,6 +378,7 @@ impl RigClient {
             model_name,
             host,
             recorder: None,
+            structured_output_disabled: AtomicBool::new(false),
         })
     }
 
@@ -409,13 +410,22 @@ async fn stream_completion<M: CompletionModel>(
     model: M,
     system_prompt: &str,
     user_prompt: &str,
+    schema: Option<Schema>,
 ) -> Result<StreamingCompletionResponse, CompletionError> {
     CompletionRequestBuilder::new(model, Message::user(user_prompt))
         .preamble(system_prompt.to_string())
         .max_tokens(8_192)
         .temperature(0.1)
+        .output_schema_opt(schema)
         .stream()
         .await
+}
+
+enum RequestError {
+    Provider(CompletionError),
+    /// Failure whose message is already rendered for the caller, such as empty
+    /// completions and event-recording errors.
+    Rendered(String),
 }
 
 #[async_trait]
@@ -425,7 +435,8 @@ impl TranslationClient for RigClient {
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
-        self.complete_attempt(system_prompt, user_prompt, 0).await
+        self.complete_attempt(system_prompt, user_prompt, 0, None)
+            .await
     }
 
     async fn complete_attempt(
@@ -433,26 +444,65 @@ impl TranslationClient for RigClient {
         system_prompt: &str,
         user_prompt: &str,
         retry: usize,
+        schema: Option<Schema>,
     ) -> Result<CompletionOutput, String> {
+        let stage = stage_from_prompt(system_prompt);
+        let requested_schema =
+            schema.is_some() && !self.structured_output_disabled.load(Ordering::Relaxed);
+        let schema = if requested_schema { schema } else { None };
+        match self
+            .request(system_prompt, user_prompt, retry, schema)
+            .await
+        {
+            Ok(output) => Ok(output),
+            Err(RequestError::Provider(error))
+                if requested_schema && is_unsupported_schema_response(&error) =>
+            {
+                // The endpoint rejected json_schema response_format; fall back
+                // to prompt-level JSON for the rest of this run.
+                self.structured_output_disabled
+                    .store(true, Ordering::Relaxed);
+                let _ = self.event("structured_output_unsupported", stage, retry, 0);
+                match self.request(system_prompt, user_prompt, retry, None).await {
+                    Ok(output) => Ok(output),
+                    Err(RequestError::Provider(error)) => Err(self.provider_error(&error, stage)),
+                    Err(RequestError::Rendered(message)) => Err(message),
+                }
+            }
+            Err(RequestError::Provider(error)) => Err(self.provider_error(&error, stage)),
+            Err(RequestError::Rendered(message)) => Err(message),
+        }
+    }
+}
+
+impl RigClient {
+    async fn request(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+        retry: usize,
+        schema: Option<Schema>,
+    ) -> Result<CompletionOutput, RequestError> {
         let started = std::time::Instant::now();
         let stage = stage_from_prompt(system_prompt);
         let response = match &self.model {
             RigModel::OpenAiChat(model) => {
-                stream_completion(model.clone(), system_prompt, user_prompt).await
+                stream_completion(model.clone(), system_prompt, user_prompt, schema).await
             }
             RigModel::OpenAiResponses(model) => {
-                stream_completion(model.clone(), system_prompt, user_prompt).await
+                stream_completion(model.clone(), system_prompt, user_prompt, schema).await
             }
             RigModel::Anthropic(model) => {
-                stream_completion(model.clone(), system_prompt, user_prompt).await
+                stream_completion(model.clone(), system_prompt, user_prompt, schema).await
             }
         };
         let mut response = match response {
             Ok(response) => response,
             Err(error) => {
-                let (event, message) = safe_completion_error(&error);
-                self.event(event, stage, retry, started.elapsed().as_millis())?;
-                return Err(self.context(event, stage, message));
+                let (event, _) = safe_completion_error(&error);
+                self.event(event, stage, retry, started.elapsed().as_millis())
+                    .map_err(RequestError::Rendered)?;
+                return Err(RequestError::Provider(error));
             }
         };
         let mut stream_error = None;
@@ -463,13 +513,15 @@ impl TranslationClient for RigClient {
             }
         }
         if let Some(error) = stream_error {
-            let (event, message) = safe_completion_error(&error);
-            self.event(event, stage, retry, started.elapsed().as_millis())?;
-            return Err(self.context(event, stage, message));
+            let (event, _) = safe_completion_error(&error);
+            self.event(event, stage, retry, started.elapsed().as_millis())
+                .map_err(RequestError::Rendered)?;
+            return Err(RequestError::Provider(error));
         }
         let response: CompletionResponse = response.into();
         if !response.usage.has_values() {
-            self.event("usage_missing", stage, retry, started.elapsed().as_millis())?;
+            self.event("usage_missing", stage, retry, started.elapsed().as_millis())
+                .map_err(RequestError::Rendered)?;
         }
         let usage = response.usage;
         let has_non_text = response
@@ -490,8 +542,9 @@ impl TranslationClient for RigClient {
                 stage,
                 retry,
                 started.elapsed().as_millis(),
-            )?;
-            return Err(self.context(
+            )
+            .map_err(RequestError::Rendered)?;
+            return Err(RequestError::Rendered(self.context(
                 "response_parse_failed",
                 stage,
                 if has_non_text {
@@ -499,16 +552,43 @@ impl TranslationClient for RigClient {
                 } else {
                     EMPTY_COMPLETION_ERROR
                 },
-            ));
+            )));
         }
         self.event(
             "request_completed",
             stage,
             retry,
             started.elapsed().as_millis(),
-        )?;
+        )
+        .map_err(RequestError::Rendered)?;
         Ok(CompletionOutput { text, usage })
     }
+
+    fn provider_error(&self, error: &CompletionError, stage: &str) -> String {
+        let (event, message) = safe_completion_error(error);
+        self.context(event, stage, message)
+    }
+}
+
+fn is_unsupported_schema_response(error: &CompletionError) -> bool {
+    let Some(status) = error
+        .provider_response_status()
+        .map(|status| status.as_u16())
+    else {
+        return false;
+    };
+    if !matches!(status, 400 | 422) {
+        return false;
+    }
+    error
+        .provider_response_body()
+        .map(|body| {
+            let body = body.to_ascii_lowercase();
+            body.contains("response_format")
+                || body.contains("json_schema")
+                || body.contains("schema")
+        })
+        .unwrap_or(false)
 }
 
 fn safe_completion_error(error: &CompletionError) -> (&'static str, &'static str) {
@@ -567,8 +647,6 @@ struct BatchPrompt {
 
 #[derive(Debug, serde::Deserialize)]
 struct PromptSegment {
-    number: usize,
-    id: String,
     source: String,
 }
 
@@ -579,12 +657,10 @@ struct PolishPrompt {
 
 #[derive(Debug, serde::Deserialize)]
 struct PolishPromptSegment {
-    number: usize,
-    id: String,
     translation: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct LanguageResponse {
     language: String,
@@ -666,12 +742,16 @@ pub async fn detect_source_language<C: TranslationClient + ?Sized>(
 ) -> Result<String, String> {
     let samples = sample_language_texts(document)?;
     let system = "You are a language identification classifier. Identify the primary natural language of the provided text. Return only valid JSON in the exact form {\"language\":\"<ISO 639-1>\"}. Do not translate or explain.";
+    let schema = crate::schema::response_schema::<LanguageResponse>();
     let mut detected = Vec::with_capacity(samples.len());
     for (index, sample) in samples.iter().enumerate() {
         let mut language = None;
         let mut last_error = String::new();
         for attempt in 0..=max_retries {
-            match client.complete_attempt(system, sample, attempt).await {
+            match client
+                .complete_attempt(system, sample, attempt, Some(schema.clone()))
+                .await
+            {
                 Ok(output) => match validate_language_response(&output.text) {
                     Ok(value) => {
                         language = Some(value);
@@ -760,7 +840,7 @@ pub fn build_prompts(
     context: &TranslationContext<'_>,
 ) -> (String, String) {
     let system = format!(
-        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}}]}}. Keep translations in numbered input order and never omit an item."
+        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. Return only JSON as {{\"translations\":[\"<translated text>\"]}} holding exactly one translated string per input segment, in input order, and never omit an item."
     );
     let user = serde_json::to_string(&TranslationPrompt {
         style: context.style_guide,
@@ -782,49 +862,26 @@ pub fn build_prompts(
     (system, user)
 }
 
-pub fn validate_response(raw: &str, expected_ids: &[String]) -> Result<Vec<String>, String> {
+pub fn validate_response(raw: &str, expected_count: usize) -> Result<Vec<String>, String> {
     let response: TranslationResponse = parse_json_response(raw)
         .map_err(|error| format!("LLM response is not valid JSON: {error}"))?;
-    if response.translations.len() != expected_ids.len() {
+    if response.translations.len() != expected_count {
         return Err(format!(
-            "LLM returned {} translations; expected {}",
-            response.translations.len(),
-            expected_ids.len()
+            "LLM returned {} translations; expected {expected_count}",
+            response.translations.len()
         ));
     }
-    let mut translations = Vec::with_capacity(response.translations.len());
-    for (index, item) in response.translations.into_iter().enumerate() {
-        if item.number != index + 1 {
-            return Err(format!(
-                "translation {index} has number {}; expected {}",
-                item.number,
-                index + 1
-            ));
-        }
-        if item.id != expected_ids[index] {
-            return Err(format!(
-                "translation {index} has id '{}'; expected '{}'",
-                item.id, expected_ids[index]
-            ));
-        }
-        if item.translation.trim().is_empty() {
+    for (index, translation) in response.translations.iter().enumerate() {
+        if translation.trim().is_empty() {
             return Err(format!("translation {index} is empty"));
         }
-        translations.push(item.translation);
     }
-    Ok(translations)
+    Ok(response.translations)
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, JsonSchema)]
 struct TranslationResponse {
-    translations: Vec<TranslationItem>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct TranslationItem {
-    number: usize,
-    id: String,
-    translation: String,
+    translations: Vec<String>,
 }
 
 pub async fn translate_batch<C: TranslationClient + ?Sized>(
@@ -835,15 +892,15 @@ pub async fn translate_batch<C: TranslationClient + ?Sized>(
     context: &TranslationContext<'_>,
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
-    let expected_ids = segments
-        .iter()
-        .map(|segment| segment.id.clone())
-        .collect::<Vec<_>>();
     let (system, user) = build_prompts(segments, source_language, target_language, context);
+    let schema = crate::schema::response_schema::<TranslationResponse>();
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete_attempt(&system, &user, attempt).await {
-            Ok(output) => match validate_response(&output.text, &expected_ids) {
+        match client
+            .complete_attempt(&system, &user, attempt, Some(schema.clone()))
+            .await
+        {
+            Ok(output) => match validate_response(&output.text, segments.len()) {
                 Ok(translations) => return Ok(translations),
                 Err(error) => last_error = error,
             },
@@ -883,11 +940,7 @@ pub async fn polish_batch<C: TranslationClient + ?Sized>(
     context: &TranslationContext<'_>,
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
-    let expected_ids = segments
-        .iter()
-        .map(|segment| segment.id.clone())
-        .collect::<Vec<_>>();
-    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. The reference_targets section is earlier draft context for consistency only: do not translate, return, or modify it. Only the segments array is processed. Return only valid JSON in the exact form {\"translations\":[{\"number\":1,\"id\":\"segment-id\",\"translation\":\"...\"}]}. Keep the processed segments in numbered input order and never omit an item.";
+    let system = "TASK:POLISH Polish the draft Simplified Chinese translations while preserving meaning, paragraph boundaries, and authoritative resolved terminology. The reference_targets section is earlier draft context for consistency only: do not translate, return, or modify it. Only the segments array is processed. Return only JSON as {\"translations\":[\"<polished text>\"]} holding exactly one polished string per input segment, in input order, and never omit an item.";
     let user = serde_json::to_string(&PolishRequest {
         style: context.style_guide,
         book_synopsis: context.book_synopsis,
@@ -906,7 +959,7 @@ pub async fn polish_batch<C: TranslationClient + ?Sized>(
             .collect(),
     })
     .expect("polish prompt fields are serializable");
-    call_numbered_batch(client, system, &user, &expected_ids, max_retries, "polish").await
+    call_numbered_batch(client, system, &user, segments.len(), max_retries, "polish").await
 }
 
 pub async fn translate_titles<C: TranslationClient + ?Sized>(
@@ -918,12 +971,8 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
     terms: &[Term],
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
-    let expected_ids = titles
-        .iter()
-        .map(|title| title.id.clone())
-        .collect::<Vec<_>>();
     let system = format!(
-        "TASK:TITLE_TRANSLATION Translate chapter and table-of-contents titles from {source_language} to {target_language}. Follow the style guide and keep titles concise. Return only valid JSON in the exact form {{\"translations\":[{{\"number\":1,\"id\":\"chapter-id\",\"translation\":\"...\"}}]}}. Keep items in numbered input order and never omit an item."
+        "TASK:TITLE_TRANSLATION Translate chapter and table-of-contents titles from {source_language} to {target_language}. Follow the style guide and keep titles concise. Return only JSON as {{\"translations\":[\"<translated title>\"]}} holding exactly one title per input item, in input order, and never omit an item."
     );
     let user = serde_json::to_string(&TranslationPrompt {
         style: style_guide,
@@ -946,7 +995,7 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
         client,
         &system,
         &user,
-        &expected_ids,
+        titles.len(),
         max_retries,
         "title batch",
     )
@@ -957,14 +1006,18 @@ async fn call_numbered_batch<C: TranslationClient + ?Sized>(
     client: &C,
     system: &str,
     user: &str,
-    expected_ids: &[String],
+    expected_count: usize,
     max_retries: usize,
     label: &str,
 ) -> Result<Vec<String>, String> {
+    let schema = crate::schema::response_schema::<TranslationResponse>();
     let mut last_error = String::new();
     for attempt in 0..=max_retries {
-        match client.complete_attempt(system, user, attempt).await {
-            Ok(output) => match validate_response(&output.text, expected_ids) {
+        match client
+            .complete_attempt(system, user, attempt, Some(schema.clone()))
+            .await
+        {
+            Ok(output) => match validate_response(&output.text, expected_count) {
                 Ok(translations) => return Ok(translations),
                 Err(error) => last_error = error,
             },
@@ -1094,21 +1147,22 @@ mod tests {
     }
 
     #[test]
-    fn validates_order_and_rejects_empty_translation() {
-        let ids = vec!["a".to_string(), "b".to_string()];
-        let valid = r#"{"translations":[{"number":1,"id":"a","translation":"甲"},{"number":2,"id":"b","translation":"乙"}]}"#;
+    fn validates_count_and_rejects_empty_translation() {
+        let valid = r#"{"translations":["甲","乙"]}"#;
         assert_eq!(
-            validate_response(valid, &ids).expect("valid response"),
+            validate_response(valid, 2).expect("valid response"),
             vec!["甲", "乙"]
         );
-        let empty = r#"{"translations":[{"number":1,"id":"a","translation":" "},{"number":2,"id":"b","translation":"乙"}]}"#;
-        assert!(validate_response(empty, &ids).is_err());
+        let empty = r#"{"translations":[" ","乙"]}"#;
+        assert!(validate_response(empty, 2).is_err());
+        let incomplete = r#"{"translations":["甲"]}"#;
+        assert!(validate_response(incomplete, 2).is_err());
         let fenced = format!("```json\n{valid}\n```");
         assert_eq!(
-            validate_response(&fenced, &ids).expect("fenced JSON should be accepted"),
+            validate_response(&fenced, 2).expect("fenced JSON should be accepted"),
             vec!["甲", "乙"]
         );
-        assert!(validate_response(&format!("Result:\n{valid}"), &ids).is_err());
+        assert!(validate_response(&format!("Result:\n{valid}"), 2).is_err());
     }
 
     #[test]
