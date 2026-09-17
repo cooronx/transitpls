@@ -248,6 +248,7 @@ export default function App() {
   const [mockClient] = useState(false);
   const [visibleSegmentCount, setVisibleSegmentCount] = useState(100);
   const [displaySegmentCount, setDisplaySegmentCount] = useState(100);
+  const [taskDraft, setTaskDraft] = useState<TaskConfigDraft | null>(null);
 
   const reload = async (projectId?: string) => {
     const data = await invoke<Bootstrap>("ui_bootstrap");
@@ -408,6 +409,28 @@ export default function App() {
     setDisplaySegmentCount(next);
   }, [bootstrap?.config.general.visible_segments]);
   useEffect(() => {
+    if (!bootstrap?.config || !detail) {
+      setTaskDraft(null);
+      return;
+    }
+    setTaskDraft({
+      sourceLanguage: detail.taskInitialized
+        ? detail.project.source_language
+        : bootstrap.config.language.source,
+      maxCharsPerSegment: bootstrap.config.segment.max_chars_per_segment,
+      maxCharsPerBatch: bootstrap.config.segment.max_chars_per_batch,
+      recentContextChars: bootstrap.config.pipeline.recent_context_chars,
+      timeoutSecs: bootstrap.config.llm.timeout_secs,
+      maxRetries: bootstrap.config.llm.max_retries,
+      fullBook: bootstrap.config.analysis.full_book,
+    });
+  }, [
+    bootstrap?.config,
+    detail?.project.id,
+    detail?.project.source_language,
+    detail?.taskInitialized,
+  ]);
+  useEffect(() => {
     if (busy !== "翻译") return;
     setNow(Date.now());
     const interval = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -462,46 +485,48 @@ export default function App() {
       });
   };
   const taskConfigArgs = (value: TaskConfigDraft) => ({ ...value });
-  const initializeTask = (value: TaskConfigDraft) => {
+  const persistTaskDraft = async (value: TaskConfigDraft | null) => {
+    if (!value || !validTaskConfig(value)) return null;
+    const next = await invoke<Bootstrap>(
+      "ui_save_task_config",
+      taskConfigArgs(value),
+    );
+    setBootstrap(next);
+    return next;
+  };
+  const requireValidDraft = (value: TaskConfigDraft | null) => {
+    if (value && !validTaskConfig(value)) {
+      setNotice("任务配置中有未填写的数值，请修正后再开始");
+      return false;
+    }
+    return true;
+  };
+  const initializeTask = () => {
     if (busy || !detail || detail.taskInitialized) return;
     if (!bootstrap?.credential.configured && !mockClient) {
       setView("settings");
       setNotice("请先在设置中配置并验证 API Key");
       return;
     }
+    if (!requireValidDraft(taskDraft)) return;
     void run("项目初始化", async () => {
-      const next = await invoke<Bootstrap>("ui_save_task_config", taskConfigArgs(value));
-      setBootstrap(next);
+      await persistTaskDraft(taskDraft);
       return invoke<Detail>("ui_initialize", {
-          projectId: detail.project.id,
-          mockClient,
-        });
+        projectId: detail.project.id,
+        mockClient,
+      });
     });
   };
-  const saveTaskConfig = async (value: TaskConfigDraft) => {
-    if (busy) return;
-    setBusy("保存任务配置");
-    setNotice(null);
-    try {
-      const next = await invoke<Bootstrap>("ui_save_task_config", taskConfigArgs(value));
-      setBootstrap(next);
-      setNotice("任务配置已保存");
-    } catch (error) {
-      setNotice(String(error));
-    } finally {
-      setBusy(null);
-    }
-  };
-  const reanalyze = async (value: TaskConfigDraft) => {
+  const reanalyze = async () => {
     if (busy || !detail || !detail.taskInitialized) return;
+    if (!requireValidDraft(taskDraft)) return;
     const confirmed = await confirmDialog(
       "重新分析会再次调用模型，并刷新风格分析、章节摘要与全书梗概。继续吗？",
       { title: "重新分析", kind: "warning", okLabel: "重新分析", cancelLabel: "取消" },
     );
     if (!confirmed) return;
     void run("重新分析", async () => {
-      const next = await invoke<Bootstrap>("ui_save_task_config", taskConfigArgs(value));
-      setBootstrap(next);
+      await persistTaskDraft(taskDraft);
       return invoke<Detail>("ui_reanalyze", {
         projectId: detail.project.id,
         mockClient,
@@ -562,7 +587,8 @@ export default function App() {
     chapter: number | undefined,
     config?: Config,
   ) => {
-    const maxCharsPerBatch = config?.segment.max_chars_per_batch ?? 1;
+    const maxCharsPerBatch =
+      taskDraft?.maxCharsPerBatch ?? config?.segment.max_chars_per_batch ?? 1;
     const chapterId =
       chapter === undefined ? undefined : source.chapters[chapter]?.id;
     setTranslationTiming({
@@ -585,8 +611,26 @@ export default function App() {
       }),
     );
   };
+  const beginTranslation = async (
+    source: Detail,
+    chapter: number | undefined,
+    config?: Config,
+  ) => {
+    if (!requireValidDraft(taskDraft)) return;
+    setBusy("保存任务配置");
+    setNotice(null);
+    try {
+      const next = await persistTaskDraft(taskDraft);
+      await startTranslation(source, chapter, next?.config ?? config);
+    } catch (error) {
+      setBusy(null);
+      setNotice(String(error));
+    }
+  };
   const initializeThenTranslate = async (chapter?: number) => {
     if (!detail || !bootstrap) return;
+    const draft = taskDraft ?? taskConfigFromConfig(bootstrap.config);
+    if (!requireValidDraft(draft)) return;
     const confirmed = await confirmDialog(
       "项目尚未初始化。初始化会调用模型完成译前分析，可能消耗 API Token。\n\n是否现在开始初始化？初始化完成后将自动开始翻译。",
       {
@@ -600,17 +644,13 @@ export default function App() {
     setBusy("项目初始化");
     setNotice(null);
     try {
-      const next = await invoke<Bootstrap>(
-        "ui_save_task_config",
-        taskConfigArgs(taskConfigFromConfig(bootstrap.config)),
-      );
-      setBootstrap(next);
+      const next = await persistTaskDraft(draft);
       const initialized = await invoke<Detail>("ui_initialize", {
         projectId: detail.project.id,
         mockClient,
       });
       setDetail(initialized);
-      await startTranslation(initialized, chapter, next.config);
+      await startTranslation(initialized, chapter, next?.config);
     } catch (error) {
       setBusy(null);
       setNotice(String(error));
@@ -627,7 +667,7 @@ export default function App() {
       void initializeThenTranslate(chapter);
       return;
     }
-    void startTranslation(detail, chapter, bootstrap?.config);
+    void beginTranslation(detail, chapter, bootstrap?.config);
   };
   const retranslateItems = async (itemIds: string[]) => {
     if (busy || !detail || !itemIds.length) return;
@@ -644,6 +684,7 @@ export default function App() {
     });
     setNotice(null);
     try {
+      await persistTaskDraft(taskDraft);
       const next = await invoke<Detail>("ui_retranslate", {
         projectId,
         itemIds,
@@ -667,11 +708,13 @@ export default function App() {
       setNotice("请先在设置中配置并验证 API Key");
       return;
     }
+    if (!requireValidDraft(taskDraft)) return;
     const projectId = detail.project.id;
     const label = retryFailed ? "重试润色" : "润色";
     setBusy(label);
     setNotice(null);
     try {
+      await persistTaskDraft(taskDraft);
       const next = await invoke<Detail>("ui_polish", {
         projectId,
         retryFailed,
@@ -896,12 +939,13 @@ export default function App() {
                 : null
             }
             now={now}
+            draft={taskDraft}
+            onDraftChange={setTaskDraft}
             onPolish={savePipeline}
             onPolishStart={(retryFailed) => void startPolish(retryFailed)}
             onCancel={() => void cancelTask()}
             polishing={busy === "润色" || busy === "重试润色"}
             onInitialize={initializeTask}
-            onSaveConfig={saveTaskConfig}
             onReanalyze={reanalyze}
             onOpenTerms={() => setView("terms")}
           />
@@ -1493,12 +1537,13 @@ function Inspector({
   retranslationProgress,
   translationTiming,
   now,
+  draft,
+  onDraftChange,
   onPolish,
   onPolishStart,
   onCancel,
   polishing,
   onInitialize,
-  onSaveConfig,
   onReanalyze,
   onOpenTerms,
 }: {
@@ -1508,31 +1553,17 @@ function Inspector({
   retranslationProgress: RetranslationProgress | null;
   translationTiming: TranslationTiming | null;
   now: number;
+  draft: TaskConfigDraft | null;
+  onDraftChange: (value: TaskConfigDraft) => void;
   onPolish: (v: boolean) => Promise<void>;
   onPolishStart: (retryFailed: boolean) => void;
   onCancel: () => void;
   polishing: boolean;
-  onInitialize: (value: TaskConfigDraft) => void;
-  onSaveConfig: (value: TaskConfigDraft) => Promise<void>;
-  onReanalyze: (value: TaskConfigDraft) => Promise<void>;
+  onInitialize: () => void;
+  onReanalyze: () => Promise<void>;
   onOpenTerms: () => void;
 }) {
   const [tab, setTab] = useState<"task" | "memory">("task");
-  const [draft, setDraft] = useState<TaskConfigDraft | null>(null);
-  useEffect(() => {
-    if (!config) return;
-    setDraft({
-      sourceLanguage: detail.taskInitialized
-        ? detail.project.source_language
-        : config.language.source,
-      maxCharsPerSegment: config.segment.max_chars_per_segment,
-      maxCharsPerBatch: config.segment.max_chars_per_batch,
-      recentContextChars: config.pipeline.recent_context_chars,
-      timeoutSecs: config.llm.timeout_secs,
-      maxRetries: config.llm.max_retries,
-      fullBook: config.analysis.full_book,
-    });
-  }, [config, detail.project.source_language, detail.taskInitialized]);
   const progress = Math.round(
     (detail.project.chapters_completed /
       Math.max(1, detail.project.chapters_total)) *
@@ -1579,7 +1610,7 @@ function Inspector({
                   value={draft.sourceLanguage}
                   disabled={detail.taskInitialized || Boolean(busy)}
                   onChange={(event) =>
-                    setDraft({ ...draft, sourceLanguage: event.target.value })
+                    onDraftChange({ ...draft, sourceLanguage: event.target.value })
                   }
                 >
                   <option value="auto">自动检测</option>
@@ -1611,13 +1642,13 @@ function Inspector({
                   label="每段字符数"
                   value={draft.maxCharsPerSegment}
                   disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, maxCharsPerSegment: value })}
+                  onChange={(value) => onDraftChange({ ...draft, maxCharsPerSegment: value })}
                 />
                 <NumberField
                   label="每批字符数"
                   value={draft.maxCharsPerBatch}
                   disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, maxCharsPerBatch: value })}
+                  onChange={(value) => onDraftChange({ ...draft, maxCharsPerBatch: value })}
                 />
               </div>
               <small className="field-hint">每段字符数只影响之后新导入的项目；每批字符数会用于后续翻译。</small>
@@ -1631,7 +1662,7 @@ function Inspector({
                   className={`toggle ${draft.fullBook ? "on" : ""}`}
                   disabled={Boolean(busy)}
                   aria-pressed={draft.fullBook}
-                  onClick={() => setDraft({ ...draft, fullBook: !draft.fullBook })}
+                  onClick={() => onDraftChange({ ...draft, fullBook: !draft.fullBook })}
                 >
                   <i />
                 </button>
@@ -1731,31 +1762,23 @@ function Inspector({
                   label="超时（秒）"
                   value={draft.timeoutSecs}
                   disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, timeoutSecs: value })}
+                  onChange={(value) => onDraftChange({ ...draft, timeoutSecs: value })}
                 />
                 <NumberField
                   label="重试次数"
                   value={draft.maxRetries}
                   min={0}
                   disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, maxRetries: value })}
+                  onChange={(value) => onDraftChange({ ...draft, maxRetries: value })}
                 />
               </div>
             </details>
-            <button
-              type="button"
-              className="secondary save-task-config"
-              disabled={Boolean(busy) || !validTaskConfig(draft)}
-              onClick={() => void onSaveConfig(draft)}
-            >
-              {busy === "保存任务配置" ? "正在保存…" : "保存配置"}
-            </button>
             {detail.taskInitialized ? (
               <button
                 type="button"
                 className="initialize-task icon-label"
                 disabled={Boolean(busy) || !validTaskConfig(draft)}
-                onClick={() => void onReanalyze(draft)}
+                onClick={() => void onReanalyze()}
               >
                 {busy === "重新分析" ? <LoaderCircle className="spin" /> : <RotateCcw />}
                 {busy === "重新分析" ? "正在重新分析" : "重新分析"}
@@ -1765,7 +1788,7 @@ function Inspector({
                 type="button"
                 className="initialize-task primary icon-label"
                 disabled={Boolean(busy) || !validTaskConfig(draft)}
-                onClick={() => onInitialize(draft)}
+                onClick={onInitialize}
               >
                 {busy === "项目初始化" ? <LoaderCircle className="spin" /> : <Play />}
                 {busy === "项目初始化" ? "正在初始化任务" : "初始化任务"}
@@ -1817,21 +1840,13 @@ function Inspector({
                   value={draft.recentContextChars}
                   disabled={Boolean(busy)}
                   onChange={(event) =>
-                    setDraft({ ...draft, recentContextChars: Number(event.target.value) })
+                    onDraftChange({ ...draft, recentContextChars: Number(event.target.value) })
                   }
                 />
                 <span>字符</span>
               </div>
               <small>翻译下一批时携带的近期已译内容上限。</small>
             </Field>
-            <button
-              type="button"
-              className="secondary save-task-config"
-              disabled={Boolean(busy) || !validTaskConfig(draft)}
-              onClick={() => void onSaveConfig(draft)}
-            >
-              {busy === "保存任务配置" ? "正在保存…" : "保存记忆设置"}
-            </button>
             <button type="button" className="text-action" onClick={onOpenTerms}>
               打开术语库
               {conflictCount > 0 && ` · ${conflictCount} 个冲突`}

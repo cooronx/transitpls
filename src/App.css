@@ -2058,22 +2058,6 @@ button:disabled {
     margin-bottom: 10px
 }
 
-.save-task-config {
-    width: 100%;
-    min-height: 34px;
-    margin: 4px 0 7px;
-    border: 1px solid #b9cbc9;
-    border-radius: 6px;
-    background: #fff;
-    color: #176f67;
-    cursor: pointer
-}
-
-.save-task-config:disabled {
-    cursor: not-allowed;
-    opacity: .5
-}
-
 .memory-summary {
     display: grid;
     grid-template-columns: 1fr 1fr;
