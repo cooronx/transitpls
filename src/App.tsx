@@ -1499,13 +1499,6 @@ function Inspector({
       100,
   );
   const conflictCount = detail.pendingConflicts;
-  const retranslationPercent = retranslationProgress
-    ? Math.round(
-        (retranslationProgress.completed /
-          Math.max(1, retranslationProgress.total)) *
-          100,
-      )
-    : 0;
   const translationElapsed = translationTiming
     ? (translationTiming.finishedAt ?? now) - translationTiming.startedAt
     : 0;
@@ -1519,11 +1512,6 @@ function Inspector({
       : null;
   const polish = detail.polish;
   const translationComplete = detail.project.status === "translated";
-  const polishPercent = polish
-    ? Math.round(
-        ((polish.succeeded + polish.failed) / Math.max(1, polish.total)) * 100,
-      )
-    : 0;
   return (
     <aside className="inspector">
       <div className="inspector-tabs">
@@ -1685,31 +1673,17 @@ function Inspector({
                 </p>
               )}
               {retranslationProgress?.projectId === detail.project.id && (
-                <>
-                  <header>
-                    <b>本次重译进度</b>
-                    <strong>{retranslationPercent}%</strong>
-                  </header>
-                  <div className="big-progress">
-                    <i style={{ width: `${retranslationPercent}%` }} />
-                  </div>
-                  <p className="active">
-                    <CircleDashed />
-                    已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
-                    · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
-                  </p>
-                </>
+                <p className={retranslationProgress.failed > 0 ? "error" : "active"}>
+                  <CircleDashed />
+                  本次重译已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
+                  · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
+                </p>
               )}
-              <hr />
-              <header><b>润色进度</b><strong>{polish ? `${polishPercent}%` : "未开始"}</strong></header>
               {polish ? (
                 <>
-                  <div className="big-progress">
-                    <i style={{ width: `${polishPercent}%` }} />
-                  </div>
                   <p className={polish.failed > 0 ? "error" : polish.pending > 0 ? "active" : "done"}>
                     <CircleDashed />
-                    共 {polish.total} 批 · 成功 {polish.succeeded} · 失败 {polish.failed} · 待处理 {polish.pending}
+                    润色共 {polish.total} 批 · 成功 {polish.succeeded} · 失败 {polish.failed} · 待处理 {polish.pending}
                     {polish.pendingSegments > 0 && ` · 待润色段落 ${polish.pendingSegments}`}
                   </p>
                   {polish.lastError && <p className="error"><Circle />{polish.lastError}</p>}
