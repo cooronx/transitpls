@@ -952,9 +952,9 @@ export default function App() {
         )}
       </div>
       <footer className="statusbar">
-        <span>TransItPls v0.1.2</span>
+        <span>TransItPls</span>
         <i />
-        <span>Tauri · 跨平台</span>
+        <span>Tauri</span>
         <span className="status-spacer" />
         <span className="icon-label">
           {busy && <LoaderCircle className="spin" />}
