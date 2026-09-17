@@ -14,6 +14,7 @@ pub mod state;
 pub mod terms;
 pub mod ui;
 pub mod usage;
+pub mod workflow;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

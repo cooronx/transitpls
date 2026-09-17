@@ -230,7 +230,8 @@ pub async fn ui_import(
     input: String,
 ) -> Result<ProjectDetail, String> {
     let task_id = "import".to_string();
-    let task = tokio::spawn(async move { crate::cli::import_project(None, PathBuf::from(input)) });
+    let task =
+        tokio::spawn(async move { crate::workflow::import_project(None, PathBuf::from(input)) });
     registry
         .tasks
         .lock()
@@ -263,7 +264,7 @@ pub async fn ui_initialize(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let source_language = loaded.value.language.source;
     let task_id = "initialize".to_string();
-    let task = tokio::spawn(crate::cli::initialize_project(
+    let task = tokio::spawn(crate::workflow::initialize_project(
         None,
         PathBuf::from(project.source_path),
         Some(source_language),
@@ -303,7 +304,7 @@ pub async fn ui_reanalyze(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let source_language = loaded.value.language.source;
     let task_id = "initialize".to_string();
-    let task = tokio::spawn(crate::cli::initialize_project(
+    let task = tokio::spawn(crate::workflow::initialize_project(
         None,
         PathBuf::from(project.source_path),
         Some(source_language),
@@ -352,7 +353,7 @@ pub async fn ui_transit(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let mut task = tokio::spawn(crate::cli::transit_project(
+    let mut task = tokio::spawn(crate::workflow::transit_project(
         None,
         PathBuf::from(&project.source_path),
         chapter,
@@ -440,7 +441,7 @@ pub async fn ui_polish(
     let loaded = config::load(None)?;
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
-    let mut task = tokio::spawn(crate::cli::polish_project(
+    let mut task = tokio::spawn(crate::workflow::polish_project(
         None,
         PathBuf::from(&project.source_path),
         retry_failed,
@@ -764,7 +765,7 @@ pub async fn ui_retranslate(
     let project = state::load_project(&loaded.state_dir, &project_id)?;
     let task_id = project_id.clone();
     let (progress_sender, mut progress_receiver) = tokio::sync::mpsc::unbounded_channel();
-    let mut task = tokio::spawn(crate::cli::retranslate_project(
+    let mut task = tokio::spawn(crate::workflow::retranslate_project(
         None,
         PathBuf::from(project.source_path),
         item_ids,
