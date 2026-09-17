@@ -1,3 +1,5 @@
+//! Token 用量记录：把每次模型调用的用量累加到项目目录的 `usage.json`。
+
 use crate::state;
 use chrono::{SecondsFormat, Utc};
 use rig_core::completion::Usage;
@@ -5,14 +7,22 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// 各维度的 token 数量，字段与服务商返回的用量一一对应。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TokenUsage {
+    /// 输入 token。
     pub input_tokens: u64,
+    /// 输出 token。
     pub output_tokens: u64,
+    /// 合计 token。
     pub total_tokens: u64,
+    /// 命中缓存的输入 token。
     pub cached_input_tokens: u64,
+    /// 写入缓存的输入 token。
     pub cache_creation_input_tokens: u64,
+    /// 工具调用占用的提示词 token。
     pub tool_use_prompt_tokens: u64,
+    /// 推理 token。
     pub reasoning_tokens: u64,
 }
 
@@ -42,21 +52,27 @@ impl From<Usage> for TokenUsage {
     }
 }
 
+/// 一次模型调用的用量记录。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageEntry {
+    /// 调用阶段，如 `translation`、`polish`。
     pub stage: String,
+    /// 使用的模型名。
     pub model: String,
+    /// 记录时间，UTC RFC 3339 毫秒精度。
     pub recorded_at: String,
     #[serde(flatten)]
     pub tokens: TokenUsage,
 }
 
+/// `usage.json` 的内容：调用明细与累计用量。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UsageFile {
     pub calls: Vec<UsageEntry>,
     pub totals: TokenUsage,
 }
 
+/// 用量记录器，按项目目录保存；内部加锁保证并发调用不丢记录。
 #[derive(Debug, Clone)]
 pub struct UsageRecorder {
     path: PathBuf,
@@ -65,9 +81,12 @@ pub struct UsageRecorder {
 }
 
 impl UsageRecorder {
+    /// 向项目日志追加一条请求事件（不记录 token）。
     pub fn record_event(&self, event: &str, details: serde_json::Value) -> Result<(), String> {
         state::append_log_at(&self.path.with_file_name("logs.txt"), event, details)
     }
+
+    /// 记录一次模型调用失败。
     pub fn record_failure(&self, stage: &str, details: serde_json::Value) -> Result<(), String> {
         state::append_log_at(
             &self.path.with_file_name("logs.txt"),
@@ -75,6 +94,8 @@ impl UsageRecorder {
             serde_json::json!({"stage": stage, "model": self.model, "details": details}),
         )
     }
+
+    /// 为指定项目目录创建记录器。
     pub fn new(project_dir: &Path, model: impl Into<String>) -> Self {
         Self {
             path: project_dir.join("usage.json"),
@@ -83,6 +104,7 @@ impl UsageRecorder {
         }
     }
 
+    /// 累加一次调用的 token 用量并写回 `usage.json`。
     pub fn record(&self, stage: &str, usage: Usage) -> Result<(), String> {
         let _guard = self
             .lock
