@@ -1243,6 +1243,11 @@ button:disabled {
     font-size: 10px
 }
 
+.polish-section {
+    border-top: 1px solid #edf1f4;
+    padding-top: 12px
+}
+
 .polish-actions {
     display: flex;
     flex-wrap: wrap;

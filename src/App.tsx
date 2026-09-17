@@ -1655,19 +1655,6 @@ function Inspector({
                 />
               </div>
             </details>
-            <label className="switch-row">
-              <span>全书翻译完成后自动润色</span>
-              <button
-                type="button"
-                className={`toggle ${config?.pipeline.polish ? "on" : ""}`}
-                disabled={!config || Boolean(busy)}
-                aria-pressed={Boolean(config?.pipeline.polish)}
-                aria-label="全书翻译完成后自动润色"
-                onClick={() => void onPolish(!config?.pipeline.polish)}
-              >
-                <i />
-              </button>
-            </label>
             <button
               type="button"
               className="secondary save-task-config"
@@ -1719,6 +1706,27 @@ function Inspector({
                   · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
                 </p>
               )}
+              <p className={detail.project.status === "failed" ? "error" : "active"}>
+                <CircleDashed />
+                {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
+              </p>
+              <p><Circle />生成校对报告 <em>阶段 8 待实现</em></p>
+            </section>
+            <section className="flow inspector-section polish-section">
+              <header><b>译后润色</b></header>
+              <label className="switch-row">
+                <span>全书翻译完成后自动润色</span>
+                <button
+                  type="button"
+                  className={`toggle ${config?.pipeline.polish ? "on" : ""}`}
+                  disabled={!config || Boolean(busy)}
+                  aria-pressed={Boolean(config?.pipeline.polish)}
+                  aria-label="全书翻译完成后自动润色"
+                  onClick={() => void onPolish(!config?.pipeline.polish)}
+                >
+                  <i />
+                </button>
+              </label>
               {polish ? (
                 <>
                   <p className={polish.failed > 0 ? "error" : polish.pending > 0 ? "active" : "done"}>
@@ -1790,11 +1798,6 @@ function Inspector({
                   </>
                 )}
               </div>
-              <p className={detail.project.status === "failed" ? "error" : "active"}>
-                <CircleDashed />
-                {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
-              </p>
-              <p><Circle />生成校对报告 <em>阶段 8 待实现</em></p>
             </section>
           </>
         ) : (
