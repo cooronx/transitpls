@@ -1,3 +1,8 @@
+//! 全书分析：识别源语言，生成文风指南、人物与术语，并为各章生成摘要。
+//!
+//! 分析结果写入项目目录的 `analysis.json`，章节摘要写入章节 `meta`；
+//! 已存在的分析结果会被复用，`force` 为 true 时重新生成。
+
 use crate::llm::TranslationClient;
 use crate::model::{Chapter, Document, DocumentMetadata, ProjectState};
 use crate::state;
@@ -11,50 +16,76 @@ use std::time::Duration;
 const BOOK_SAMPLE_CHARS: usize = 4_000;
 const CHAPTER_SAMPLE_CHARS: usize = 12_000;
 
+/// 全书分析结果，作为翻译与润色的共享上下文。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BookAnalysis {
+    /// 题材。
     pub genre: String,
+    /// 整体语气。
     pub tone: String,
+    /// 文风指南，逐条列出翻译需要遵循的风格要求。
     pub style_guide: Vec<String>,
+    /// 叙事视角与人称。
     pub narration: String,
+    /// 节奏特点。
     pub pacing: String,
+    /// 语体（书面/口语等）。
     pub register: String,
+    /// 对话风格。
     pub dialogue_style: String,
+    /// 修辞特点。
     pub rhetoric: String,
+    /// 人物表，与术语一并写入术语库。
     pub characters: Vec<AnalysisTerm>,
+    /// 其他专有名词与固定表达。
     pub terms: Vec<AnalysisTerm>,
+    /// 全书梗概，仅完整分析模式下生成。
     pub book_synopsis: Option<String>,
 }
 
+/// 分析阶段抽取的人物或术语。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[schemars(inline)]
 pub struct AnalysisTerm {
+    /// 原文。
     pub source: String,
+    /// 建议译名。
     pub target: String,
+    /// 读音或注音。
     pub reading: Option<String>,
+    /// 类型，取值与术语抽取一致。
     #[serde(rename = "type")]
     pub term_type: String,
+    /// 性别标记。
     pub gender: Option<String>,
+    /// 别名写法。
     #[serde(default)]
     pub aliases: Vec<String>,
+    /// 首次出现的章节序号。
     pub first_chapter: usize,
+    /// 备注。
     pub note: Option<String>,
 }
 
+/// 章节摘要接口的响应。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct DigestResponse {
     source_digest: String,
 }
 
+/// 全书梗概接口的响应。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct SynopsisResponse {
     book_synopsis: String,
 }
 
+/// 运行（或复用）全书分析。
+///
+/// `full_book` 为 true 时逐章生成摘要并汇总梗概；`force` 为 true 时忽略已有结果。
 pub async fn prepare<C: TranslationClient + ?Sized>(
     client: &C,
     state_dir: &Path,
@@ -139,8 +170,7 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
                 )
                 .await?;
                 let digest = if response.source_digest.trim().is_empty() {
-                    // Some compatible providers return an empty structured field; retain
-                    // useful chapter context so initialization can still resume.
+                    // 部分兼容服务商会返回空的摘要字段，退回截取原文，保证初始化可继续。
                     sample_text(&source, 1_000)
                 } else {
                     response.source_digest
@@ -185,6 +215,7 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
 }
 
 impl AnalysisTerm {
+    /// 转为术语库条目，初始状态为正常、策略为自动。
     fn into_term(self) -> Term {
         Term {
             source: self.source,
@@ -202,6 +233,7 @@ impl AnalysisTerm {
     }
 }
 
+/// 校验分析结果的必填字段与风格指南。
 fn validate_analysis(analysis: &BookAnalysis) -> Result<(), String> {
     let fields = [
         ("genre", analysis.genre.as_str()),
@@ -226,6 +258,7 @@ fn validate_analysis(analysis: &BookAnalysis) -> Result<(), String> {
     Ok(())
 }
 
+/// 请求结构化 JSON 并在失败时按 `max_retries` 指数退避重试。
 async fn call_json<C, T>(
     client: &C,
     system: &str,
@@ -258,6 +291,7 @@ where
     ))
 }
 
+/// 用项目状态与章节还原文档模型，供语言检测使用。
 fn document_from_state(project: &ProjectState, chapters: &[Chapter]) -> Document {
     Document {
         metadata: DocumentMetadata {
@@ -274,6 +308,7 @@ fn document_from_state(project: &ProjectState, chapters: &[Chapter]) -> Document
     }
 }
 
+/// 从全书均匀抽取三段文本作为分析样本。
 fn sample_book(chapters: &[Chapter]) -> Vec<String> {
     let source = chapters
         .iter()
@@ -284,6 +319,7 @@ fn sample_book(chapters: &[Chapter]) -> Vec<String> {
     sample_positions(&source, BOOK_SAMPLE_CHARS, 3)
 }
 
+/// 取样文本：超长时取首中尾三段拼接，并用省略号分隔。
 fn sample_text(source: &str, max_chars: usize) -> String {
     if source.chars().count() <= max_chars {
         source.to_string()
@@ -292,6 +328,7 @@ fn sample_text(source: &str, max_chars: usize) -> String {
     }
 }
 
+/// 按固定间隔取 `count` 段等长文本，重复的短文本会被去重。
 fn sample_positions(source: &str, sample_chars: usize, count: usize) -> Vec<String> {
     let chars = source.chars().collect::<Vec<_>>();
     if chars.is_empty() || sample_chars == 0 || count == 0 {
