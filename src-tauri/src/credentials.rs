@@ -1,22 +1,30 @@
+//! 桌面端 API Key 存储：按服务商保存在用户配置目录的 `TransItPls/credentials.json`。
+//!
+//! 文件为明文 JSON，仅依赖文件权限保护（Unix 下为 0600），不要写入仓库或分享。
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// 凭据文件结构：`服务商 -> API Key`。
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct StoredCredentials {
     keys: HashMap<String, String>,
 }
 
+/// 读取指定服务商保存的 API Key；未保存时返回 `None`。
 pub fn load_api_key(provider: &str) -> Result<Option<String>, String> {
     load_api_key_at(&credentials_path()?, provider)
 }
 
+/// 保存指定服务商的 API Key。
 pub fn save_api_key(provider: &str, api_key: &str) -> Result<(), String> {
     save_api_key_at(&credentials_path()?, provider, api_key)
 }
 
+/// 按平台返回用户配置目录下的凭据文件路径。
 fn credentials_path() -> Result<PathBuf, String> {
     #[cfg(target_os = "macos")]
     let base = std::env::var_os("HOME")
@@ -33,6 +41,7 @@ fn credentials_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "unable to determine the user configuration directory".to_string())
 }
 
+/// 按文件路径读取密钥，服务商名称会先规范化。
 fn load_api_key_at(path: &Path, provider: &str) -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
@@ -44,6 +53,7 @@ fn load_api_key_at(path: &Path, provider: &str) -> Result<Option<String>, String
     Ok(stored.keys.get(&normalize_provider(provider)).cloned())
 }
 
+/// 按文件路径写入密钥，并尽量收紧文件权限。
 fn save_api_key_at(path: &Path, provider: &str, api_key: &str) -> Result<(), String> {
     let api_key = api_key.trim();
     if api_key.is_empty() {
@@ -87,6 +97,7 @@ fn save_api_key_at(path: &Path, provider: &str, api_key: &str) -> Result<(), Str
     Ok(())
 }
 
+/// 规范化服务商名称：去空格并转小写。
 pub(crate) fn normalize_provider(provider: &str) -> String {
     provider.trim().to_ascii_lowercase()
 }
