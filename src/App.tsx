@@ -1637,81 +1637,6 @@ function Inspector({
                 </button>
               </label>
             </section>
-            <details className="advanced-config">
-              <summary>高级模型配置</summary>
-              <div className="compact-fields">
-                <NumberField
-                  label="超时（秒）"
-                  value={draft.timeoutSecs}
-                  disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, timeoutSecs: value })}
-                />
-                <NumberField
-                  label="重试次数"
-                  value={draft.maxRetries}
-                  min={0}
-                  disabled={Boolean(busy)}
-                  onChange={(value) => setDraft({ ...draft, maxRetries: value })}
-                />
-              </div>
-            </details>
-            <button
-              type="button"
-              className="secondary save-task-config"
-              disabled={Boolean(busy) || !validTaskConfig(draft)}
-              onClick={() => void onSaveConfig(draft)}
-            >
-              {busy === "保存任务配置" ? "正在保存…" : "保存配置"}
-            </button>
-            {detail.taskInitialized ? (
-              <button
-                type="button"
-                className="initialize-task icon-label"
-                disabled={Boolean(busy) || !validTaskConfig(draft)}
-                onClick={() => void onReanalyze(draft)}
-              >
-                {busy === "重新分析" ? <LoaderCircle className="spin" /> : <RotateCcw />}
-                {busy === "重新分析" ? "正在重新分析" : "重新分析"}
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="initialize-task primary icon-label"
-                disabled={Boolean(busy) || !validTaskConfig(draft)}
-                onClick={() => onInitialize(draft)}
-              >
-                {busy === "项目初始化" ? <LoaderCircle className="spin" /> : <Play />}
-                {busy === "项目初始化" ? "正在初始化任务" : "初始化任务"}
-              </button>
-            )}
-            <hr />
-            <section className="flow">
-              <header><b>项目进度</b><strong>{progress}%</strong></header>
-              <div className="big-progress"><i style={{ width: `${progress}%` }} /></div>
-              <p className="done"><CheckCircle2 />已完成 {detail.project.chapters_completed} 章</p>
-              {translationTiming && (
-                <p className={translationTiming.finishedAt ? "done" : "active"}>
-                  <Clock3 />
-                  已用 {formatDuration(translationElapsed)} · {translationTiming.finishedAt
-                    ? "本次翻译结束"
-                    : estimatedRemaining === null
-                      ? "正在估算剩余时间"
-                      : `预计还需 ${formatDuration(estimatedRemaining)}`}
-                </p>
-              )}
-              {retranslationProgress?.projectId === detail.project.id && (
-                <p className={retranslationProgress.failed > 0 ? "error" : "active"}>
-                  <CircleDashed />
-                  本次重译已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
-                  · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
-                </p>
-              )}
-              <p className={detail.project.status === "failed" ? "error" : "active"}>
-                <CircleDashed />
-                {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
-              </p>
-              <p><Circle />生成校对报告 <em>阶段 8 待实现</em></p>
-            </section>
             <section className="flow inspector-section polish-section">
               <header><b>译后润色</b></header>
               <label className="switch-row">
@@ -1798,6 +1723,81 @@ function Inspector({
                   </>
                 )}
               </div>
+            </section>
+            <details className="advanced-config">
+              <summary>高级模型配置</summary>
+              <div className="compact-fields">
+                <NumberField
+                  label="超时（秒）"
+                  value={draft.timeoutSecs}
+                  disabled={Boolean(busy)}
+                  onChange={(value) => setDraft({ ...draft, timeoutSecs: value })}
+                />
+                <NumberField
+                  label="重试次数"
+                  value={draft.maxRetries}
+                  min={0}
+                  disabled={Boolean(busy)}
+                  onChange={(value) => setDraft({ ...draft, maxRetries: value })}
+                />
+              </div>
+            </details>
+            <button
+              type="button"
+              className="secondary save-task-config"
+              disabled={Boolean(busy) || !validTaskConfig(draft)}
+              onClick={() => void onSaveConfig(draft)}
+            >
+              {busy === "保存任务配置" ? "正在保存…" : "保存配置"}
+            </button>
+            {detail.taskInitialized ? (
+              <button
+                type="button"
+                className="initialize-task icon-label"
+                disabled={Boolean(busy) || !validTaskConfig(draft)}
+                onClick={() => void onReanalyze(draft)}
+              >
+                {busy === "重新分析" ? <LoaderCircle className="spin" /> : <RotateCcw />}
+                {busy === "重新分析" ? "正在重新分析" : "重新分析"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="initialize-task primary icon-label"
+                disabled={Boolean(busy) || !validTaskConfig(draft)}
+                onClick={() => onInitialize(draft)}
+              >
+                {busy === "项目初始化" ? <LoaderCircle className="spin" /> : <Play />}
+                {busy === "项目初始化" ? "正在初始化任务" : "初始化任务"}
+              </button>
+            )}
+            <hr />
+            <section className="flow">
+              <header><b>项目进度</b><strong>{progress}%</strong></header>
+              <div className="big-progress"><i style={{ width: `${progress}%` }} /></div>
+              <p className="done"><CheckCircle2 />已完成 {detail.project.chapters_completed} 章</p>
+              {translationTiming && (
+                <p className={translationTiming.finishedAt ? "done" : "active"}>
+                  <Clock3 />
+                  已用 {formatDuration(translationElapsed)} · {translationTiming.finishedAt
+                    ? "本次翻译结束"
+                    : estimatedRemaining === null
+                      ? "正在估算剩余时间"
+                      : `预计还需 ${formatDuration(estimatedRemaining)}`}
+                </p>
+              )}
+              {retranslationProgress?.projectId === detail.project.id && (
+                <p className={retranslationProgress.failed > 0 ? "error" : "active"}>
+                  <CircleDashed />
+                  本次重译已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
+                  · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
+                </p>
+              )}
+              <p className={detail.project.status === "failed" ? "error" : "active"}>
+                <CircleDashed />
+                {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
+              </p>
+              <p><Circle />生成校对报告 <em>阶段 8 待实现</em></p>
             </section>
           </>
         ) : (
