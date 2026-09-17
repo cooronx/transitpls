@@ -1,11 +1,12 @@
+//! 结构化输出 schema：由 Rust 类型派生 JSON Schema，并裁剪为服务商可接受的子集。
+
 use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde_json::Value;
 
-/// Builds the JSON Schema sent to providers as a structured-output constraint.
+/// 生成发送给服务商的结构化输出约束。
 ///
-/// Derived schemas are normalized for the strict subsets providers accept:
-/// `format`, numeric bounds, and schema identifiers are either unsupported or
-/// irrelevant, so they are removed before the schema leaves this module.
+/// 派生出的 schema 会按服务商支持的严格子集规范化：`format`、数值范围和 schema
+/// 标识要么不受支持、要么没有必要，统一在离开本模块前移除。
 pub fn response_schema<T: JsonSchema + ?Sized>() -> Schema {
     let schema = SchemaGenerator::default().into_root_schema_for::<T>();
     let mut value = schema.to_value();
@@ -32,6 +33,10 @@ const SCHEMA_SINGLE: [&str; 8] = [
 ];
 const SCHEMA_ARRAYS: [&str; 4] = ["anyOf", "allOf", "oneOf", "prefixItems"];
 
+/// 递归删除服务商不支持的 schema 关键字。
+///
+/// `properties` 等关键字映射持有子 schema 需要递归；普通属性名不进入递归，
+/// 因此名为 `format` 的字段不会被误删。
 fn strip_unsupported_keywords(schema: &mut Value) {
     let Some(object) = schema.as_object_mut() else {
         return;
@@ -39,8 +44,7 @@ fn strip_unsupported_keywords(schema: &mut Value) {
     for keyword in ["format", "$schema", "$id", "minimum", "maximum"] {
         object.remove(keyword);
     }
-    // Property names are arbitrary, so they are only entered through the
-    // keyword maps that hold subschemas.
+    // 属性名可以任意，只有持有子 schema 的关键字映射才需要递归进入。
     for keyword in SCHEMA_MAPS {
         if let Some(Value::Object(map)) = object.get_mut(keyword) {
             for child in map.values_mut() {
