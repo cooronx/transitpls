@@ -557,37 +557,77 @@ export default function App() {
       setBusy(null);
     }
   };
+  const startTranslation = (
+    source: Detail,
+    chapter: number | undefined,
+    config?: Config,
+  ) => {
+    const maxCharsPerBatch = config?.segment.max_chars_per_batch ?? 1;
+    const chapterId =
+      chapter === undefined ? undefined : source.chapters[chapter]?.id;
+    setTranslationTiming({
+      projectId: source.project.id,
+      startedAt: Date.now(),
+      completedRequests: 0,
+      totalRequests: countTranslationRequests(
+        source.chapters,
+        maxCharsPerBatch,
+        chapterId,
+      ),
+      maxCharsPerBatch,
+      chapterId,
+    });
+    return run("翻译", () =>
+      invoke<Detail>("ui_transit", {
+        projectId: source.project.id,
+        chapter: chapter ?? null,
+        mockClient,
+      }),
+    );
+  };
+  const initializeThenTranslate = async (chapter?: number) => {
+    if (!detail || !bootstrap) return;
+    const confirmed = await confirmDialog(
+      "项目尚未初始化。初始化会调用模型完成译前分析，可能消耗 API Token。\n\n是否现在开始初始化？初始化完成后将自动开始翻译。",
+      {
+        title: "开始翻译",
+        kind: "info",
+        okLabel: "初始化并翻译",
+        cancelLabel: "取消",
+      },
+    );
+    if (!confirmed) return;
+    setBusy("项目初始化");
+    setNotice(null);
+    try {
+      const next = await invoke<Bootstrap>(
+        "ui_save_task_config",
+        taskConfigArgs(taskConfigFromConfig(bootstrap.config)),
+      );
+      setBootstrap(next);
+      const initialized = await invoke<Detail>("ui_initialize", {
+        projectId: detail.project.id,
+        mockClient,
+      });
+      setDetail(initialized);
+      await startTranslation(initialized, chapter, next.config);
+    } catch (error) {
+      setBusy(null);
+      setNotice(String(error));
+    }
+  };
   const translate = (chapter?: number) => {
-    if (busy) return;
+    if (busy || !detail) return;
     if (!bootstrap?.credential.configured && !mockClient) {
       setView("settings");
       setNotice("请先在设置中配置并验证 API Key");
       return;
     }
-    if (detail) {
-      const maxCharsPerBatch =
-        bootstrap?.config.segment.max_chars_per_batch ?? 1;
-      const chapterId = chapter === undefined ? undefined : detail.chapters[chapter]?.id;
-      setTranslationTiming({
-        projectId: detail.project.id,
-        startedAt: Date.now(),
-        completedRequests: 0,
-        totalRequests: countTranslationRequests(
-          detail.chapters,
-          maxCharsPerBatch,
-          chapterId,
-        ),
-        maxCharsPerBatch,
-        chapterId,
-      });
-      void run("翻译", () =>
-        invoke<Detail>("ui_transit", {
-          projectId: detail.project.id,
-          chapter: chapter ?? null,
-          mockClient,
-        }),
-      );
+    if (!detail.taskInitialized) {
+      void initializeThenTranslate(chapter);
+      return;
     }
+    void startTranslation(detail, chapter, bootstrap?.config);
   };
   const retranslateItems = async (itemIds: string[]) => {
     if (busy || !detail || !itemIds.length) return;
@@ -769,7 +809,7 @@ export default function App() {
         onTranslate={() => translate()}
         busy={busy}
         onCancel={() => void cancelTask()}
-        disabled={!detail?.taskInitialized}
+        disabled={!detail}
       />
       <div className="workspace-row">
         <ActivityBar view={view} onChange={setView} />
@@ -1202,11 +1242,11 @@ function Workspace({
         </small>
         <button
           className="run-chapter icon-label"
-          disabled={translating || !ready}
+          disabled={translating || busy}
           onClick={onTranslate}
         >
           {translating ? <LoaderCircle className="spin" /> : <Play />}
-          {translating ? "正在翻译" : ready ? "翻译本章" : "请先初始化"}
+          {translating ? "正在翻译" : ready ? "翻译本章" : "初始化并翻译"}
         </button>
       </div>
       <div className="breadcrumb">
@@ -1806,6 +1846,17 @@ function NumberField({ label, value, min = 1, disabled, onChange }: { label: str
       <input type="number" min={min} step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} />
     </label>
   );
+}
+function taskConfigFromConfig(config: Config): TaskConfigDraft {
+  return {
+    sourceLanguage: config.language.source,
+    maxCharsPerSegment: config.segment.max_chars_per_segment,
+    maxCharsPerBatch: config.segment.max_chars_per_batch,
+    recentContextChars: config.pipeline.recent_context_chars,
+    timeoutSecs: config.llm.timeout_secs,
+    maxRetries: config.llm.max_retries,
+    fullBook: config.analysis.full_book,
+  };
 }
 function validTaskConfig(value: TaskConfigDraft) {
   return Boolean(value.sourceLanguage.trim()) &&
