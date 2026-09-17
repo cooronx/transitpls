@@ -24,3 +24,4 @@ design/
 *.njsproj
 *.sln
 *.sw?
+opencode.json
