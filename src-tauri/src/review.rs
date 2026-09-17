@@ -1,3 +1,7 @@
+//! 全书审校：按章节分批检查漏译、错译、术语与文风问题，生成审校报告。
+//!
+//! 目前只有 mock 客户端实现（用于验证报告结构与落盘），真实审校客户端尚未接入。
+
 use crate::{
     model::{Chapter, ProjectState},
     state,
@@ -10,31 +14,49 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// 审校问题类型。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IssueType {
+    /// 漏译。
     Omission,
+    /// 错译。
     Mistranslation,
+    /// 术语不一致。
     Terminology,
+    /// 前后不一致。
     Consistency,
+    /// 文风偏移。
     Style,
+    /// 格式问题。
     Format,
+    /// 未翻译。
     Untranslated,
 }
+
+/// 问题严重程度。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
+    /// 严重，必须处理。
     Critical,
+    /// 主要问题。
     Major,
+    /// 次要问题。
     Minor,
 }
+
+/// 问题对应的原文/译文证据。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Evidence {
     pub source: String,
     pub target: String,
+    /// 相关联的段落 ID，便于定位上下文。
     #[serde(default)]
     pub related_segment_ids: Vec<String>,
 }
+
+/// 一条审校问题。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Issue {
     pub id: String,
@@ -45,15 +67,20 @@ pub struct Issue {
     pub summary: String,
     pub evidence: Evidence,
 }
+
+/// 审校消耗的 token 用量。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
+
+/// 一次审校的完整报告。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     pub run_id: String,
     pub project_id: String,
+    /// `completed` 或 `partial`（存在失败批次）。
     pub status: String,
     pub summary: serde_json::Value,
     pub issues: Vec<Issue>,
@@ -72,6 +99,9 @@ fn issue_id(c: &str, s: &str, t: &IssueType) -> String {
     format!("{c}:{s}:{t:?}").to_lowercase()
 }
 
+/// 运行审校并写入 `reviews/{run_id}/`，返回报告与目录路径。
+///
+/// `resume` 指定时复用已有 run ID 续跑；批次失败会记入报告但不中断整体流程。
 pub async fn run(
     state_dir: &Path,
     project: &ProjectState,
