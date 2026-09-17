@@ -1,3 +1,5 @@
+//! 翻译批次与上下文：按字符预算切分批次，并收集最近译文作为提示词参考。
+
 use crate::llm::RecentTarget;
 use crate::model::{Chapter, ItemStatus, Segment};
 use crate::state;
@@ -6,12 +8,14 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::Path;
 
+/// 项目目录下 `context.json` 的内容，记录最近的译文上下文。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextFile {
     pub updated_at: String,
     pub recent_targets: Vec<RecentTarget>,
 }
 
+/// 按原文 Unicode 字符数把段落切成批次区间；单段超限时独占一个批次。
 pub fn batch_ranges(segments: &[Segment], max_chars: usize) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = 0;
@@ -35,6 +39,7 @@ pub fn batch_ranges(segments: &[Segment], max_chars: usize) -> Vec<Range<usize>>
     ranges
 }
 
+/// 收集指定位置之前最近的已翻译段落，按时间顺序返回。
 pub fn recent_targets(
     chapters: &[Chapter],
     before_chapter: usize,
@@ -50,9 +55,8 @@ pub fn recent_targets(
     )
 }
 
-/// Reference context for polish rounds: always reads the frozen draft
-/// (`target_before_polish`) so parallel batches cannot influence each other
-/// through the polished `target`.
+/// 润色轮次的参考上下文：始终读取冻结的草稿（`target_before_polish`），
+/// 避免并行批次通过已润色的 `target` 互相影响。
 pub fn recent_drafts(
     chapters: &[Chapter],
     before_chapter: usize,
@@ -73,6 +77,8 @@ pub fn recent_drafts(
     )
 }
 
+/// 从 `before_chapter`/`before_segment` 向前收集译文，直到超出字符预算、
+/// 遇到未翻译段落或没有译文为止；结果按时间顺序返回。
 fn collect_recent<F>(
     chapters: &[Chapter],
     before_chapter: usize,
@@ -127,6 +133,7 @@ fn chronological(mut values: Vec<RecentTarget>) -> Vec<RecentTarget> {
     values
 }
 
+/// 把最近上下文写入项目目录的 `context.json`。
 pub fn write_context(
     project_dir: &Path,
     chapters: &[Chapter],
