@@ -22,6 +22,10 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 > 平时阅读百合轻小说时，遇到的总是繁体版或台版翻译，我个人看着很难受（百合牛逼）
 > 最开始其实是看到了一个叫做<a href="https://github.com/BigDawnGhost/wenyi">wenyi</a>的项目，也挺厉害的，但是cli用着翻译书籍总感觉有点不好用，于是借鉴项目的思路写了这样一个桌面端的App
 
+<p align="center">
+  <img src="resources/baihe.jpg" height="200" alt="" />
+</p>
+
 ![TransItPls 翻译工作台](resources/311203FBD8F1F6C610A6B924ED814008.png)
 
 <details>
@@ -95,6 +99,25 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 ### 下载安装
 
 支持 Windows 和 macOS，点击[这里](https://github.com/cooronx/transitpls/releases)即可直接下载最新发布版本。
+
+### macOS 提示「已损坏」或「无法验证开发者」
+
+macOS 的 Gatekeeper 会拦截未签名应用，按以下步骤处理即可：
+
+1. 在终端执行 `sudo spctl --master-disable`（输入密码时不显示字符），然后打开「系统设置 → 隐私与安全性」，把「允许从以下位置下载的应用程序」切换为「任何来源」。
+2. 在终端执行 `xattr -cr` 并把 `transitpls.app` 拖入终端窗口补全路径，或直接输入完整命令：
+
+   ```bash
+   xattr -cr /Applications/transitpls.app
+   ```
+
+3. 右键点击应用选择「打开」，再点击一次「打开」即可正常启动。
+
+<p align="center">
+  <img src="resources/macos-anywhere.png" width="720" alt="在隐私与安全性中把允许来源改为任何来源" />
+</p>
+
+详细说明可参考[这篇教程](https://juejin.cn/post/7602512226999418930)。
 
 ### 从源码编译
 
