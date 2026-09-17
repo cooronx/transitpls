@@ -1,25 +1,41 @@
+//! 应用配置：默认值、TOML 读写与校验。
+//!
+//! 配置文件默认为工作目录下的 `transitpls.toml`，相对 `state_dir` 按配置文件所在目录解析。
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub const DEFAULT_CONFIG_FILE: &str = "transitpls.toml";
 
+/// 应用配置根节点，未配置的字段使用默认值。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(default)]
 pub struct AppConfig {
+    /// 语言设置。
     pub language: LanguageConfig,
+    /// 模型与请求设置。
     pub llm: LlmConfig,
+    /// 分段与批次预算。
     pub segment: SegmentConfig,
+    /// 路径设置。
     pub paths: PathsConfig,
+    /// 分析策略。
     pub analysis: AnalysisConfig,
+    /// 翻译流水线选项。
     pub pipeline: PipelineConfig,
+    /// 界面与并发等通用设置。
     pub general: GeneralConfig,
 }
 
+/// 通用设置。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct GeneralConfig {
+    /// 工作台每页显示的段落数。
     pub visible_segments: usize,
+    /// 重译并发数。
     pub retranslation_concurrency: usize,
+    /// 润色批次并发数。
     pub polish_concurrency: usize,
 }
 
@@ -33,10 +49,13 @@ impl Default for GeneralConfig {
     }
 }
 
+/// 翻译流水线选项。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PipelineConfig {
+    /// 全书翻译完成后是否自动润色。
     pub polish: bool,
+    /// 注入提示词的最近译文字符数上限。
     pub recent_context_chars: usize,
 }
 
@@ -49,10 +68,13 @@ impl Default for PipelineConfig {
     }
 }
 
+/// 语言设置。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LanguageConfig {
+    /// 源语言代码，`auto` 表示自动识别。
     pub source: String,
+    /// 目标语言代码，目前仅支持 `zh-CN`。
     pub target: String,
 }
 
@@ -65,14 +87,21 @@ impl Default for LanguageConfig {
     }
 }
 
+/// 模型与请求设置。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct LlmConfig {
+    /// 服务商协议：`openai-chat`、`openai-compatible`、`openai-responses` 或 `anthropic`。
     pub provider: String,
+    /// 接口基础地址，留空时按协议使用官方地址。
     pub base_url: Option<String>,
+    /// 模型名称。
     pub model: String,
+    /// 读取 API Key 的环境变量名；本地免密钥服务留空。
     pub api_key_env: String,
+    /// 单次请求超时秒数。
     pub timeout_secs: u64,
+    /// 每次调用的最大重试次数。
     pub max_retries: usize,
 }
 
@@ -90,6 +119,7 @@ impl Default for LlmConfig {
 }
 
 impl LlmConfig {
+    /// 规范化配置：统一服务商名称与 Base URL，校验协议、模型与超时。
     pub fn normalized(&self) -> Result<Self, String> {
         let mut value = self.clone();
         value.provider = crate::credentials::normalize_provider(&self.provider);
@@ -155,6 +185,7 @@ impl LlmConfig {
         Ok(value)
     }
 
+    /// 是否允许空 API Key：仅本地 OpenAI 兼容服务且未配置密钥环境变量时为 true。
     pub fn allows_empty_key(&self) -> bool {
         matches!(
             self.provider.trim().to_ascii_lowercase().as_str(),
@@ -172,6 +203,7 @@ impl LlmConfig {
                 })
     }
 
+    /// 获取 API Key：优先桌面端保存的密钥，其次环境变量。
     pub fn api_key(&self) -> Result<String, String> {
         let config = self.normalized()?;
         if config.allows_empty_key() {
@@ -189,14 +221,18 @@ impl LlmConfig {
     }
 }
 
+/// 桌面端密钥优先于环境变量。
 fn select_api_key(stored: Option<String>, environment: Option<String>) -> Option<String> {
     stored.or_else(|| environment.filter(|value| !value.trim().is_empty()))
 }
 
+/// 分段与批次预算。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct SegmentConfig {
+    /// 单个段落的最大字符数，超过时按句末标点切分。
     pub max_chars_per_segment: usize,
+    /// 单个翻译批次的最大字符数。
     pub max_chars_per_batch: usize,
 }
 
@@ -209,9 +245,11 @@ impl Default for SegmentConfig {
     }
 }
 
+/// 路径设置。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct PathsConfig {
+    /// 项目数据目录，相对路径按配置文件所在目录解析。
     pub state_dir: PathBuf,
 }
 
@@ -223,9 +261,11 @@ impl Default for PathsConfig {
     }
 }
 
+/// 分析策略。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AnalysisConfig {
+    /// 是否执行完整分析（逐章摘要与全书梗概）。
     pub full_book: bool,
 }
 
@@ -235,6 +275,7 @@ impl Default for AnalysisConfig {
     }
 }
 
+/// 加载结果：配置内容、来源文件与解析后的状态目录。
 #[derive(Debug, Clone)]
 pub struct LoadedConfig {
     pub value: AppConfig,
@@ -242,6 +283,7 @@ pub struct LoadedConfig {
     pub state_dir: PathBuf,
 }
 
+/// 加载配置：显式路径必须存在，否则读取工作目录下的默认文件，都没有时使用默认值。
 pub fn load(explicit_path: Option<&Path>) -> Result<LoadedConfig, String> {
     let cwd = std::env::current_dir()
         .map_err(|error| format!("failed to determine current directory: {error}"))?;
@@ -277,6 +319,7 @@ pub fn load(explicit_path: Option<&Path>) -> Result<LoadedConfig, String> {
     })
 }
 
+/// 校验配置中的取值范围。
 fn validate(config: &AppConfig) -> Result<(), String> {
     config.llm.normalized()?;
     if config.language.source.trim().is_empty() {
@@ -309,6 +352,7 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// 校验并保存配置到工作目录下的 `transitpls.toml`。
 pub fn save_default(config: &AppConfig) -> Result<PathBuf, String> {
     validate(config)?;
     let mut config = config.clone();
