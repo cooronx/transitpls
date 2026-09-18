@@ -5,36 +5,36 @@ import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
 import { openPath } from "@tauri-apps/plugin-opener";
 import {
   ArrowRight,
-  BookOpen,
   Braces,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
-  Clock3,
-  Circle,
   CircleDashed,
-  Columns2,
+  Clock3,
+  Copy,
   Download,
   Eye,
   EyeOff,
-  FileText,
   FolderKanban,
   Languages,
   LibraryBig,
   LoaderCircle,
-  MessageSquare,
+  Minus,
   PanelTop,
   Play,
   Plus,
   RotateCcw,
   Search,
   Settings,
+  SlidersHorizontal,
+  Square,
   SquareStop,
   Trash2,
   X,
   type LucideIcon,
 } from "lucide-react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
 import providerPresets from "./provider-presets.json";
 
@@ -230,6 +230,8 @@ const termTypeText: Record<string, string> = {
   speech: "语言习惯",
   fixed_expr: "固定表达",
 };
+const isMac =
+  typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
 
 export default function App() {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
@@ -249,6 +251,7 @@ export default function App() {
   const [visibleSegmentCount, setVisibleSegmentCount] = useState(100);
   const [displaySegmentCount, setDisplaySegmentCount] = useState(100);
   const [taskDraft, setTaskDraft] = useState<TaskConfigDraft | null>(null);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
 
   const reload = async (projectId?: string) => {
     const data = await invoke<Bootstrap>("ui_bootstrap");
@@ -264,11 +267,13 @@ export default function App() {
       Math.min(current, Math.max(0, next.chapters.length - 1)),
     );
   };
-  useEffect(() => {
+  const boot = () =>
     reload().catch((error) => {
       if (String(error).includes("invoke")) setBootstrap(browserPreview());
       else setNotice(String(error));
     });
+  useEffect(() => {
+    void boot();
   }, []);
   useEffect(() => {
     if (!isTauri()) return;
@@ -444,6 +449,21 @@ export default function App() {
         : current,
     );
   }, [busy]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
+        const input = document.querySelector<HTMLInputElement>(
+          ".search-field input",
+        );
+        if (!input) return;
+        event.preventDefault();
+        input.focus();
+        input.select();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const run = async (label: string, action: () => Promise<Detail | void>) => {
     setBusy(label);
@@ -840,25 +860,93 @@ export default function App() {
     setDisplaySegmentCount(visibleSegmentCount);
   }, [chapterIndex, search, visibleSegmentCount]);
 
+  const activeRetranslation =
+    retranslationProgress?.projectId === detail?.project.id
+      ? retranslationProgress
+      : null;
+  const activeTiming =
+    translationTiming?.projectId === detail?.project.id
+      ? translationTiming
+      : null;
+  let busyPercent: number | null = null;
+  let busyDetail: string | null = null;
+  if (busy?.startsWith("重译") && activeRetranslation) {
+    busyPercent = Math.round(
+      (activeRetranslation.completed /
+        Math.max(1, activeRetranslation.total)) *
+        100,
+    );
+    busyDetail = `${activeRetranslation.completed} / ${activeRetranslation.total} 项 · 成功 ${activeRetranslation.succeeded} · 失败 ${activeRetranslation.failed}`;
+  } else if (busy === "翻译" && activeTiming && activeTiming.totalRequests > 0) {
+    busyPercent = Math.round(
+      (activeTiming.completedRequests / activeTiming.totalRequests) * 100,
+    );
+    busyDetail = `${activeTiming.completedRequests} / ${activeTiming.totalRequests} 个批次`;
+  } else if (
+    (busy === "润色" || busy === "重试润色") &&
+    detail?.polish &&
+    detail.polish.total > 0
+  ) {
+    const done = detail.polish.succeeded + detail.polish.failed;
+    busyPercent = Math.round((done / detail.polish.total) * 100);
+    busyDetail = `${done} / ${detail.polish.total} 批 · 成功 ${detail.polish.succeeded} · 失败 ${detail.polish.failed}`;
+  }
+  const cancellable =
+    busy === "翻译" ||
+    busy === "润色" ||
+    busy === "重试润色" ||
+    busy === "项目初始化" ||
+    busy === "重新分析" ||
+    busy === "导入书籍" ||
+    Boolean(busy?.startsWith("重译"));
+
+  if (!bootstrap) {
+    return (
+      <div className="app-loading">
+        <Logo />
+        {notice ? (
+          <>
+            <b>无法加载工作台</b>
+            <small>{notice}</small>
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                setNotice(null);
+                void boot();
+              }}
+            >
+              重试
+            </button>
+          </>
+        ) : (
+          <>
+            <LoaderCircle className="spin" />
+            <b>正在加载工作台…</b>
+            <small>读取本地项目与配置</small>
+          </>
+        )}
+      </div>
+    );
+  }
+
   return (
-    <div className="app-shell">
-      <Header
+    <div className={`app-shell ${isMac ? "is-macos" : ""}`}>
+      <TitleBar
         project={detail?.project}
-        projects={bootstrap?.projects ?? []}
-        model={bootstrap?.config.llm.model ?? "—"}
-        search={search}
-        onSearch={setSearch}
+        projects={bootstrap.projects}
+        model={bootstrap.config.llm.model ?? "—"}
+        view={view}
+        onView={setView}
         onProject={(id) => void selectProject(id)}
         onTranslate={() => translate()}
         busy={busy}
-        onCancel={() => void cancelTask()}
         disabled={!detail}
       />
-      <div className="workspace-row">
-        <ActivityBar view={view} onChange={setView} />
+      <div className="app-body">
         {view === "workspace" && (
           <Explorer
-            projects={bootstrap?.projects ?? []}
+            projects={bootstrap.projects}
             detail={detail}
             chapterIndex={chapterIndex}
             onChapter={setChapterIndex}
@@ -879,9 +967,13 @@ export default function App() {
               }
               tray={tray}
               setTray={setTray}
+              search={search}
+              onSearch={setSearch}
               translating={busy === "翻译"}
               busy={Boolean(busy)}
               ready={detail.taskInitialized}
+              inspectorOpen={inspectorOpen}
+              onToggleInspector={() => setInspectorOpen((open) => !open)}
               onTranslate={() => translate(chapterIndex)}
               onExport={exportBook}
               onOpenTerms={() => setView("terms")}
@@ -889,7 +981,7 @@ export default function App() {
           )}
           {view === "projects" && (
             <ProjectGallery
-              projects={bootstrap?.projects ?? []}
+              projects={bootstrap.projects}
               busy={Boolean(busy)}
               onSelect={selectProject}
               onDelete={deleteProject}
@@ -898,7 +990,7 @@ export default function App() {
           )}
           {view === "history" && (
             <ProjectGallery
-              projects={bootstrap?.projects ?? []}
+              projects={bootstrap.projects}
               busy={Boolean(busy)}
               onSelect={selectProject}
               onImport={importFile}
@@ -915,9 +1007,9 @@ export default function App() {
           )}
           {view === "settings" && (
             <SettingsView
-              config={bootstrap?.config}
-              credential={bootstrap?.credential}
-              configPath={bootstrap?.configPath}
+              config={bootstrap.config}
+              credential={bootstrap.credential}
+              configPath={bootstrap.configPath}
               busy={busy}
               onSaveModel={saveModel}
               onSaveGeneral={saveGeneral}
@@ -927,17 +1019,13 @@ export default function App() {
             <EmptyState onImport={importFile} />
           )}
         </main>
-        {view === "workspace" && detail && (
+        {view === "workspace" && detail && inspectorOpen && (
           <Inspector
-            config={bootstrap?.config}
+            config={bootstrap.config}
             detail={detail}
             busy={busy}
             retranslationProgress={retranslationProgress}
-            translationTiming={
-              translationTiming?.projectId === detail.project.id
-                ? translationTiming
-                : null
-            }
+            translationTiming={activeTiming}
             now={now}
             draft={taskDraft}
             onDraftChange={setTaskDraft}
@@ -948,23 +1036,33 @@ export default function App() {
             onInitialize={initializeTask}
             onReanalyze={reanalyze}
             onOpenTerms={() => setView("terms")}
+            onOpenSettings={() => setView("settings")}
+            onClose={() => setInspectorOpen(false)}
           />
         )}
       </div>
       <footer className="statusbar">
         <span>TransItPls</span>
         <i />
-        <span>Tauri</span>
+        <span>{bootstrap.projects.length} 个项目</span>
         <span className="status-spacer" />
-        <span className="icon-label">
-          {busy && <LoaderCircle className="spin" />}
-          {busy ? `${busy} 进行中…` : "就绪"}
+        <span className={`status-state ${busy ? "busy" : ""}`}>
+          {busy ? <LoaderCircle className="spin" /> : <i className="status-dot ok" />}
+          {busy ? `${busy}…` : "就绪"}
         </span>
-        <i />
-        <span>{bootstrap?.projects.length ?? 0} 个项目</span>
       </footer>
+      {busy && busyPercent === null && <div className="busy-line" />}
+      {busy && (
+        <ActivityDock
+          label={busy}
+          detail={busyDetail}
+          percent={busyPercent}
+          cancellable={cancellable}
+          onCancel={() => void cancelTask()}
+        />
+      )}
       {notice && (
-        <div className="toast">
+        <div className="toast" role="status">
           <span>{notice}</span>
           <button
             className="toast-close"
@@ -975,7 +1073,6 @@ export default function App() {
           </button>
         </div>
       )}
-      {busy && <div className="busy-line" />}
     </div>
   );
 }
@@ -983,172 +1080,258 @@ export default function App() {
 function Logo() {
   return <img className="logo-mark" src="/transitpls_icon.png" alt="" />;
 }
-function Header({
+function ProgressBar({
+  value,
+  label,
+  detail,
+  size = "md",
+}: {
+  value: number;
+  label?: string;
+  detail?: string;
+  size?: "md" | "lg";
+}) {
+  const percent = Math.max(0, Math.min(100, Math.round(value)));
+  return (
+    <div className={`progress-block ${size}`}>
+      {label && (
+        <div className="progress-head">
+          <span>{label}</span>
+          <b>{percent}%</b>
+        </div>
+      )}
+      <div
+        className="progress-track"
+        role="progressbar"
+        aria-valuenow={percent}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={label ?? "进度"}
+      >
+        <i style={{ width: `${percent}%` }} />
+      </div>
+      {detail && <small>{detail}</small>}
+    </div>
+  );
+}
+function ActivityDock({
+  label,
+  detail,
+  percent,
+  cancellable,
+  onCancel,
+}: {
+  label: string;
+  detail: string | null;
+  percent: number | null;
+  cancellable: boolean;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="activity-dock" role="status" aria-live="polite">
+      <LoaderCircle className="spin" aria-hidden="true" />
+      <div className="activity-info">
+        <b>{label}</b>
+        {detail && <small>{detail}</small>}
+        <div className={`progress-track ${percent === null ? "indeterminate" : ""}`}>
+          <i style={percent === null ? undefined : { width: `${percent}%` }} />
+        </div>
+      </div>
+      {cancellable && (
+        <button type="button" className="btn btn-danger sm" onClick={onCancel}>
+          <SquareStop />
+          取消
+        </button>
+      )}
+    </div>
+  );
+}
+function useAppWindow() {
+  return useMemo(() => (isTauri() ? getCurrentWindow() : null), []);
+}
+function WindowControls() {
+  const appWindow = useAppWindow();
+  const [maximized, setMaximized] = useState(false);
+  useEffect(() => {
+    if (!appWindow) return;
+    let dispose: (() => void) | undefined;
+    const sync = () => {
+      appWindow
+        .isMaximized()
+        .then(setMaximized)
+        .catch(() => {});
+    };
+    sync();
+    void appWindow
+      .onResized(sync)
+      .then((unlisten) => {
+        dispose = unlisten;
+      })
+      .catch(() => {});
+    return () => dispose?.();
+  }, [appWindow]);
+  if (!appWindow) return null;
+  return (
+    <div className="window-controls">
+      <button
+        type="button"
+        className="window-button"
+        aria-label="最小化"
+        title="最小化"
+        onClick={() => void appWindow.minimize()}
+      >
+        <Minus />
+      </button>
+      <button
+        type="button"
+        className="window-button"
+        aria-label={maximized ? "向下还原" : "最大化"}
+        title={maximized ? "向下还原" : "最大化"}
+        onClick={() => void appWindow.toggleMaximize()}
+      >
+        {maximized ? <Copy /> : <Square />}
+      </button>
+      <button
+        type="button"
+        className="window-button close"
+        aria-label="关闭"
+        title="关闭"
+        onClick={() => void appWindow.close()}
+      >
+        <X />
+      </button>
+    </div>
+  );
+}
+function TitleBar({
   project,
   projects,
   model,
-  search,
-  onSearch,
+  view,
+  onView,
   onProject,
   onTranslate,
   busy,
-  onCancel,
   disabled,
 }: {
   project?: Project;
   projects: Project[];
   model: string;
-  search: string;
-  onSearch: (v: string) => void;
+  view: View;
+  onView: (v: View) => void;
   onProject: (id: string) => void;
   onTranslate: () => void;
   busy: string | null;
-  onCancel: () => void;
   disabled: boolean;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const retranslating = busy?.startsWith("重译") ?? false;
-  const cancellable =
-    busy === "翻译" ||
-    retranslating ||
-    busy === "项目初始化" ||
-    busy === "重新分析" ||
-    busy === "导入书籍";
-  const translateLabel =
-    retranslating
-      ? busy
-      : busy === "翻译"
+  const translateLabel = retranslating
+    ? busy
+    : busy === "翻译"
       ? "正在翻译"
       : busy === "项目初始化" || busy === "重新分析"
-        ? busy === "重新分析" ? "正在重新分析" : "正在初始化"
+        ? busy === "重新分析"
+          ? "正在重新分析"
+          : "正在初始化"
         : busy === "导入书籍"
           ? "正在导入"
-        : "开始翻译";
+          : "开始翻译";
   return (
-    <header className="topbar">
-      <div className="brand">
+    <header className="titlebar" data-tauri-drag-region="deep">
+      <span className="titlebar-logo">
         <Logo />
-        <strong>TransItPls</strong>
-        <i />
-        <span>项目：</span>
-        <div className="project-switcher">
-          <button
-            className="project-trigger"
-            aria-expanded={menuOpen}
-            disabled={!project || Boolean(busy)}
-            onClick={() => setMenuOpen(!menuOpen)}
-          >
-            <b>{project?.title ?? "未选择项目"}</b>
-            {menuOpen ? <ChevronUp /> : <ChevronDown />}
-          </button>
-          {menuOpen && (
-            <>
-              <button
-                className="menu-backdrop"
-                aria-label="关闭项目菜单"
-                onClick={() => setMenuOpen(false)}
-              />
-              <div className="project-menu">
-                <header>
-                  <b>切换项目</b>
-                  <small>{projects.length} 个项目</small>
-                </header>
-                <div>
-                  {projects.map((item) => (
-                    <button
-                      className={`project-option ${item.id === project?.id ? "active" : ""}`}
-                      key={item.id}
-                      onClick={() => {
-                        setMenuOpen(false);
-                        if (item.id !== project?.id) onProject(item.id);
-                      }}
-                    >
-                      <ProjectCover project={item} className="mini-cover" />
-                      <span>
-                        <b>{item.title}</b>
-                        <small>
-                          {item.chapters_completed} / {item.chapters_total} 章 ·{" "}
-                          {projectStatusText(item)}
-                        </small>
-                      </span>
-                      {item.id === project?.id && <em>当前</em>}
-                    </button>
-                  ))}
-                </div>
+      </span>
+      <div className="project-switcher">
+        <button
+          type="button"
+          className="project-trigger"
+          aria-expanded={menuOpen}
+          disabled={!project || Boolean(busy)}
+          onClick={() => setMenuOpen(!menuOpen)}
+        >
+          <b>{project?.title ?? "未选择项目"}</b>
+          {menuOpen ? <ChevronUp /> : <ChevronDown />}
+        </button>
+        {menuOpen && (
+          <>
+            <button
+              className="menu-backdrop"
+              aria-label="关闭项目菜单"
+              onClick={() => setMenuOpen(false)}
+            />
+            <div className="project-menu" data-tauri-drag-region="false">
+              <header>
+                <b>切换项目</b>
+                <small>{projects.length} 个项目</small>
+              </header>
+              <div>
+                {projects.map((item) => (
+                  <button
+                    type="button"
+                    className={`project-option ${item.id === project?.id ? "active" : ""}`}
+                    key={item.id}
+                    onClick={() => {
+                      setMenuOpen(false);
+                      if (item.id !== project?.id) onProject(item.id);
+                    }}
+                  >
+                    <ProjectCover project={item} className="mini-cover" />
+                    <span>
+                      <b>{item.title}</b>
+                      <small>
+                        {item.chapters_completed} / {item.chapters_total} 章 ·{" "}
+                        {projectStatusText(item)}
+                      </small>
+                    </span>
+                    {item.id === project?.id && <em>当前</em>}
+                  </button>
+                ))}
               </div>
-            </>
-          )}
-        </div>
+            </div>
+          </>
+        )}
       </div>
-      <label className="global-search">
-        <Search />
-        <input
-          value={search}
-          onChange={(e) => onSearch(e.target.value)}
-          placeholder="搜索原文或译文…"
-        />
-        <kbd>Ctrl K</kbd>
-      </label>
-      <div className="top-actions">
-        <span>
-          模型: <b>{model}</b>
-        </span>
-        <span className="local-state">
+      <span className="titlebar-suffix">— TransItPls</span>
+      <nav className="titlebar-nav">
+        {navItems.map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            className={view === item.id ? "active" : ""}
+            onClick={() => onView(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+      <div className="titlebar-drag" />
+      <div className="titlebar-actions">
+        <span className="model-chip" title={`当前模型：${model}`}>
           <i />
-          本地状态
+          {model}
         </span>
         <button
-          className="primary icon-label"
+          type="button"
+          className={`icon-button ${view === "settings" ? "active" : ""}`}
+          aria-label="设置"
+          title="设置"
+          onClick={() => onView("settings")}
+        >
+          <Settings />
+        </button>
+        <button
+          type="button"
+          className="btn btn-primary sm"
           disabled={disabled || Boolean(busy)}
           onClick={onTranslate}
         >
           {busy ? <LoaderCircle className="spin" /> : <Play />}
           {translateLabel}
         </button>
-        {cancellable && (
-          <button className="cancel icon-label" onClick={onCancel}>
-            <SquareStop />
-            取消任务
-          </button>
-        )}
       </div>
+      <WindowControls />
     </header>
-  );
-}
-function ActivityBar({
-  view,
-  onChange,
-}: {
-  view: View;
-  onChange: (v: View) => void;
-}) {
-  return (
-    <nav className="activity-bar">
-      <div>
-        {navItems.map((item) => {
-          const Icon = item.icon;
-          return (
-            <button
-              key={item.id}
-              className={view === item.id ? "active" : ""}
-              onClick={() => onChange(item.id)}
-              title={item.label}
-            >
-              <Icon />
-              <span>{item.label}</span>
-            </button>
-          );
-        })}
-      </div>
-      <button
-        className={view === "settings" ? "active" : ""}
-        onClick={() => onChange("settings")}
-        title="设置"
-      >
-        <Settings />
-        <span>设置</span>
-      </button>
-    </nav>
   );
 }
 function Explorer({
@@ -1166,65 +1349,66 @@ function Explorer({
   onProject: (id: string) => void;
   onImport: () => void;
 }) {
-  const project = detail?.project,
-    progress = project
-      ? Math.round(
-          (project.chapters_completed / Math.max(1, project.chapters_total)) *
-            100,
-        )
-      : 0;
+  const project = detail?.project;
+  const progress = project
+    ? Math.round(
+        (project.chapters_completed / Math.max(1, project.chapters_total)) * 100,
+      )
+    : 0;
   return (
     <aside className="explorer">
-      <div className="panel-title">
-        <strong>项目文件</strong>
-        <button className="icon-label" onClick={onImport}>
+      <div className="explorer-head">
+        <b>项目文件</b>
+        <button type="button" className="btn btn-quiet sm" onClick={onImport}>
           <Plus />
-          导入文件
+          导入
         </button>
       </div>
       {project ? (
         <>
-          <div className="project-card">
-            <div>
-              <span className="book-icon">
-                <BookOpen />
-              </span>
-              <p>
-                <b>{project.title}</b>
-                <small>{project.chapters_total} 个章节</small>
-              </p>
+          <div className="project-summary">
+            <ProjectCover project={project} className="cover-sm" />
+            <div className="project-summary-info">
+              <b>{project.title}</b>
+              <small>{fileName(project.source_file)}</small>
             </div>
-            <div className="progress">
-              <i style={{ width: `${progress}%` }} />
-            </div>
-            <footer>
-              <span>
-                {project.chapters_completed} / {project.chapters_total} 章
-              </span>
-              <b>{progress}%</b>
-            </footer>
           </div>
-          <div className="file-row">
-            <ChevronDown />
-            <BookOpen />
-            <strong>{fileName(project.source_file)}</strong>
+          <div className="explorer-progress">
+            <ProgressBar
+              value={progress}
+              label="全书进度"
+              detail={`${project.chapters_completed} / ${project.chapters_total} 章 · ${projectStatusText(project)}`}
+            />
           </div>
           <div className="chapter-list">
-            {detail?.chapters.map((chapter, index) => (
-              <button
-                key={chapter.id}
-                className={index === chapterIndex ? "active" : ""}
-                onClick={() => onChapter(index)}
-              >
-                <FileText />
-                <b>{chapter.target_title || chapter.title}</b>
-                <em className={chapter.status}>{statusText[chapter.status]}</em>
-              </button>
-            ))}
+            <div className="chapter-list-head">
+              <span>章节</span>
+              <span>{detail?.chapters.length ?? 0} 章</span>
+            </div>
+            {detail?.chapters.map((chapter, index) => {
+              const done = chapter.segments.filter(
+                (s) => s.status === "translated",
+              ).length;
+              const percent = Math.round(
+                (done / Math.max(1, chapter.segments.length)) * 100,
+              );
+              return (
+                <button
+                  key={chapter.id}
+                  className={`chapter-item ${index === chapterIndex ? "active" : ""}`}
+                  title={statusText[chapter.status]}
+                  onClick={() => onChapter(index)}
+                >
+                  <i className={`status-dot ${statusClass(chapter.status)}`} />
+                  <b>{chapter.target_title || chapter.title}</b>
+                  <em>{percent}%</em>
+                </button>
+              );
+            })}
           </div>
         </>
       ) : (
-        <div className="explorer-empty">尚无项目</div>
+        <div className="panel-empty">尚无项目</div>
       )}
       {projects.length > 1 && (
         <div className="other-projects">
@@ -1232,7 +1416,7 @@ function Explorer({
           {projects
             .filter((p) => p.id !== project?.id)
             .map((p) => (
-              <button key={p.id} onClick={() => onProject(p.id)}>
+              <button key={p.id} type="button" onClick={() => onProject(p.id)}>
                 <FolderKanban />
                 <span>{p.title}</span>
               </button>
@@ -1251,9 +1435,13 @@ function Workspace({
   onShowMore,
   tray,
   setTray,
+  search,
+  onSearch,
   translating,
   busy,
   ready,
+  inspectorOpen,
+  onToggleInspector,
   onTranslate,
   onExport,
   onOpenTerms,
@@ -1266,39 +1454,91 @@ function Workspace({
   onShowMore: () => void;
   tray: TrayName;
   setTray: (t: TrayName) => void;
+  search: string;
+  onSearch: (v: string) => void;
   translating: boolean;
   busy: boolean;
   ready: boolean;
+  inspectorOpen: boolean;
+  onToggleInspector: () => void;
   onTranslate: () => void;
   onExport: (f: "txt" | "epub") => void;
   onOpenTerms: () => void;
 }) {
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const done = chapter.segments.filter((s) => s.status === "translated").length;
+  const chapterPercent = Math.round(
+    (done / Math.max(1, chapter.segments.length)) * 100,
+  );
   return (
     <div className="editor-layout">
-      <div className="editor-tabs">
-        <button className="active icon-label">
-          <Columns2 />
-          对照翻译
-        </button>
-        <span />
-        <small>
-          第 {chapterIndex + 1} / {detail.chapters.length} 章
-        </small>
-        <button
-          className="run-chapter icon-label"
-          disabled={translating || busy}
-          onClick={onTranslate}
-        >
-          {translating ? <LoaderCircle className="spin" /> : <Play />}
-          {translating ? "正在翻译" : ready ? "翻译本章" : "初始化并翻译"}
-        </button>
-      </div>
-      <div className="breadcrumb">
-        <FileText />
-        {fileName(detail.project.source_file)}
-        <i>/</i>
-        <b>{chapter.target_title || chapter.title}</b>
-        <em>{chapter.segments.length} 个段落</em>
+      <div className="work-toolbar">
+        <div className="work-title">
+          <b>{chapter.target_title || chapter.title}</b>
+          <small>
+            第 {chapterIndex + 1} / {detail.chapters.length} 章 ·{" "}
+            {chapter.segments.length} 段 · 已译 {chapterPercent}%
+          </small>
+        </div>
+        <label className="search-field">
+          <Search />
+          <input
+            value={search}
+            onChange={(e) => onSearch(e.target.value)}
+            placeholder="搜索原文或译文…"
+            aria-label="搜索原文或译文"
+          />
+          {search && (
+            <button
+              type="button"
+              className="search-clear"
+              aria-label="清除搜索"
+              onClick={() => onSearch("")}
+            >
+              <X />
+            </button>
+          )}
+        </label>
+        <div className="toolbar-actions">
+          <button
+            type="button"
+            className="btn btn-quiet sm"
+            disabled={busy}
+            title="导出 TXT"
+            onClick={() => onExport("txt")}
+          >
+            <Download />
+            <span className="btn-label">TXT</span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-quiet sm"
+            disabled={busy}
+            title="导出 EPUB"
+            onClick={() => onExport("epub")}
+          >
+            <Download />
+            <span className="btn-label">EPUB</span>
+          </button>
+          <button
+            type="button"
+            className={`btn btn-quiet sm ${inspectorOpen ? "active" : ""}`}
+            aria-pressed={inspectorOpen}
+            onClick={onToggleInspector}
+          >
+            <SlidersHorizontal />
+            <span className="btn-label">任务配置</span>
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary sm"
+            disabled={translating || busy}
+            onClick={onTranslate}
+          >
+            {translating ? <LoaderCircle className="spin" /> : <Play />}
+            {translating ? "正在翻译" : ready ? "翻译本章" : "初始化并翻译"}
+          </button>
+        </div>
       </div>
       <div className="column-head">
         <div>
@@ -1318,7 +1558,8 @@ function Workspace({
         )}
         {hasMoreSegments && (
           <button
-            className="load-more-segments icon-label"
+            type="button"
+            className="load-more-segments"
             onClick={onShowMore}
           >
             <ChevronDown />
@@ -1330,8 +1571,8 @@ function Workspace({
         detail={detail}
         tray={tray}
         setTray={setTray}
-        busy={busy}
-        onExport={onExport}
+        open={drawerOpen}
+        onToggle={() => setDrawerOpen((value) => !value)}
         onOpenTerms={onOpenTerms}
       />
     </div>
@@ -1343,24 +1584,24 @@ function SegmentCard({ segment }: { segment: Segment }) {
     <article className={`segment-card ${segment.status}`}>
       <div className="segment-source">
         <header>
-          <b>#{segment.ordinal + 1}</b>
-          <span>{words} 词</span>
+          <span className="seg-index">#{segment.ordinal + 1}</span>
+          <span className="seg-meta">
+            {segment.kind === "heading" ? "标题" : "段落"} · {words} 词
+          </span>
         </header>
         <p>{segment.source}</p>
-        <footer>
-          <PanelTop />
-          {segment.kind === "heading" ? "标题" : "源段落"}
-        </footer>
       </div>
       <div className="segment-target">
         <header>
-          <span>{segment.target?.length ?? 0} 字</span>
+          <span className="seg-meta">{segment.target?.length ?? 0} 字</span>
           {segment.polish_status && (
-            <em className={`polish-${segment.polish_status}`}>
+            <em className={`status-chip ${polishClass(segment.polish_status)}`}>
               {polishStatusText[segment.polish_status]}
             </em>
           )}
-          <b className={segment.status}>{statusText[segment.status]}</b>
+          <em className={`status-chip ${statusClass(segment.status)}`}>
+            {statusText[segment.status]}
+          </em>
         </header>
         {segment.target ? (
           <p>{segment.target}</p>
@@ -1370,20 +1611,6 @@ function SegmentCard({ segment }: { segment: Segment }) {
             <small>运行本章翻译后将在此显示译文</small>
           </div>
         )}
-        <footer>
-          <button disabled className="icon-label">
-            <RotateCcw />
-            重译
-          </button>
-          <button disabled className="icon-label">
-            <Check />
-            采纳
-          </button>
-          <button disabled className="icon-label">
-            <MessageSquare />
-            注释
-          </button>
-        </footer>
       </div>
     </article>
   );
@@ -1392,70 +1619,72 @@ function Tray({
   detail,
   tray,
   setTray,
-  busy,
-  onExport,
+  open,
+  onToggle,
   onOpenTerms,
 }: {
   detail: Detail;
   tray: TrayName;
   setTray: (t: TrayName) => void;
-  busy: boolean;
-  onExport: (f: "txt" | "epub") => void;
+  open: boolean;
+  onToggle: () => void;
   onOpenTerms: () => void;
 }) {
   return (
-    <section className="tray">
-      <header>
-        <div>
+    <section className={`drawer ${open ? "open" : ""}`}>
+      <header className="drawer-head">
+        <div className="drawer-tabs">
           <button
+            type="button"
             className={tray === "tasks" ? "active" : ""}
-            onClick={() => setTray("tasks")}
+            onClick={() => {
+              setTray("tasks");
+              if (!open) onToggle();
+            }}
           >
             章节任务 <b>{detail.chapters.length}</b>
           </button>
           <button
+            type="button"
             className={tray === "issues" ? "active" : ""}
-            onClick={() => setTray("issues")}
+            onClick={() => {
+              setTray("issues");
+              if (!open) onToggle();
+            }}
           >
-            问题列表 <b>{detail.pendingConflicts}</b>
+            问题 <b>{detail.pendingConflicts}</b>
           </button>
           <button
+            type="button"
             className={tray === "logs" ? "active" : ""}
-            onClick={() => setTray("logs")}
+            onClick={() => {
+              setTray("logs");
+              if (!open) onToggle();
+            }}
           >
             运行日志
           </button>
         </div>
-        <div className="export-menu">
-          <button
-            className="icon-label"
-            disabled={busy}
-            onClick={() => onExport("txt")}
-          >
-            <Download />
-            TXT
-          </button>
-          <button
-            className="icon-label"
-            disabled={busy}
-            onClick={() => onExport("epub")}
-          >
-            <Download />
-            EPUB
-          </button>
-        </div>
+        <button type="button" className="drawer-toggle" onClick={onToggle}>
+          {open ? <ChevronDown /> : <ChevronUp />}
+          {open ? "收起" : "展开"}
+        </button>
       </header>
-      <div className="tray-content">
-        {tray === "tasks" && <TaskTable detail={detail} />}{" "}
-        {tray === "issues" && <IssueList detail={detail} onOpenTerms={onOpenTerms} />}{" "}
-        {tray === "logs" && <LogList logs={detail.logs} />}
-      </div>
+      {open && (
+        <div className="drawer-body">
+          {tray === "tasks" && <TaskTable detail={detail} />}
+          {tray === "issues" && (
+            <IssueList detail={detail} onOpenTerms={onOpenTerms} />
+          )}
+          {tray === "logs" && <LogList logs={detail.logs} />}
+        </div>
+      )}
     </section>
   );
 }
 function TaskTable({ detail }: { detail: Detail }) {
   return (
-    <table>
+    <table className="data-table">
       <thead>
         <tr>
           <th>#</th>
@@ -1468,25 +1697,29 @@ function TaskTable({ detail }: { detail: Detail }) {
       <tbody>
         {detail.chapters.map((chapter, index) => {
           const done = chapter.segments.filter(
-              (s) => s.status === "translated",
-            ).length,
-            progress = Math.round(
-              (done / Math.max(1, chapter.segments.length)) * 100,
-            );
+            (s) => s.status === "translated",
+          ).length;
+          const progress = Math.round(
+            (done / Math.max(1, chapter.segments.length)) * 100,
+          );
           return (
             <tr key={chapter.id}>
-              <td>{index + 1}</td>
+              <td className="num">{index + 1}</td>
               <td>{chapter.target_title || chapter.title}</td>
               <td>
-                <em className={chapter.status}>{statusText[chapter.status]}</em>
+                <em className={`status-chip ${statusClass(chapter.status)}`}>
+                  {statusText[chapter.status]}
+                </em>
               </td>
               <td>
                 <div className="table-progress">
-                  <i style={{ width: `${progress}%` }} />
+                  <div className="progress-track sm">
+                    <i style={{ width: `${progress}%` }} />
+                  </div>
                   <span>{progress}%</span>
                 </div>
               </td>
-              <td>
+              <td className="num">
                 {done} / {chapter.segments.length}
               </td>
             </tr>
@@ -1496,8 +1729,16 @@ function TaskTable({ detail }: { detail: Detail }) {
     </table>
   );
 }
-function IssueList({ detail, onOpenTerms }: { detail: Detail; onOpenTerms: () => void }) {
-  const conflicts = detail.termConflicts.filter((item) => item.unresolved_events > 0);
+function IssueList({
+  detail,
+  onOpenTerms,
+}: {
+  detail: Detail;
+  onOpenTerms: () => void;
+}) {
+  const conflicts = detail.termConflicts.filter(
+    (item) => item.unresolved_events > 0,
+  );
   return conflicts.length ? (
     <div className="issue-list">
       {conflicts.map((item) => (
@@ -1546,6 +1787,8 @@ function Inspector({
   onInitialize,
   onReanalyze,
   onOpenTerms,
+  onOpenSettings,
+  onClose,
 }: {
   config?: Config;
   detail: Detail;
@@ -1562,6 +1805,8 @@ function Inspector({
   onInitialize: () => void;
   onReanalyze: () => Promise<void>;
   onOpenTerms: () => void;
+  onOpenSettings: () => void;
+  onClose: () => void;
 }) {
   const [tab, setTab] = useState<"task" | "memory">("task");
   const progress = Math.round(
@@ -1583,16 +1828,34 @@ function Inspector({
       : null;
   const polish = detail.polish;
   const translationComplete = detail.project.status === "translated";
+  const activeRetranslation =
+    retranslationProgress?.projectId === detail.project.id
+      ? retranslationProgress
+      : null;
   return (
     <aside className="inspector">
+      <div className="inspector-head">
+        <b>任务配置</b>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="关闭任务配置"
+          title="关闭"
+          onClick={onClose}
+        >
+          <X />
+        </button>
+      </div>
       <div className="inspector-tabs">
         <button
+          type="button"
           className={tab === "task" ? "active" : ""}
           onClick={() => setTab("task")}
         >
           任务配置
         </button>
         <button
+          type="button"
           className={tab === "memory" ? "active" : ""}
           onClick={() => setTab("memory")}
         >
@@ -1601,16 +1864,72 @@ function Inspector({
       </div>
       <div className="inspector-body">
         {!draft ? (
-          <div className="panel-empty">正在读取任务配置…</div>
+          <div className="panel-empty">
+            <LoaderCircle className="spin" />
+            正在读取任务配置…
+          </div>
         ) : tab === "task" ? (
           <>
+            <section className="inspector-section">
+              <ProgressBar
+                value={progress}
+                label="项目进度"
+                detail={`已完成 ${detail.project.chapters_completed} / ${detail.project.chapters_total} 章`}
+                size="lg"
+              />
+              {translationTiming && (
+                <p
+                  className={`status-line ${translationTiming.finishedAt ? "done" : "active"}`}
+                >
+                  <Clock3 />
+                  已用 {formatDuration(translationElapsed)} ·{" "}
+                  {translationTiming.finishedAt
+                    ? "本次翻译已结束"
+                    : estimatedRemaining === null
+                      ? "正在估算剩余时间"
+                      : `预计还需 ${formatDuration(estimatedRemaining)}`}
+                </p>
+              )}
+              {activeRetranslation && (
+                <ProgressBar
+                  value={
+                    (activeRetranslation.completed /
+                      Math.max(1, activeRetranslation.total)) *
+                    100
+                  }
+                  label="本次重译"
+                  detail={`${activeRetranslation.completed} / ${activeRetranslation.total} 项 · 成功 ${activeRetranslation.succeeded} · 失败 ${activeRetranslation.failed}`}
+                />
+              )}
+              <p
+                className={`status-line ${
+                  detail.project.status === "failed"
+                    ? "error"
+                    : detail.project.status === "translated"
+                      ? "done"
+                      : "active"
+                }`}
+              >
+                {detail.project.status === "translated" ? (
+                  <CheckCircle2 />
+                ) : (
+                  <CircleDashed />
+                )}
+                {detail.taskInitialized
+                  ? statusText[detail.project.status]
+                  : "等待初始化任务"}
+              </p>
+            </section>
             <Field label="语言方向">
-              <div className="direction configurable-direction">
+              <div className="direction">
                 <select
                   value={draft.sourceLanguage}
                   disabled={detail.taskInitialized || Boolean(busy)}
                   onChange={(event) =>
-                    onDraftChange({ ...draft, sourceLanguage: event.target.value })
+                    onDraftChange({
+                      ...draft,
+                      sourceLanguage: event.target.value,
+                    })
                   }
                 >
                   <option value="auto">自动检测</option>
@@ -1628,31 +1947,19 @@ function Inspector({
                   : "初始化时确定源语言，自动检测会调用模型。"}
               </small>
             </Field>
-            <Field label="模型选择">
-              <div className="select-like">
-                {config?.llm.model ?? "—"}
-                <ChevronDown />
+            <Field label="模型">
+              <div className="field-value">
+                <span>{config?.llm.model ?? "—"}</span>
+                <button
+                  type="button"
+                  className="text-action inline"
+                  onClick={onOpenSettings}
+                >
+                  更换
+                </button>
               </div>
               <small>提供商：{config?.llm.provider ?? "—"}</small>
             </Field>
-            <section className="inspector-section">
-              <b>分段策略</b>
-              <div className="compact-fields">
-                <NumberField
-                  label="每段字符数"
-                  value={draft.maxCharsPerSegment}
-                  disabled={Boolean(busy)}
-                  onChange={(value) => onDraftChange({ ...draft, maxCharsPerSegment: value })}
-                />
-                <NumberField
-                  label="每批字符数"
-                  value={draft.maxCharsPerBatch}
-                  disabled={Boolean(busy)}
-                  onChange={(value) => onDraftChange({ ...draft, maxCharsPerBatch: value })}
-                />
-              </div>
-              <small className="field-hint">每段字符数只影响之后新导入的项目；每批字符数会用于后续翻译。</small>
-            </section>
             <section className="inspector-section">
               <b>初始化选项</b>
               <label className="switch-row">
@@ -1662,14 +1969,40 @@ function Inspector({
                   className={`toggle ${draft.fullBook ? "on" : ""}`}
                   disabled={Boolean(busy)}
                   aria-pressed={draft.fullBook}
-                  onClick={() => onDraftChange({ ...draft, fullBook: !draft.fullBook })}
+                  onClick={() =>
+                    onDraftChange({ ...draft, fullBook: !draft.fullBook })
+                  }
                 >
                   <i />
                 </button>
               </label>
             </section>
-            <section className="flow inspector-section polish-section">
-              <header><b>译后润色</b></header>
+            <section className="inspector-section">
+              <b>分段策略</b>
+              <div className="compact-fields">
+                <NumberField
+                  label="每段字符数"
+                  value={draft.maxCharsPerSegment}
+                  disabled={Boolean(busy)}
+                  onChange={(value) =>
+                    onDraftChange({ ...draft, maxCharsPerSegment: value })
+                  }
+                />
+                <NumberField
+                  label="每批字符数"
+                  value={draft.maxCharsPerBatch}
+                  disabled={Boolean(busy)}
+                  onChange={(value) =>
+                    onDraftChange({ ...draft, maxCharsPerBatch: value })
+                  }
+                />
+              </div>
+              <small className="field-hint">
+                每段字符数只影响之后新导入的项目；每批字符数会用于后续翻译。
+              </small>
+            </section>
+            <section className="inspector-section">
+              <b>译后润色</b>
               <label className="switch-row">
                 <span>全书翻译完成后自动润色</span>
                 <button
@@ -1685,22 +2018,43 @@ function Inspector({
               </label>
               {polish ? (
                 <>
-                  <p className={polish.failed > 0 ? "error" : polish.pending > 0 ? "active" : "done"}>
+                  <p
+                    className={`status-line ${
+                      polish.failed > 0
+                        ? "error"
+                        : polish.pending > 0
+                          ? "active"
+                          : "done"
+                    }`}
+                  >
                     <CircleDashed />
-                    润色共 {polish.total} 批 · 成功 {polish.succeeded} · 失败 {polish.failed} · 待处理 {polish.pending}
-                    {polish.pendingSegments > 0 && ` · 待润色段落 ${polish.pendingSegments}`}
+                    润色共 {polish.total} 批 · 成功 {polish.succeeded} · 失败{" "}
+                    {polish.failed} · 待处理 {polish.pending}
+                    {polish.pendingSegments > 0 &&
+                      ` · 待润色段落 ${polish.pendingSegments}`}
                   </p>
-                  {polish.lastError && <p className="error"><Circle />{polish.lastError}</p>}
+                  {polish.lastError && (
+                    <p className="status-line error">
+                      <CircleDashed />
+                      {polish.lastError}
+                    </p>
+                  )}
                 </>
               ) : (
-                <p className="active">
+                <p className="status-line active">
                   <CircleDashed />
-                  {translationComplete ? "全书初稿已完成，可开始润色" : "全书翻译完成后可开始润色"}
+                  {translationComplete
+                    ? "全书初稿已完成，可开始润色"
+                    : "全书翻译完成后可开始润色"}
                 </p>
               )}
               <div className="polish-actions">
                 {polishing ? (
-                  <button type="button" className="cancel icon-label" onClick={onCancel}>
+                  <button
+                    type="button"
+                    className="btn btn-danger sm"
+                    onClick={onCancel}
+                  >
                     <SquareStop />
                     停止润色
                   </button>
@@ -1709,7 +2063,7 @@ function Inspector({
                     {polish && !polish.finished && (
                       <button
                         type="button"
-                        className="primary icon-label"
+                        className="btn btn-primary sm"
                         disabled={Boolean(busy)}
                         onClick={() => onPolishStart(false)}
                       >
@@ -1723,7 +2077,7 @@ function Inspector({
                         polish.pendingSegments > 0)) && (
                       <button
                         type="button"
-                        className="primary icon-label"
+                        className="btn btn-primary sm"
                         disabled={Boolean(busy) || !translationComplete}
                         onClick={() => onPolishStart(false)}
                       >
@@ -1734,7 +2088,7 @@ function Inspector({
                     {polish && polish.failed > 0 && (
                       <button
                         type="button"
-                        className="secondary icon-label"
+                        className="btn btn-quiet sm"
                         disabled={Boolean(busy)}
                         onClick={() => onPolishStart(true)}
                       >
@@ -1762,73 +2116,61 @@ function Inspector({
                   label="超时（秒）"
                   value={draft.timeoutSecs}
                   disabled={Boolean(busy)}
-                  onChange={(value) => onDraftChange({ ...draft, timeoutSecs: value })}
+                  onChange={(value) =>
+                    onDraftChange({ ...draft, timeoutSecs: value })
+                  }
                 />
                 <NumberField
                   label="重试次数"
                   value={draft.maxRetries}
                   min={0}
                   disabled={Boolean(busy)}
-                  onChange={(value) => onDraftChange({ ...draft, maxRetries: value })}
+                  onChange={(value) =>
+                    onDraftChange({ ...draft, maxRetries: value })
+                  }
                 />
               </div>
             </details>
             {detail.taskInitialized ? (
               <button
                 type="button"
-                className="initialize-task icon-label"
+                className="btn btn-quiet block"
                 disabled={Boolean(busy) || !validTaskConfig(draft)}
                 onClick={() => void onReanalyze()}
               >
-                {busy === "重新分析" ? <LoaderCircle className="spin" /> : <RotateCcw />}
+                {busy === "重新分析" ? (
+                  <LoaderCircle className="spin" />
+                ) : (
+                  <RotateCcw />
+                )}
                 {busy === "重新分析" ? "正在重新分析" : "重新分析"}
               </button>
             ) : (
               <button
                 type="button"
-                className="initialize-task primary icon-label"
+                className="btn btn-primary block"
                 disabled={Boolean(busy) || !validTaskConfig(draft)}
                 onClick={onInitialize}
               >
-                {busy === "项目初始化" ? <LoaderCircle className="spin" /> : <Play />}
+                {busy === "项目初始化" ? (
+                  <LoaderCircle className="spin" />
+                ) : (
+                  <Play />
+                )}
                 {busy === "项目初始化" ? "正在初始化任务" : "初始化任务"}
               </button>
             )}
-            <hr />
-            <section className="flow">
-              <header><b>项目进度</b><strong>{progress}%</strong></header>
-              <div className="big-progress"><i style={{ width: `${progress}%` }} /></div>
-              <p className="done"><CheckCircle2 />已完成 {detail.project.chapters_completed} 章</p>
-              {translationTiming && (
-                <p className={translationTiming.finishedAt ? "done" : "active"}>
-                  <Clock3 />
-                  已用 {formatDuration(translationElapsed)} · {translationTiming.finishedAt
-                    ? "本次翻译结束"
-                    : estimatedRemaining === null
-                      ? "正在估算剩余时间"
-                      : `预计还需 ${formatDuration(estimatedRemaining)}`}
-                </p>
-              )}
-              {retranslationProgress?.projectId === detail.project.id && (
-                <p className={retranslationProgress.failed > 0 ? "error" : "active"}>
-                  <CircleDashed />
-                  本次重译已处理 {retranslationProgress.completed} / {retranslationProgress.total} 项
-                  · 成功 {retranslationProgress.succeeded} · 失败 {retranslationProgress.failed}
-                </p>
-              )}
-              <p className={detail.project.status === "failed" ? "error" : "active"}>
-                <CircleDashed />
-                {detail.taskInitialized ? statusText[detail.project.status] : "等待初始化任务"}
-              </p>
-              <p><Circle />生成校对报告 <em>阶段 8 待实现</em></p>
-            </section>
           </>
         ) : (
           <>
             <section className="memory-summary">
-              <div><strong>{detail.terms.length}</strong><span>术语总数</span></div>
+              <div>
+                <strong>{detail.terms.length}</strong>
+                <span>术语总数</span>
+              </div>
               <div className={conflictCount ? "has-conflicts" : ""}>
-                <strong>{conflictCount}</strong><span>待处理冲突</span>
+                <strong>{conflictCount}</strong>
+                <span>待处理冲突</span>
               </div>
             </section>
             <Field label="近期译文上下文">
@@ -1840,14 +2182,21 @@ function Inspector({
                   value={draft.recentContextChars}
                   disabled={Boolean(busy)}
                   onChange={(event) =>
-                    onDraftChange({ ...draft, recentContextChars: Number(event.target.value) })
+                    onDraftChange({
+                      ...draft,
+                      recentContextChars: Number(event.target.value),
+                    })
                   }
                 />
                 <span>字符</span>
               </div>
               <small>翻译下一批时携带的近期已译内容上限。</small>
             </Field>
-            <button type="button" className="text-action" onClick={onOpenTerms}>
+            <button
+              type="button"
+              className="btn btn-quiet block"
+              onClick={onOpenTerms}
+            >
               打开术语库
               {conflictCount > 0 && ` · ${conflictCount} 个冲突`}
             </button>
@@ -1857,11 +2206,30 @@ function Inspector({
     </aside>
   );
 }
-function NumberField({ label, value, min = 1, disabled, onChange }: { label: string; value: number; min?: number; disabled: boolean; onChange: (value: number) => void }) {
+function NumberField({
+  label,
+  value,
+  min = 1,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  disabled: boolean;
+  onChange: (value: number) => void;
+}) {
   return (
     <label>
       <span>{label}</span>
-      <input type="number" min={min} step="1" value={value} disabled={disabled} onChange={(event) => onChange(Number(event.target.value))} />
+      <input
+        type="number"
+        min={min}
+        step="1"
+        value={value}
+        disabled={disabled}
+        onChange={(event) => onChange(Number(event.target.value))}
+      />
     </label>
   );
 }
@@ -1884,12 +2252,44 @@ function validTaskConfig(value: TaskConfigDraft) {
     Number.isInteger(value.timeoutSecs) && value.timeoutSecs > 0 &&
     Number.isInteger(value.maxRetries) && value.maxRetries >= 0;
 }
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({
+  label,
+  hint,
+  wide,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  wide?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <label className="field">
+    <label className={`field ${wide ? "wide" : ""}`}>
       <b>{label}</b>
       {children}
+      {hint && <small>{hint}</small>}
     </label>
+  );
+}
+function SettingRow({
+  label,
+  hint,
+  wide,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  wide?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`setting-row ${wide ? "wide" : ""}`}>
+      <div className="setting-text">
+        <b>{label}</b>
+        {hint && <small>{hint}</small>}
+      </div>
+      <div className="setting-control">{children}</div>
+    </div>
   );
 }
 function ProjectGallery({
@@ -1907,12 +2307,12 @@ function ProjectGallery({
 }) {
   return (
     <div className="page-view">
-      <header>
+      <header className="page-head">
         <div>
           <h1>翻译项目</h1>
           <p>管理本机状态目录中的所有书籍。</p>
         </div>
-        <button className="primary icon-label" onClick={onImport}>
+        <button type="button" className="btn btn-primary" onClick={onImport}>
           <Plus />
           新建项目
         </button>
@@ -1926,37 +2326,37 @@ function ProjectGallery({
                 100,
             );
             return (
-              <article key={project.id}>
+              <article className="project-tile" key={project.id}>
                 <button
+                  type="button"
                   className="project-open"
                   onClick={() => onSelect(project.id)}
                 >
                   <ProjectCover project={project} className="cover" />
-                  <section className={onDelete ? "with-actions" : ""}>
+                  <div className="project-card-body">
                     <h3>{project.title}</h3>
                     <p>{fileName(project.source_file)}</p>
-                    <div className="progress">
-                      <i style={{ width: `${progress}%` }} />
-                    </div>
+                    <ProgressBar value={progress} />
                     <footer>
                       <span>
-                        {project.chapters_completed} / {project.chapters_total}{" "}
-                        章
+                        {project.chapters_completed} / {project.chapters_total} 章
                       </span>
-                      <em className={project.status}>
+                      <em className={`status-chip ${statusClass(project.status)}`}>
                         {projectStatusText(project)}
                       </em>
                     </footer>
-                  </section>
+                  </div>
                 </button>
                 {onDelete && (
                   <button
-                    className="project-card-delete icon-label"
+                    type="button"
+                    className="project-delete"
                     disabled={busy}
+                    aria-label={`删除项目 ${project.title}`}
+                    title="删除项目"
                     onClick={() => onDelete(project)}
                   >
                     <Trash2 />
-                    删除
                   </button>
                 )}
               </article>
@@ -2013,6 +2413,7 @@ function TermsView({
   const [allConflictImpacts, setAllConflictImpacts] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [working, setWorking] = useState<string | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const activeRetranslation =
     retranslationProgress?.projectId === detail?.project.id
@@ -2021,10 +2422,15 @@ function TermsView({
   const conflicts = (detail?.termConflicts ?? []).filter(
     (item) => showResolved || item.unresolved_events > 0,
   );
-  const pendingConflictCount = (detail?.termConflicts ?? []).filter((item) => item.unresolved_events > 0).length;
-  const conflict = conflicts[Math.min(conflictIndex, Math.max(0, conflicts.length - 1))];
+  const pendingConflictCount = (detail?.termConflicts ?? []).filter(
+    (item) => item.unresolved_events > 0,
+  ).length;
+  const conflict =
+    conflicts[Math.min(conflictIndex, Math.max(0, conflicts.length - 1))];
   useEffect(() => {
-    setConflictIndex((index) => Math.min(index, Math.max(0, conflicts.length - 1)));
+    setConflictIndex((index) =>
+      Math.min(index, Math.max(0, conflicts.length - 1)),
+    );
   }, [conflicts.length]);
   useEffect(() => {
     setTarget(conflict?.manual_target ?? conflict?.current_target ?? "");
@@ -2032,32 +2438,46 @@ function TermsView({
 
   const scan = async (source: string) => {
     if (!detail) return;
-    const items = await invoke<AffectedContent[]>("ui_scan_term_impact", {
-      projectId: detail.project.id,
-      source,
-    });
-    setImpact(items);
-    setImpactSource(source);
-    setAllConflictImpacts(false);
-    setSelected(new Set());
+    setScanning(true);
+    try {
+      const items = await invoke<AffectedContent[]>("ui_scan_term_impact", {
+        projectId: detail.project.id,
+        source,
+      });
+      setImpact(items);
+      setImpactSource(source);
+      setAllConflictImpacts(false);
+      setSelected(new Set());
+    } finally {
+      setScanning(false);
+    }
   };
   const scanAll = async (selectAll = true) => {
     if (!detail) return [];
-    const sources = detail.termConflicts
-      .filter((item) => item.policy === "fixed")
-      .map((item) => item.source);
-    const groups = await Promise.all(sources.map((source) =>
-      invoke<AffectedContent[]>("ui_scan_term_impact", {
-        projectId: detail.project.id,
-        source,
-      }),
-    ));
-    const items = [...new Map(groups.flat().map((item) => [item.id, item])).values()];
-    setImpact(items);
-    setImpactSource(null);
-    setAllConflictImpacts(true);
-    setSelected(selectAll ? new Set(items.map((item) => item.id)) : new Set());
-    return items;
+    setScanning(true);
+    try {
+      const sources = detail.termConflicts
+        .filter((item) => item.policy === "fixed")
+        .map((item) => item.source);
+      const groups = await Promise.all(
+        sources.map((source) =>
+          invoke<AffectedContent[]>("ui_scan_term_impact", {
+            projectId: detail.project.id,
+            source,
+          }),
+        ),
+      );
+      const items = [
+        ...new Map(groups.flat().map((item) => [item.id, item])).values(),
+      ];
+      setImpact(items);
+      setImpactSource(null);
+      setAllConflictImpacts(true);
+      setSelected(selectAll ? new Set(items.map((item) => item.id)) : new Set());
+      return items;
+    } finally {
+      setScanning(false);
+    }
   };
   useEffect(() => {
     if (!conflict) return;
@@ -2074,197 +2494,396 @@ function TermsView({
       setWorking(null);
     }
   };
-  const resolve = (source: string) => run("保存裁定", async () => {
-    if (!detail || !target.trim()) return;
-    await invoke("ui_resolve_term", { projectId: detail.project.id, source, target: target.trim() });
-    setEditing(null);
-    await scan(source);
-    await onReload();
-  });
-  const setPolicy = (source: string, policy: TermPolicy) => run("更新规则", async () => {
-    if (!detail) return;
-    await invoke("ui_set_term_policy", { projectId: detail.project.id, source, policy });
-    await scan(source);
-    await onReload();
-  });
-  const undo = (source: string) => run("撤销裁定", async () => {
-    if (!detail) return;
-    await invoke("ui_undo_term_resolution", { projectId: detail.project.id, source });
-    setImpact([]);
-    await onReload();
-  });
-  const retranslate = () => run("重译", async () => {
-    if (!detail || !selected.size) return;
-    const chapters = new Set(impact.filter((item) => selected.has(item.id)).map((item) => item.chapter)).size;
-    const confirmed = await confirmDialog(
-      `将重译 ${selected.size} 项、涉及 ${chapters} 章；已有润色结果会失效，可在之后重新润色。此操作会消耗 API Token，是否继续？`,
-      { title: "确认选择性重译", kind: "warning" },
-    );
-    if (!confirmed) return;
-    await onRetranslate([...selected]);
-    if (allConflictImpacts) await scanAll(false);
-    else if (impactSource) await scan(impactSource);
-    await onReload();
-  });
-  const retranslateResolved = () => run("重译已处理冲突", async () => {
-    const items = await scanAll(false);
-    if (items.length) await onRetranslate(items.map((item) => item.id));
-    await onReload();
-  });
-  const restore = (item: AffectedContent) => run("恢复译文", async () => {
-    if (!detail) return;
-    await invoke("ui_restore_translation", { projectId: detail.project.id, itemId: item.id });
-    if (allConflictImpacts) await scanAll(false);
-    else if (impactSource) await scan(impactSource);
-    await onReload();
-  });
+  const resolve = (source: string) =>
+    run("保存裁定", async () => {
+      if (!detail || !target.trim()) return;
+      await invoke("ui_resolve_term", {
+        projectId: detail.project.id,
+        source,
+        target: target.trim(),
+      });
+      setEditing(null);
+      await scan(source);
+      await onReload();
+    });
+  const setPolicy = (source: string, policy: TermPolicy) =>
+    run("更新规则", async () => {
+      if (!detail) return;
+      await invoke("ui_set_term_policy", {
+        projectId: detail.project.id,
+        source,
+        policy,
+      });
+      await scan(source);
+      await onReload();
+    });
+  const undo = (source: string) =>
+    run("撤销裁定", async () => {
+      if (!detail) return;
+      await invoke("ui_undo_term_resolution", {
+        projectId: detail.project.id,
+        source,
+      });
+      setImpact([]);
+      await onReload();
+    });
+  const retranslate = () =>
+    run("重译", async () => {
+      if (!detail || !selected.size) return;
+      const chapters = new Set(
+        impact.filter((item) => selected.has(item.id)).map((item) => item.chapter),
+      ).size;
+      const confirmed = await confirmDialog(
+        `将重译 ${selected.size} 项、涉及 ${chapters} 章；已有润色结果会失效，可在之后重新润色。此操作会消耗 API Token，是否继续？`,
+        { title: "确认选择性重译", kind: "warning" },
+      );
+      if (!confirmed) return;
+      await onRetranslate([...selected]);
+      if (allConflictImpacts) await scanAll(false);
+      else if (impactSource) await scan(impactSource);
+      await onReload();
+    });
+  const retranslateResolved = () =>
+    run("重译已处理冲突", async () => {
+      const items = await scanAll(false);
+      if (items.length) await onRetranslate(items.map((item) => item.id));
+      await onReload();
+    });
+  const restore = (item: AffectedContent) =>
+    run("恢复译文", async () => {
+      if (!detail) return;
+      await invoke("ui_restore_translation", {
+        projectId: detail.project.id,
+        itemId: item.id,
+      });
+      if (allConflictImpacts) await scanAll(false);
+      else if (impactSource) await scan(impactSource);
+      await onReload();
+    });
   return (
-    <div className="page-view">
-      <header>
+    <div className="page-view terms-page">
+      <header className="page-head">
         <div>
           <h1>术语库</h1>
           <p>
             {detail
-              ? `${detail.project.title} · ${detail.terms.length} 条术语`
+              ? `${detail.project.title} · ${detail.terms.length} 条术语 · ${pendingConflictCount} 个待处理冲突`
               : "选择项目后查看术语"}
           </p>
         </div>
-        <label className="history-toggle">
-          <input type="checkbox" checked={showResolved} onChange={(event) => setShowResolved(event.target.checked)} />
-          查看已处理记录
-        </label>
-      </header>
-      {error && <div className="term-error">{error}</div>}
-      {detail && conflict && (
-        <section className="conflict-panel">
-          <header>
-            <div>
-              <small>译名冲突 · {conflict.unresolved_events} 个待处理事件</small>
-              <h2>{conflict.source}</h2>
-              <p>当前固定译名：<b>{conflict.current_target}</b></p>
-            </div>
-            <nav>
-              <button disabled={conflictIndex === 0} onClick={() => setConflictIndex((value) => value - 1)}>上一个</button>
-              <span>{conflictIndex + 1} / {conflicts.length}</span>
-              <button disabled={conflictIndex >= conflicts.length - 1} onClick={() => setConflictIndex((value) => value + 1)}>下一个</button>
-            </nav>
-          </header>
-          <div className="candidate-grid">
-            {conflict.candidates.map((candidate) => (
-              <button key={candidate.target} onClick={() => setTarget(candidate.target)} className={target === candidate.target ? "active" : ""}>
-                <b>{candidate.target}</b>
-                <span>{candidate.occurrences} 次 · {candidate.chapters.map((chapter) => `第 ${chapter + 1} 章`).join("、")}</span>
-                {candidate.evidence.slice(0, 3).map((evidence, index) => (
-                  <small key={index}>{evidence.source_excerpt || "旧数据库无原文片段"}<br />{evidence.target_excerpt || "旧数据库无译文片段"}</small>
-                ))}
-              </button>
-            ))}
-          </div>
-          <div className="conflict-actions">
-            <input value={target} placeholder="选择候选或输入新的固定译名" onChange={(event) => setTarget(event.target.value)} />
-            <button className="primary" disabled={!target.trim() || Boolean(working)} onClick={() => void resolve(conflict.source)}>保存人工裁定</button>
-            <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "non_fixed")}>标记为非固定术语</button>
-            <button disabled={Boolean(working)} onClick={() => void setPolicy(conflict.source, "ignored")}>忽略术语</button>
-            {conflict.policy !== "automatic" && <button disabled={Boolean(working)} onClick={() => void undo(conflict.source)}>撤销并恢复待处理</button>}
-          </div>
-        </section>
-      )}
-      {detail && !conflict && detail.terms.length === 0 && (
-        <div className="panel-empty">当前没有{showResolved ? "冲突记录" : "待处理冲突"}</div>
-      )}
-      {detail && <button className="primary terms-retranslate" disabled={taskBusy || Boolean(working) || pendingConflictCount > 0} onClick={() => void retranslateResolved()}>
-        {pendingConflictCount > 0 ? "当前还有未处理的术语冲突" : "重译全部已处理冲突"}
-      </button>}
-      {impact.length > 0 && (
-        <section className="impact-panel">
-          <header>
-            <div><h2>{allConflictImpacts ? "全部已裁定冲突可能影响的内容" : "当前术语可能影响的内容"}</h2><p>按与术语提示一致的边界规则扫描，不代表精确调用追踪；重复命中的内容只显示一次。</p></div>
-            <button onClick={() => setSelected(selected.size === impact.length ? new Set() : new Set(impact.map((item) => item.id)))}>
-              {selected.size === impact.length ? "取消全选" : "选择当前列表全部"}
-            </button>
-          </header>
-          {impact.map((item) => (
-            <div className="impact-row" key={item.id}>
-              <input type="checkbox" checked={selected.has(item.id)} onChange={() => setSelected((current) => {
-                const next = new Set(current); next.has(item.id) ? next.delete(item.id) : next.add(item.id); return next;
-              })} />
-              <span><b>第 {item.chapter + 1} 章 · {item.kind}</b><small>{item.source}</small><em>{item.currentTarget}</em>{item.retranslationError && <strong>重译失败：{item.retranslationError}</strong>}</span>
-              <button disabled={!item.previousTarget || Boolean(working)} onClick={() => void restore(item)}>恢复旧译文</button>
-            </div>
-          ))}
-          <footer>
-            <span>
-              {activeRetranslation
-                ? `重译进度 ${activeRetranslation.completed}/${activeRetranslation.total} · 成功 ${activeRetranslation.succeeded} · 失败 ${activeRetranslation.failed}`
-                : `已选择 ${selected.size} 项；默认不会自动重译。`}
-            </span>
-            <button className="primary" disabled={!selected.size || taskBusy || Boolean(working)} onClick={() => void retranslate()}>
+        <div className="page-head-actions">
+          <label className="history-toggle">
+            <input
+              type="checkbox"
+              checked={showResolved}
+              onChange={(event) => setShowResolved(event.target.checked)}
+            />
+            查看已处理记录
+          </label>
+          {detail && (
+            <button
+              type="button"
+              className="btn btn-primary sm"
+              disabled={taskBusy || Boolean(working) || pendingConflictCount > 0}
+              onClick={() => void retranslateResolved()}
+            >
+              {activeRetranslation || working === "重译已处理冲突" ? (
+                <LoaderCircle className="spin" />
+              ) : (
+                <RotateCcw />
+              )}
               {activeRetranslation
                 ? `正在重译 ${activeRetranslation.completed}/${activeRetranslation.total}`
-                : taskBusy
-                  ? "其他任务结束后可重译"
-                  : "重译所选内容"}
+                : working === "重译已处理冲突"
+                  ? "正在扫描影响范围…"
+                  : pendingConflictCount > 0
+                    ? `还有 ${pendingConflictCount} 个冲突待处理`
+                    : "重译全部已处理冲突"}
             </button>
-          </footer>
-        </section>
-      )}
-      {detail && detail.terms.length ? (
-        <div className="term-table">
-          <div className="term-row term-head">
-            <span>原文</span>
-            <span>固定译名</span>
-            <span>类型</span>
-            <span>首次出现</span>
-            <span>状态</span>
-            <span>操作</span>
+          )}
+        </div>
+      </header>
+      <div className="page-body">
+        {error && <div className="term-error">{error}</div>}
+        {(working || scanning) && !error && (
+          <div className="pending-banner">
+            <LoaderCircle className="spin" />
+            <span>{scanning ? "正在扫描影响范围…" : working}</span>
           </div>
-          {detail.terms.map((term) => (
-            <div className="term-row" key={term.source}>
-              <b>{term.source}</b>
-              {editing === term.source ? (
-                <input
-                  autoFocus
-                  value={target}
-                  onChange={(e) => setTarget(e.target.value)}
-                />
-              ) : (
-                <span>{term.target}</span>
-              )}
-              <span>{termTypeText[term.type] ?? "其他"}</span>
-              <span>第 {term.first_chapter + 1} 章</span>
-              <em className={term.status}>
-                {term.policy === "ignored"
-                  ? "已忽略"
-                  : term.policy === "non_fixed"
-                    ? "非固定"
-                    : term.status === "conflict"
-                  ? "有冲突"
-                  : term.status === "resolved"
-                    ? "已裁定"
-                    : "正常"}
-              </em>
-              {editing === term.source ? (
-                <button onClick={() => void resolve(term.source)}>保存</button>
-              ) : (
+        )}
+        {detail && conflict && (
+          <section className="conflict-panel">
+            <header>
+              <div>
+                <small className="eyebrow">
+                  译名冲突 · {conflict.unresolved_events} 个待处理事件
+                </small>
+                <h2>{conflict.source}</h2>
+                <p>
+                  当前固定译名：<b>{conflict.current_target}</b>
+                </p>
+              </div>
+              <nav className="stepper">
                 <button
-                  onClick={() => {
-                    if (term.policy === "ignored" || term.policy === "non_fixed") {
-                      void setPolicy(term.source, "automatic");
-                    } else {
-                      setEditing(term.source);
-                      setTarget(term.target);
-                    }
-                  }}
+                  type="button"
+                  className="btn btn-quiet sm"
+                  disabled={conflictIndex === 0}
+                  onClick={() => setConflictIndex((value) => value - 1)}
                 >
-                  {term.policy === "ignored" || term.policy === "non_fixed" ? "恢复" : "修改"}
+                  上一个
+                </button>
+                <span>
+                  {conflictIndex + 1} / {conflicts.length}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-quiet sm"
+                  disabled={conflictIndex >= conflicts.length - 1}
+                  onClick={() => setConflictIndex((value) => value + 1)}
+                >
+                  下一个
+                </button>
+              </nav>
+            </header>
+            <div className="candidate-grid">
+              {conflict.candidates.map((candidate) => (
+                <button
+                  type="button"
+                  key={candidate.target}
+                  onClick={() => setTarget(candidate.target)}
+                  className={target === candidate.target ? "active" : ""}
+                >
+                  <b>{candidate.target}</b>
+                  <span>
+                    {candidate.occurrences} 次 ·{" "}
+                    {candidate.chapters
+                      .map((chapter) => `第 ${chapter + 1} 章`)
+                      .join("、")}
+                  </span>
+                  {candidate.evidence.slice(0, 3).map((evidence, index) => (
+                    <small key={index}>
+                      {evidence.source_excerpt || "旧数据库无原文片段"}
+                      <br />
+                      {evidence.target_excerpt || "旧数据库无译文片段"}
+                    </small>
+                  ))}
+                </button>
+              ))}
+            </div>
+            <div className="conflict-actions">
+              <input
+                className="text-input"
+                value={target}
+                placeholder="选择候选或输入新的固定译名"
+                onChange={(event) => setTarget(event.target.value)}
+              />
+              <button
+                type="button"
+                className="btn btn-primary sm"
+                disabled={!target.trim() || Boolean(working)}
+                onClick={() => void resolve(conflict.source)}
+              >
+                保存人工裁定
+              </button>
+              <button
+                type="button"
+                className="btn btn-quiet sm"
+                disabled={Boolean(working)}
+                onClick={() => void setPolicy(conflict.source, "non_fixed")}
+              >
+                标记为非固定术语
+              </button>
+              <button
+                type="button"
+                className="btn btn-quiet sm"
+                disabled={Boolean(working)}
+                onClick={() => void setPolicy(conflict.source, "ignored")}
+              >
+                忽略术语
+              </button>
+              {conflict.policy !== "automatic" && (
+                <button
+                  type="button"
+                  className="btn btn-quiet sm"
+                  disabled={Boolean(working)}
+                  onClick={() => void undo(conflict.source)}
+                >
+                  撤销并恢复待处理
                 </button>
               )}
             </div>
-          ))}
-        </div>
-      ) : (
-        <div className="page-empty">暂无术语数据</div>
-      )}
+          </section>
+        )}
+        {detail && !conflict && detail.terms.length > 0 && (
+          <div className="panel-empty">
+            当前没有{showResolved ? "冲突记录" : "待处理冲突"}
+          </div>
+        )}
+        {impact.length > 0 && (
+          <section className="impact-panel">
+            <header>
+              <div>
+                <h2>
+                  {allConflictImpacts
+                    ? "全部已裁定冲突可能影响的内容"
+                    : "当前术语可能影响的内容"}
+                </h2>
+                <p>
+                  按与术语提示一致的边界规则扫描，不代表精确调用追踪；重复命中的内容只显示一次。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="btn btn-quiet sm"
+                onClick={() =>
+                  setSelected(
+                    selected.size === impact.length
+                      ? new Set()
+                      : new Set(impact.map((item) => item.id)),
+                  )
+                }
+              >
+                {selected.size === impact.length ? "取消全选" : "选择当前列表全部"}
+              </button>
+            </header>
+            {impact.map((item) => (
+              <div className="impact-row" key={item.id}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(item.id)}
+                  aria-label={`选择第 ${item.chapter + 1} 章内容`}
+                  onChange={() =>
+                    setSelected((current) => {
+                      const next = new Set(current);
+                      next.has(item.id)
+                        ? next.delete(item.id)
+                        : next.add(item.id);
+                      return next;
+                    })
+                  }
+                />
+                <span>
+                  <b>
+                    第 {item.chapter + 1} 章 · {item.kind}
+                  </b>
+                  <small>{item.source}</small>
+                  <em>{item.currentTarget}</em>
+                  {item.retranslationError && (
+                    <strong>重译失败：{item.retranslationError}</strong>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-quiet sm"
+                  disabled={!item.previousTarget || Boolean(working)}
+                  onClick={() => void restore(item)}
+                >
+                  恢复旧译文
+                </button>
+              </div>
+            ))}
+            {activeRetranslation && (
+              <ProgressBar
+                value={
+                  (activeRetranslation.completed /
+                    Math.max(1, activeRetranslation.total)) *
+                  100
+                }
+                label="重译进度"
+                detail={`${activeRetranslation.completed} / ${activeRetranslation.total} 项 · 成功 ${activeRetranslation.succeeded} · 失败 ${activeRetranslation.failed}`}
+              />
+            )}
+            <footer>
+              <span>
+                {activeRetranslation
+                  ? `正在重译，已处理 ${activeRetranslation.completed}/${activeRetranslation.total} 项`
+                  : `已选择 ${selected.size} 项；默认不会自动重译。`}
+              </span>
+              <button
+                type="button"
+                className="btn btn-primary sm"
+                disabled={!selected.size || taskBusy || Boolean(working)}
+                onClick={() => void retranslate()}
+              >
+                {activeRetranslation ? (
+                  <LoaderCircle className="spin" />
+                ) : (
+                  <Play />
+                )}
+                {activeRetranslation
+                  ? `正在重译 ${activeRetranslation.completed}/${activeRetranslation.total}`
+                  : taskBusy
+                    ? "其他任务结束后可重译"
+                    : "重译所选内容"}
+              </button>
+            </footer>
+          </section>
+        )}
+        {detail && detail.terms.length ? (
+          <div className="term-table">
+            <div className="term-row term-head">
+              <span>原文</span>
+              <span>固定译名</span>
+              <span>类型</span>
+              <span>首次出现</span>
+              <span>状态</span>
+              <span>操作</span>
+            </div>
+            {detail.terms.map((term) => {
+              const state = termState(term);
+              return (
+                <div className="term-row" key={term.source}>
+                  <b>{term.source}</b>
+                  {editing === term.source ? (
+                    <input
+                      autoFocus
+                      value={target}
+                      aria-label={`编辑 ${term.source} 的译名`}
+                      onChange={(e) => setTarget(e.target.value)}
+                    />
+                  ) : (
+                    <span>{term.target}</span>
+                  )}
+                  <span>{termTypeText[term.type] ?? "其他"}</span>
+                  <span>第 {term.first_chapter + 1} 章</span>
+                  <em className={`status-chip ${state.cls}`}>{state.text}</em>
+                  {editing === term.source ? (
+                    <button
+                      type="button"
+                      className="btn btn-primary sm"
+                      onClick={() => void resolve(term.source)}
+                    >
+                      保存
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="btn btn-quiet sm"
+                      onClick={() => {
+                        if (
+                          term.policy === "ignored" ||
+                          term.policy === "non_fixed"
+                        ) {
+                          void setPolicy(term.source, "automatic");
+                        } else {
+                          setEditing(term.source);
+                          setTarget(term.target);
+                        }
+                      }}
+                    >
+                      {term.policy === "ignored" || term.policy === "non_fixed"
+                        ? "恢复"
+                        : "修改"}
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="panel-empty">暂无术语数据</div>
+        )}
+      </div>
     </div>
   );
 }
@@ -2309,15 +2928,32 @@ function SettingsView({
     setPolishConcurrency(config?.general.polish_concurrency ?? 3);
     setApiKey("");
     setShowKey(false);
-    const preset = providerPresets.find((item) =>
-      item.base_url === config?.llm.base_url?.replace(/\/$/, ""));
+    const preset = providerPresets.find(
+      (item) => item.base_url === config?.llm.base_url?.replace(/\/$/, ""),
+    );
     setPresetName(preset?.name ?? "");
-    setEditedFields(new Set(["model"].filter((key) => {
-      const value = config?.llm[key as keyof Config["llm"]];
-      return value !== undefined && value !== (preset?.[key as keyof typeof preset]);
-    })));
+    setEditedFields(
+      new Set(
+        ["model"].filter((key) => {
+          const value = config?.llm[key as keyof Config["llm"]];
+          return (
+            value !== undefined &&
+            value !== preset?.[key as keyof typeof preset]
+          );
+        }),
+      ),
+    );
   }, [config]);
-  if (!draft) return <div className="page-empty">正在读取设置…</div>;
+  if (!draft) {
+    return (
+      <div className="page-view">
+        <div className="panel-empty">
+          <LoaderCircle className="spin" />
+          正在读取设置…
+        </div>
+      </div>
+    );
+  }
   const field = (key: keyof Config["llm"], value: string) => {
     setEditedFields(new Set([...editedFields, key]));
     setDraft({ ...draft, llm: { ...draft.llm, [key]: value } });
@@ -2328,34 +2964,55 @@ function SettingsView({
     if (!preset) return;
     const llm = { ...draft.llm };
     for (const key of ["provider", "base_url", "model", "api_key_env"] as const) {
-      if (key !== "model" || reset || !editedFields.has(key)) llm[key] = preset[key];
+      if (key !== "model" || reset || !editedFields.has(key))
+        llm[key] = preset[key];
     }
     if (reset) setEditedFields(new Set());
     setDraft({ ...draft, llm });
     setApiKey("");
     setShowKey(false);
   };
-  const sameProvider = draft.llm.provider.trim().toLowerCase() === config?.llm.provider.trim().toLowerCase();
+  const sameProvider =
+    draft.llm.provider.trim().toLowerCase() ===
+    config?.llm.provider.trim().toLowerCase();
   let noKey = false;
   try {
     const host = new URL(draft.llm.base_url ?? "").hostname;
-    noKey = ["openai-chat", "openai-compatible"].includes(draft.llm.provider.trim().toLowerCase()) &&
-      !draft.llm.api_key_env.trim() && (host === "localhost" || host === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(host));
-  } catch { /* The backend reports invalid URLs when validating. */ }
-  const configured = Boolean(sameProvider && credential?.configured && credential.source !== "none");
+    noKey =
+      ["openai-chat", "openai-compatible"].includes(
+        draft.llm.provider.trim().toLowerCase(),
+      ) &&
+      !draft.llm.api_key_env.trim() &&
+      (host === "localhost" ||
+        host === "[::1]" ||
+        /^127(?:\.\d{1,3}){3}$/.test(host));
+  } catch {
+    /* The backend reports invalid URLs when validating. */
+  }
+  const configured = Boolean(
+    sameProvider && credential?.configured && credential.source !== "none",
+  );
   const savingModel = busy === "验证模型";
   const savingGeneral = busy === "保存通用设置";
+  const generalInvalid =
+    visibleSegments < 1 ||
+    !Number.isInteger(visibleSegments) ||
+    retranslationConcurrency < 1 ||
+    !Number.isInteger(retranslationConcurrency) ||
+    polishConcurrency < 1 ||
+    !Number.isInteger(polishConcurrency);
   return (
-    <div className="page-view model-page">
-      <header>
+    <div className="page-view settings-page">
+      <header className="page-head">
         <div>
           <h1>设置</h1>
-          <p>配置翻译模型与连接凭据。</p>
+          <p>配置翻译模型、连接凭据与工作台行为。</p>
         </div>
       </header>
       <div className="settings-layout">
-        <nav>
+        <nav className="settings-nav">
           <button
+            type="button"
             className={tab === "model" ? "active" : ""}
             onClick={() => setTab("model")}
           >
@@ -2363,160 +3020,207 @@ function SettingsView({
             模型与 API
           </button>
           <button
+            type="button"
             className={tab === "general" ? "active" : ""}
             onClick={() => setTab("general")}
           >
             <PanelTop />
             通用
           </button>
-          <button className="icon-label" disabled>
-            <Settings />
-            高级
-          </button>
         </nav>
         {tab === "model" ? (
-          <div className="settings-card">
+          <section className="settings-card">
             <div className="settings-heading">
               <div>
-                <h2>模型设置</h2>
-                <p>选择模型提供商，并验证用于翻译的 API Key。</p>
+                <h2>模型与 API</h2>
+                <p>选择服务商并验证用于翻译的 API Key。</p>
               </div>
-              {(configured || noKey) && (
-                <span className="credential-ok icon-label">
+              {configured || noKey ? (
+                <span className="auth-chip">
                   <Check />
                   {noKey ? "本地免密" : "API Key 已配置"}
                 </span>
+              ) : (
+                <span className="auth-chip muted">未配置凭据</span>
               )}
             </div>
-            <Field label="提供商">
-              <div className="preset-input">
-                <select aria-label="提供商" value={presetName} onChange={(e) => applyPreset(e.target.value)}>
-                  <option value="">自定义(中转站)</option>
-                  {providerPresets.map((preset) => <option key={preset.name} value={preset.name}>{preset.name}</option>)}
-                </select>
-                <button type="button" title="重置为预设默认值" aria-label="重置为预设默认值" disabled={!presetName} onClick={() => applyPreset(presetName, true)}><RotateCcw size={16} /></button>
-              </div>
-            </Field>
-            <Field label="协议类型">
-              <select
-                aria-label="协议类型"
-                value={draft.llm.provider.trim().toLowerCase() === "openai-chat" ? "openai-compatible" : draft.llm.provider.trim().toLowerCase()}
-                onChange={(e) => {
-                  field("provider", e.target.value);
-                  setApiKey("");
-                }}
+            <div className="settings-rows">
+              <SettingRow
+                label="服务商"
+                hint={
+                  presetName
+                    ? "已套用预设默认值。"
+                    : "选择内置服务商，或使用自定义中转站。"
+                }
               >
-                <option value="openai-compatible">OpenAI Chat Completions</option>
-                <option value="openai-responses">OpenAI Responses</option>
-                <option value="anthropic">Anthropic (Messages)</option>
-              </select>
-            </Field>
-            <Field label="模型">
-              <input
-                value={draft.llm.model}
-                onChange={(e) => field("model", e.target.value)}
-              />
-            </Field>
-            <Field label="API地址(Base URL)">
-              <input
-                value={draft.llm.base_url ?? ""}
-                readOnly={Boolean(presetName)}
-                onChange={(e) => field("base_url", e.target.value)}
-              />
-              {presetName && <small>此预设使用固定地址；如需修改，请选择“自定义(中转站)”。</small>}
-            </Field>
-            <Field label="API Key">
-              <div className="secret-input">
-                <input
-                  autoFocus={!credential?.configured}
-                  type={showKey ? "text" : "password"}
-                  disabled={noKey}
-                  value={noKey ? "" : apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  placeholder={
-                    noKey ? "本地免密" : configured
-                      ? "已配置，留空则使用现有凭据"
-                      : "粘贴 API Key"
+                <div className="preset-input">
+                  <select
+                    aria-label="服务商"
+                    value={presetName}
+                    onChange={(e) => applyPreset(e.target.value)}
+                  >
+                    <option value="">自定义(中转站)</option>
+                    {providerPresets.map((preset) => (
+                      <option key={preset.name} value={preset.name}>
+                        {preset.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    className="btn btn-quiet icon-only"
+                    title="重置为预设默认值"
+                    aria-label="重置为预设默认值"
+                    disabled={!presetName}
+                    onClick={() => applyPreset(presetName, true)}
+                  >
+                    <RotateCcw />
+                  </button>
+                </div>
+              </SettingRow>
+              <SettingRow label="协议类型" hint="需与服务商的接口兼容。">
+                <select
+                  aria-label="协议类型"
+                  value={
+                    draft.llm.provider.trim().toLowerCase() === "openai-chat"
+                      ? "openai-compatible"
+                      : draft.llm.provider.trim().toLowerCase()
                   }
+                  onChange={(e) => {
+                    field("provider", e.target.value);
+                    setApiKey("");
+                  }}
+                >
+                  <option value="openai-compatible">
+                    OpenAI Chat Completions
+                  </option>
+                  <option value="openai-responses">OpenAI Responses</option>
+                  <option value="anthropic">Anthropic (Messages)</option>
+                </select>
+              </SettingRow>
+              <SettingRow label="模型" hint="用于翻译与分析的模型名称。">
+                <input
+                  value={draft.llm.model}
+                  placeholder="例如 gpt-4o-mini"
+                  onChange={(e) => field("model", e.target.value)}
                 />
-                <button type="button" title={showKey ? "隐藏密钥" : "显示密钥"} aria-label={showKey ? "隐藏密钥" : "显示密钥"} onClick={() => setShowKey(!showKey)}>
-                  {showKey ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-              <small>
-                Key 仅保存在当前用户的 TransItPls 配置目录中，不会写入书籍项目。
-              </small>
-            </Field>
+              </SettingRow>
+              <SettingRow
+                label="API Key"
+                hint="Key 仅保存在当前用户的 TransItPls 配置目录中，不会写入书籍项目。"
+              >
+                <div className="secret-input">
+                  <input
+                    autoFocus={!credential?.configured}
+                    type={showKey ? "text" : "password"}
+                    disabled={noKey}
+                    value={noKey ? "" : apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder={
+                      noKey
+                        ? "本地免密"
+                        : configured
+                          ? "已配置，留空则使用现有凭据"
+                          : "粘贴 API Key"
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-quiet icon-only"
+                    title={showKey ? "隐藏密钥" : "显示密钥"}
+                    aria-label={showKey ? "隐藏密钥" : "显示密钥"}
+                    onClick={() => setShowKey(!showKey)}
+                  >
+                    {showKey ? <EyeOff /> : <Eye />}
+                  </button>
+                </div>
+              </SettingRow>
+              <SettingRow
+                label="API 地址（Base URL）"
+                wide
+                hint={
+                  presetName
+                    ? "此预设使用固定地址；如需修改，请选择“自定义(中转站)”。"
+                    : "兼容 OpenAI 或 Anthropic 协议的服务地址。"
+                }
+              >
+                <input
+                  value={draft.llm.base_url ?? ""}
+                  readOnly={Boolean(presetName)}
+                  placeholder="https://api.example.com/v1"
+                  onChange={(e) => field("base_url", e.target.value)}
+                />
+              </SettingRow>
+            </div>
             <div className="settings-actions">
               <button
-                className="primary"
+                type="button"
+                className="btn btn-primary"
                 disabled={busy !== null}
                 onClick={() => void onSaveModel(draft, noKey ? "" : apiKey)}
               >
-                {savingModel ? "正在验证…" : "测试连接并保存"}
+                {savingModel && <LoaderCircle className="spin" />}
+                {savingModel ? "正在验证连接…" : "测试连接并保存"}
               </button>
             </div>
-            <footer>
-              模型配置：
+            <footer className="settings-foot">
+              <span>配置文件</span>
               <code>{configPath ?? "保存后创建 transitpls.toml"}</code>
             </footer>
-          </div>
+          </section>
         ) : (
-          <div className="settings-card">
+          <section className="settings-card">
             <div className="settings-heading">
               <div>
-                <h2>通用设置</h2>
+                <h2>通用</h2>
                 <p>调整工作台显示和批量重译行为。</p>
               </div>
             </div>
-            <Field label="每章默认显示段落数">
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={visibleSegments}
-                onChange={(e) => setVisibleSegments(Number(e.target.value))}
-              />
-              <small>
-                章节切换时先显示这些段落，点击“显示更多段落”可继续查看其余内容。
-              </small>
-            </Field>
-            <Field label="重译并发数量">
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={retranslationConcurrency}
-                onChange={(e) => setRetranslationConcurrency(Number(e.target.value))}
-              />
-              <small>
-                “重译全部已处理冲突”和选择性重译同时处理的最大项目数。
-              </small>
-            </Field>
-            <Field label="润色并发数量">
-              <input
-                type="number"
-                min="1"
-                step="1"
-                value={polishConcurrency}
-                onChange={(e) => setPolishConcurrency(Number(e.target.value))}
-              />
-              <small>
-                并行润色批次的最大数量，默认 3；该设置独立于重译并发。
-              </small>
-            </Field>
+            <div className="settings-rows">
+              <SettingRow
+                label="每章默认显示段落数"
+                hint="章节切换时先显示这些段落，点击“显示更多段落”可继续查看其余内容。"
+              >
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={visibleSegments}
+                  onChange={(e) => setVisibleSegments(Number(e.target.value))}
+                />
+              </SettingRow>
+              <SettingRow
+                label="重译并发数量"
+                hint="“重译全部已处理冲突”和选择性重译同时处理的最大项目数。"
+              >
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={retranslationConcurrency}
+                  onChange={(e) =>
+                    setRetranslationConcurrency(Number(e.target.value))
+                  }
+                />
+              </SettingRow>
+              <SettingRow
+                label="润色并发数量"
+                hint="并行润色批次的最大数量，默认 3；独立于重译并发。"
+              >
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={polishConcurrency}
+                  onChange={(e) => setPolishConcurrency(Number(e.target.value))}
+                />
+              </SettingRow>
+            </div>
             <div className="settings-actions">
               <button
-                className="primary"
-                disabled={
-                  busy !== null ||
-                  visibleSegments < 1 ||
-                  !Number.isInteger(visibleSegments) ||
-                  retranslationConcurrency < 1 ||
-                  !Number.isInteger(retranslationConcurrency) ||
-                  polishConcurrency < 1 ||
-                  !Number.isInteger(polishConcurrency)
-                }
+                type="button"
+                className="btn btn-primary"
+                disabled={busy !== null || generalInvalid}
                 onClick={() =>
                   void onSaveGeneral(
                     visibleSegments,
@@ -2525,14 +3229,15 @@ function SettingsView({
                   )
                 }
               >
+                {savingGeneral && <LoaderCircle className="spin" />}
                 {savingGeneral ? "正在保存…" : "保存通用设置"}
               </button>
             </div>
-            <footer>
-              配置文件：
+            <footer className="settings-foot">
+              <span>配置文件</span>
               <code>{configPath ?? "保存后创建 transitpls.toml"}</code>
             </footer>
-          </div>
+          </section>
         )}
       </div>
     </div>
@@ -2546,13 +3251,32 @@ function EmptyState({ onImport }: { onImport: () => void }) {
       <p>
         导入 EPUB 或 TXT 文件，TransItPls 会沿用 CLI 的项目状态与断点续跑能力。
       </p>
-      <button className="primary icon-label" onClick={onImport}>
+      <button type="button" className="btn btn-primary" onClick={onImport}>
         <Plus />
         选择书籍文件
       </button>
       <small>暂不支持 PDF、DOCX 和字幕文件</small>
     </div>
   );
+}
+function statusClass(status: Status | ItemStatus) {
+  return status === "translated"
+    ? "ok"
+    : status === "failed"
+      ? "danger"
+      : status === "translating"
+        ? "active"
+        : "muted";
+}
+function polishClass(status: PolishStatus) {
+  return status === "succeeded" ? "ok" : status === "failed" ? "danger" : "warn";
+}
+function termState(term: Term) {
+  if (term.policy === "ignored") return { cls: "muted", text: "已忽略" };
+  if (term.policy === "non_fixed") return { cls: "muted", text: "非固定" };
+  if (term.status === "conflict") return { cls: "warn", text: "有冲突" };
+  if (term.status === "resolved") return { cls: "ok", text: "已裁定" };
+  return { cls: "muted", text: "正常" };
 }
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
