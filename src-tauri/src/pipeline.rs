@@ -1,6 +1,6 @@
 //! 翻译批次与上下文：按字符预算切分批次，并收集最近译文作为提示词参考。
 
-use crate::llm::RecentTarget;
+use crate::llm::{RecentTarget, SurroundingSource};
 use crate::model::{Chapter, ItemStatus, Segment};
 use crate::state;
 use chrono::{SecondsFormat, Utc};
@@ -37,6 +37,28 @@ pub fn batch_ranges(segments: &[Segment], max_chars: usize) -> Vec<Range<usize>>
         start = end;
     }
     ranges
+}
+
+/// 只读取同章相邻原文，不依赖其他批次的完成顺序；每侧最多 1,000 个字符。
+pub fn surrounding_source(segments: &[Segment], range: Range<usize>) -> SurroundingSource {
+    let before = range
+        .start
+        .checked_sub(1)
+        .and_then(|index| segments.get(index));
+    let after = segments.get(range.end);
+    SurroundingSource {
+        before: before.map_or_else(String::new, |segment| {
+            let chars = segment.source.chars().count();
+            segment
+                .source
+                .chars()
+                .skip(chars.saturating_sub(1_000))
+                .collect()
+        }),
+        after: after.map_or_else(String::new, |segment| {
+            segment.source.chars().take(1_000).collect()
+        }),
+    }
 }
 
 /// 收集指定位置之前最近的已翻译段落，按时间顺序返回。
@@ -152,7 +174,7 @@ pub fn write_context(
 
 #[cfg(test)]
 mod tests {
-    use super::{batch_ranges, recent_targets};
+    use super::{batch_ranges, recent_targets, surrounding_source};
     use crate::model::{Chapter, ItemStatus, Segment, SegmentKind};
 
     fn segment(id: &str, source: &str, target: Option<&str>, status: ItemStatus) -> Segment {
@@ -178,6 +200,32 @@ mod tests {
             segment("c", "超长文本", None, ItemStatus::Pending),
         ];
         assert_eq!(batch_ranges(&segments, 3), vec![0..1, 1..2, 2..3]);
+    }
+
+    #[test]
+    fn source_context_keeps_nearest_unicode_text_outside_the_batch() {
+        let segments = vec![
+            segment(
+                "a",
+                &format!("远{}近", "前".repeat(1_000)),
+                None,
+                ItemStatus::Pending,
+            ),
+            segment("b", "待翻译一", None, ItemStatus::Pending),
+            segment("c", "待翻译二", None, ItemStatus::Pending),
+            segment(
+                "d",
+                &format!("近{}远", "后".repeat(1_000)),
+                None,
+                ItemStatus::Pending,
+            ),
+        ];
+        let context = surrounding_source(&segments, 1..3);
+        assert_eq!(context.before, format!("{}近", "前".repeat(999)));
+        assert_eq!(context.after, format!("近{}", "后".repeat(999)));
+        let whole_chapter = surrounding_source(&segments, 0..segments.len());
+        assert!(whole_chapter.before.is_empty());
+        assert!(whole_chapter.after.is_empty());
     }
 
     #[test]

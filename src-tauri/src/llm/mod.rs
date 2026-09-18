@@ -74,13 +74,21 @@ pub struct RecentTarget {
     pub target: String,
 }
 
-/// 翻译与润色批次共享的上下文：风格、梗概、章节摘要、术语和最近译文。
+/// 当前批次前后的原文，仅供理解上下文，不属于待翻译内容。
+#[derive(Debug, Clone, Serialize)]
+pub struct SurroundingSource {
+    pub before: String,
+    pub after: String,
+}
+
+/// 翻译与润色批次共享的上下文。
 pub struct TranslationContext<'a> {
     pub style_guide: &'a [String],
     pub book_synopsis: Option<&'a str>,
     pub chapter_digest: Option<&'a str>,
     pub terms: &'a [crate::terms::Term],
     pub recent_targets: &'a [RecentTarget],
+    pub surrounding_source: Option<&'a SurroundingSource>,
 }
 
 /// 按系统提示词中的任务标记归类调用阶段，用于用量统计和错误归类。

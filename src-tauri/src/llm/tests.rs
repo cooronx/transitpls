@@ -67,6 +67,10 @@ fn translation_prompt_includes_relevant_terms() {
             segment_id: "segment-0".to_string(),
             target: "最近译文".to_string(),
         }],
+        surrounding_source: Some(&super::SurroundingSource {
+            before: "Bob opened the door.".to_string(),
+            after: "She greeted him.".to_string(),
+        }),
     };
     let (_, user) = build_prompts(&[segment], "en", "zh-CN", &context);
     let value: serde_json::Value =
@@ -74,6 +78,12 @@ fn translation_prompt_includes_relevant_terms() {
     assert_eq!(value["terms"][0]["target"], "爱丽丝");
     assert_eq!(value["terms"][0]["status"], "resolved");
     assert_eq!(value["segments"][0]["number"], 1);
+    assert_eq!(value["segments"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["surrounding_source"]["before"],
+        "Bob opened the door."
+    );
+    assert_eq!(value["surrounding_source"]["after"], "She greeted him.");
     let positions = [
         "\"style\"",
         "\"book_synopsis\"",

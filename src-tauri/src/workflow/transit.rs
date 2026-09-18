@@ -151,7 +151,7 @@ pub(crate) async fn run_transit(
         .map(|index| vec![index])
         .unwrap_or_else(|| (0..chapters.len()).collect());
     if config.general.translation_concurrency <= 1 {
-        // 串行模式保留批次间最近译文参考，行为与并发化之前完全一致。
+        // 串行模式保留批次间最近译文参考。
         for chapter_index in chapter_indices {
             translate_chapter(
                 client.as_ref(),
@@ -239,6 +239,10 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                 untranslated[0],
                 config.pipeline.recent_context_chars,
             );
+            let surrounding = pipeline::surrounding_source(
+                &chapters[chapter_index].segments,
+                untranslated[0]..untranslated[untranslated.len() - 1] + 1,
+            );
             match request_translation(
                 client,
                 &request,
@@ -247,6 +251,7 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                 digest.as_deref(),
                 &relevant_terms,
                 &recent,
+                &surrounding,
                 config.llm.max_retries,
             )
             .await
@@ -331,6 +336,7 @@ struct BatchPlan {
     indices: Vec<usize>,
     digest: Option<String>,
     segments: Vec<Segment>,
+    surrounding_source: llm::SurroundingSource,
 }
 
 /// worker 返回给协调者的结果；worker 自身不写任何项目状态。
@@ -367,6 +373,10 @@ fn plan_batches(
             }
             plans.push(BatchPlan {
                 chapter_index,
+                surrounding_source: pipeline::surrounding_source(
+                    &chapter.segments,
+                    indices[0]..indices[indices.len() - 1] + 1,
+                ),
                 segments: indices
                     .iter()
                     .map(|&index| chapter.segments[index].clone())
@@ -475,6 +485,7 @@ fn spawn_translation_batch(
                     plan.digest.as_deref(),
                     &terms,
                     &[],
+                    &plan.surrounding_source,
                     max_retries,
                 )
                 .await
@@ -610,6 +621,7 @@ pub(super) async fn request_translation<C: TranslationClient + ?Sized>(
     digest: Option<&str>,
     terms: &[crate::terms::Term],
     recent: &[RecentTarget],
+    surrounding: &llm::SurroundingSource,
     max_retries: usize,
 ) -> Result<Vec<String>, String> {
     llm::translate_batch(
@@ -623,6 +635,7 @@ pub(super) async fn request_translation<C: TranslationClient + ?Sized>(
             chapter_digest: digest,
             terms,
             recent_targets: recent,
+            surrounding_source: Some(surrounding),
         },
         max_retries,
     )
@@ -646,6 +659,10 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
 ) -> Result<(), String> {
     let segment = chapters[chapter_index].segments[segment_index].clone();
     let terms = store.relevant(&segment.source)?;
+    let surrounding = pipeline::surrounding_source(
+        &chapters[chapter_index].segments,
+        segment_index..segment_index + 1,
+    );
     let translations = request_translation(
         client,
         std::slice::from_ref(&segment),
@@ -654,6 +671,7 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         digest,
         &terms,
         recent,
+        &surrounding,
         config.llm.max_retries,
     )
     .await;

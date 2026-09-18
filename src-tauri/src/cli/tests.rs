@@ -498,7 +498,7 @@ async fn single_chapter_translation_does_not_auto_polish() {
 }
 
 struct BatchRejectingClient {
-    translation_sizes: Arc<Mutex<Vec<usize>>>,
+    translation_requests: Arc<Mutex<Vec<serde_json::Value>>>,
 }
 
 #[async_trait]
@@ -517,10 +517,10 @@ impl TranslationClient for BatchRejectingClient {
             .as_array()
             .expect("prompt should contain segments");
         if system_prompt.contains("TASK:TRANSLATION") {
-            self.translation_sizes
+            self.translation_requests
                 .lock()
-                .expect("sizes mutex")
-                .push(segments.len());
+                .expect("requests mutex")
+                .push(value.clone());
             if segments.len() > 1 {
                 return Ok(output("not json".to_string()));
             }
@@ -574,14 +574,15 @@ async fn failed_batch_falls_back_to_individual_segments() {
     let mut chapters = state::load_chapters(&state_dir, &project).expect("chapters should load");
     let store = TermStore::open(state::project_dir(&state_dir, &project.id).join("terms.db"))
         .expect("term store should open");
-    let sizes = Arc::new(Mutex::new(Vec::new()));
+    let requests = Arc::new(Mutex::new(Vec::new()));
     let client: Arc<dyn TranslationClient> = Arc::new(BatchRejectingClient {
-        translation_sizes: Arc::clone(&sizes),
+        translation_requests: Arc::clone(&requests),
     });
     let analysis = test_analysis();
     let mut config = AppConfig::default();
     config.llm.max_retries = 0;
     config.pipeline.polish = true;
+    config.general.translation_concurrency = 2;
 
     run_transit(
         client,
@@ -596,7 +597,24 @@ async fn failed_batch_falls_back_to_individual_segments() {
     .await
     .expect("individual fallback should complete");
 
-    assert_eq!(*sizes.lock().expect("sizes mutex"), vec![2, 1, 1]);
+    let requests = requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request["segments"].as_array().unwrap().len())
+            .collect::<Vec<_>>(),
+        vec![2, 1, 1]
+    );
+    assert_eq!(requests[1]["surrounding_source"]["before"], "");
+    assert_eq!(
+        requests[1]["surrounding_source"]["after"],
+        "Second paragraph."
+    );
+    assert_eq!(
+        requests[2]["surrounding_source"]["before"],
+        "First paragraph."
+    );
+    assert_eq!(requests[2]["surrounding_source"]["after"], "");
     assert!(chapters[0]
         .segments
         .iter()
@@ -676,6 +694,7 @@ struct ConcurrencyProbeClient {
     slow_source: Option<String>,
     active: AtomicUsize,
     max_active: AtomicUsize,
+    requests: Mutex<Vec<serde_json::Value>>,
 }
 
 impl ConcurrencyProbeClient {
@@ -685,6 +704,7 @@ impl ConcurrencyProbeClient {
             slow_source: None,
             active: AtomicUsize::new(0),
             max_active: AtomicUsize::new(0),
+            requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -722,6 +742,7 @@ impl TranslationClient for ConcurrencyProbeClient {
         if !system_prompt.contains("TASK:TRANSLATION") {
             return Ok(translations);
         }
+        self.requests.lock().unwrap().push(value);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         let slow = self.slow_source.as_ref().is_some_and(|source| {
@@ -750,7 +771,7 @@ fn concurrent_config(concurrency: usize) -> AppConfig {
 
 #[tokio::test]
 async fn concurrent_translation_limits_in_flight_batches() {
-    let mut fixture = transit_fixture(pending_document(2, 2));
+    let mut fixture = transit_fixture(pending_document(2, 3));
     let probe = Arc::new(ConcurrencyProbeClient::new(10));
     let client: Arc<dyn TranslationClient> = probe.clone();
 
@@ -772,11 +793,30 @@ async fn concurrent_translation_limits_in_flight_batches() {
         2,
         "in-flight translation batches must respect translation_concurrency"
     );
+    let requests = probe.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
     for chapter in &fixture.chapters {
-        for segment in &chapter.segments {
+        for (index, segment) in chapter.segments.iter().enumerate() {
             let expected = format!("translated {}", segment.source);
             assert_eq!(segment.target.as_deref(), Some(expected.as_str()));
             assert_eq!(segment.status, ItemStatus::Translated);
+            let request = requests
+                .iter()
+                .find(|request| request["segments"][0]["id"] == segment.id)
+                .unwrap();
+            assert_eq!(request["segments"].as_array().unwrap().len(), 1);
+            assert!(request["recent_targets"].as_array().unwrap().is_empty());
+            let before = index
+                .checked_sub(1)
+                .map(|index| chapter.segments[index].source.as_str())
+                .unwrap_or_default();
+            let after = chapter
+                .segments
+                .get(index + 1)
+                .map(|segment| segment.source.as_str())
+                .unwrap_or_default();
+            assert_eq!(request["surrounding_source"]["before"], before);
+            assert_eq!(request["surrounding_source"]["after"], after);
         }
     }
     fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");

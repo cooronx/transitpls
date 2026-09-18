@@ -44,6 +44,8 @@ pub(super) struct TranslationPrompt<'a> {
     pub(super) chapter_digest: Option<&'a str>,
     pub(super) terms: &'a [Term],
     pub(super) recent_targets: &'a [RecentTarget],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) surrounding_source: Option<&'a super::SurroundingSource>,
     pub(super) segments: Vec<NumberedSource<'a>>,
 }
 
@@ -81,7 +83,7 @@ pub fn build_prompts(
     context: &super::TranslationContext<'_>,
 ) -> (String, String) {
     let system = format!(
-        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. Return only JSON as {{\"translations\":[\"<translated text>\"]}} holding exactly one translated string per input segment, in input order, and never omit an item."
+        "TASK:TRANSLATION You are a professional literary translator. Translate from {source_language} to {target_language}. Apply the context sections in their provided order. Preserve meaning, tone, formatting markers, and paragraph boundaries. Resolved terms are authoritative. surrounding_source contains earlier (before) and later (after) source excerpts for reference only; excerpts may be truncated. Use them to understand speakers, pronouns, forms of address, and narrative continuity. Do not translate or return these excerpts, or move their content into the translation. Only translate the segments array. Return only JSON as {{\"translations\":[\"<translated text>\"]}} holding exactly one translated string per input segment, in input order, and never omit an item."
     );
     let user = serde_json::to_string(&TranslationPrompt {
         style: context.style_guide,
@@ -89,6 +91,7 @@ pub fn build_prompts(
         chapter_digest: context.chapter_digest,
         terms: context.terms,
         recent_targets: context.recent_targets,
+        surrounding_source: context.surrounding_source,
         segments: segments
             .iter()
             .enumerate()

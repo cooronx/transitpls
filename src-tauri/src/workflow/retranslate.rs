@@ -282,6 +282,10 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
         config.pipeline.recent_context_chars,
     );
     let request = chapters[chapter_index].segments[segment_index].clone();
+    let surrounding = pipeline::surrounding_source(
+        &chapters[chapter_index].segments,
+        segment_index..segment_index + 1,
+    );
     let draft = request_translation(
         client,
         std::slice::from_ref(&request),
@@ -290,6 +294,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
         digest,
         &relevant_terms,
         &recent,
+        &surrounding,
         config.llm.max_retries,
     )
     .await?

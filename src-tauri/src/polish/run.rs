@@ -377,6 +377,7 @@ fn spawn_batch(
             chapter_digest: digest.as_deref(),
             terms: &filtered,
             recent_targets: &reference,
+            surrounding_source: None,
         };
         let started = Instant::now();
         let result =

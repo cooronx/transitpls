@@ -90,6 +90,7 @@ pub async fn translate_titles<C: TranslationClient + ?Sized>(
         chapter_digest: None,
         terms,
         recent_targets: &[],
+        surrounding_source: None,
         segments: titles
             .iter()
             .enumerate()
