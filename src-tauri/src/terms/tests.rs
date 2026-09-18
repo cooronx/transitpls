@@ -514,42 +514,61 @@ async fn drops_extracted_terms_that_copy_the_kana_source_unchanged() {
     assert_eq!(terms.len(), 1);
 }
 
-struct PromptCaptureClient(Arc<Mutex<String>>);
+struct PromptCaptureClient(Arc<Mutex<(String, String)>>);
 
 #[async_trait]
 impl TranslationClient for PromptCaptureClient {
     async fn complete(
         &self,
-        _system_prompt: &str,
+        system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionOutput, String> {
-        *self.0.lock().unwrap() = user_prompt.to_string();
+        *self.0.lock().unwrap() = (system_prompt.to_string(), user_prompt.to_string());
         Ok(CompletionOutput {
-            text: "{\"terms\":[]}".to_string(),
+            text: serde_json::json!({ "terms": [json_term("Alice", "艾莉丝")] }).to_string(),
             usage: Usage::default(),
         })
     }
 }
 
 #[tokio::test]
-async fn extraction_prompt_lists_existing_targets() {
-    let prompt = Arc::new(Mutex::new(String::new()));
+async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
+    let prompt = Arc::new(Mutex::new((String::new(), String::new())));
+    let (store, path) = store("observed-target");
     let mut alice = term("Alice", "爱丽丝");
     alice.aliases.push("Alicia".to_string());
+    store.insert(&alice).unwrap();
     let terms = extract_terms(
         &PromptCaptureClient(Arc::clone(&prompt)),
-        "Alice arrived.",
-        "爱丽丝到了。",
+        "Alicia arrived.",
+        "艾莉丝到了。",
         &[alice],
         0,
         0,
     )
     .await
-    .expect("empty extraction should parse");
-    assert!(terms.is_empty());
+    .expect("observed extraction should parse");
+    assert_eq!(terms[0].target, "艾莉丝");
+    assert_eq!(
+        store
+            .insert_with_evidence(&terms[0], "Alicia arrived.", "艾莉丝到了。")
+            .unwrap(),
+        TermStatus::Conflict
+    );
+    assert_eq!(store.list().unwrap()[0].target, "爱丽丝");
+    assert!(store
+        .conflicts()
+        .unwrap()
+        .iter()
+        .any(|term| term.target == "艾莉丝"));
 
-    let value: serde_json::Value = serde_json::from_str(&prompt.lock().unwrap()).unwrap();
+    let (system, user) = &*prompt.lock().unwrap();
+    assert!(system.contains("Report the target wording actually present"));
+    assert!(!system.contains("reuse its target exactly"));
+    let value: serde_json::Value = serde_json::from_str(user).unwrap();
     assert_eq!(value["known_terms"][0]["source"], "Alice");
     assert_eq!(value["known_terms"][0]["target"], "爱丽丝");
     assert_eq!(value["known_terms"][0]["aliases"][0], "Alicia");
+    assert_eq!(value["target"], "艾莉丝到了。");
+    std::fs::remove_file(path).unwrap();
 }

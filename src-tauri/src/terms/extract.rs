@@ -78,7 +78,7 @@ impl ExtractedTerm {
 
 /// 从一段原文/译文中抽取术语，失败时按 `max_retries` 退避重试。
 ///
-/// `known_terms` 是当前批次命中的既有术语，模型应沿用其译名而不是另造一个；
+/// `known_terms` 用于识别既有术语及别名，抽取结果必须保留正文实际使用的译名；
 /// 返回空补全会直接报错，交由 `extract_terms_resilient` 决定是否拆分批次。
 pub async fn extract_terms<C: TranslationClient + ?Sized>(
     client: &C,
@@ -104,7 +104,7 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
         "known_terms": known,
     })
     .to_string();
-    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. known_terms lists the existing glossary; whenever a known source or alias appears, reuse its target exactly and never propose another translation for it. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
+    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Report the target wording actually present in the supplied translation, even when it differs from known_terms. known_terms is reference data for identifying entities and aliases, not an answer to copy: never replace observed wording with the glossary target or invent a preferred translation. When an alias unambiguously refers to a known entity, use that entity's canonical source. Return a separate entry for each distinct target wording observed for the same source. Omit a term if no corresponding wording can be identified in the supplied translation. Do not treat ordinary context-dependent wording as fixed terminology. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
     let schema = crate::schema::response_schema::<ExtractionResponse>();
     let mut last_error = None;
     for attempt in 0..=max_retries {
