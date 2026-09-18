@@ -13,6 +13,11 @@ use super::{
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
+
+/// 并发翻译时 worker 的读连接可能与协调者的写事务重叠，
+/// 等待而不是直接抛出 `database is locked`。
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 项目术语库，持有 `terms.db` 路径，每次操作独立打开连接。
 #[derive(Debug, Clone)]
@@ -27,17 +32,24 @@ impl TermStore {
         let connection = Connection::open(&path).map_err(|error| {
             format!("failed to open terms database {}: {error}", path.display())
         })?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
         initialize_schema(&connection)?;
         Ok(Self { path })
     }
 
     fn connect(&self) -> Result<Connection, String> {
-        Connection::open(&self.path).map_err(|error| {
+        let connection = Connection::open(&self.path).map_err(|error| {
             format!(
                 "failed to open terms database {}: {error}",
                 self.path.display()
             )
-        })
+        })?;
+        connection
+            .busy_timeout(BUSY_TIMEOUT)
+            .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
+        Ok(connection)
     }
 
     /// 写入术语。

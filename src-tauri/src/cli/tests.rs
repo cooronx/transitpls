@@ -22,9 +22,9 @@ use clap::Parser;
 use rig_core::completion::Usage;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -575,16 +575,16 @@ async fn failed_batch_falls_back_to_individual_segments() {
     let store = TermStore::open(state::project_dir(&state_dir, &project.id).join("terms.db"))
         .expect("term store should open");
     let sizes = Arc::new(Mutex::new(Vec::new()));
-    let client = BatchRejectingClient {
+    let client: Arc<dyn TranslationClient> = Arc::new(BatchRejectingClient {
         translation_sizes: Arc::clone(&sizes),
-    };
+    });
     let analysis = test_analysis();
     let mut config = AppConfig::default();
     config.llm.max_retries = 0;
     config.pipeline.polish = true;
 
     run_transit(
-        &client,
+        client,
         &store,
         &state_dir,
         &mut project,
@@ -611,6 +611,235 @@ async fn failed_batch_falls_back_to_individual_segments() {
         .expect("summary should load")
         .is_none());
     fs::remove_dir_all(dir).expect("temp directory should be removed");
+}
+
+struct TransitFixture {
+    dir: PathBuf,
+    state_dir: PathBuf,
+    project: crate::model::ProjectState,
+    chapters: Vec<crate::model::Chapter>,
+    store: TermStore,
+}
+
+fn transit_fixture(document: Document) -> TransitFixture {
+    let dir = temp_dir();
+    let source = dir.join("book.txt");
+    fs::write(&source, "book").expect("source should be written");
+    let state_dir = dir.join("projects");
+    let initialized = state::initialize(&state_dir, &source, &document, 1_200)
+        .expect("project should initialize");
+    let chapters =
+        state::load_chapters(&state_dir, &initialized.project).expect("chapters should load");
+    let store =
+        TermStore::open(state::project_dir(&state_dir, &initialized.project.id).join("terms.db"))
+            .expect("term store should open");
+    TransitFixture {
+        dir,
+        state_dir,
+        project: initialized.project,
+        chapters,
+        store,
+    }
+}
+
+fn pending_document(chapter_count: usize, segments_per_chapter: usize) -> Document {
+    Document {
+        metadata: DocumentMetadata {
+            title: "Book".to_string(),
+            source_language: "en".to_string(),
+            target_language: "zh-CN".to_string(),
+            source_format: "txt".to_string(),
+        },
+        chapters: (0..chapter_count)
+            .map(|chapter| crate::model::Chapter {
+                id: format!("chapter-{chapter}"),
+                title: format!("Chapter {chapter}"),
+                target_title: None,
+                status: ItemStatus::Pending,
+                meta: serde_json::json!({ "source_digest": format!("digest {chapter}") }),
+                segments: (0..segments_per_chapter)
+                    .map(|segment| {
+                        test_segment(
+                            &format!("c{chapter}-s{segment}"),
+                            &format!("Paragraph {chapter}-{segment}."),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+/// 记录同时在飞的翻译批次数，并可让指定原文的批次变慢，用于制造乱序完成。
+struct ConcurrencyProbeClient {
+    delay_ms: u64,
+    slow_source: Option<String>,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl ConcurrencyProbeClient {
+    fn new(delay_ms: u64) -> Self {
+        Self {
+            delay_ms,
+            slow_source: None,
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        }
+    }
+
+    fn slow_on(mut self, source: &str) -> Self {
+        self.slow_source = Some(source.to_string());
+        self
+    }
+}
+
+#[async_trait]
+impl TranslationClient for ConcurrencyProbeClient {
+    async fn complete(
+        &self,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        if system_prompt.contains("TASK:TERM_EXTRACTION") {
+            return Ok(output(r#"{"terms":[]}"#.to_string()));
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(user_prompt).map_err(|error| error.to_string())?;
+        let segments = value["segments"].as_array().cloned().unwrap_or_default();
+        let translations = output(
+            serde_json::json!({
+                "translations": segments
+                    .iter()
+                    .map(|segment| format!(
+                        "translated {}",
+                        segment["source"].as_str().unwrap_or_default()
+                    ))
+                    .collect::<Vec<_>>()
+            })
+            .to_string(),
+        );
+        if !system_prompt.contains("TASK:TRANSLATION") {
+            return Ok(translations);
+        }
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(active, Ordering::SeqCst);
+        let slow = self.slow_source.as_ref().is_some_and(|source| {
+            segments
+                .iter()
+                .any(|segment| segment["source"].as_str() == Some(source.as_str()))
+        });
+        tokio::time::sleep(Duration::from_millis(if slow {
+            self.delay_ms * 5
+        } else {
+            self.delay_ms
+        }))
+        .await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        Ok(translations)
+    }
+}
+
+fn concurrent_config(concurrency: usize) -> AppConfig {
+    let mut config = AppConfig::default();
+    config.llm.max_retries = 0;
+    config.segment.max_chars_per_batch = 1;
+    config.general.translation_concurrency = concurrency;
+    config
+}
+
+#[tokio::test]
+async fn concurrent_translation_limits_in_flight_batches() {
+    let mut fixture = transit_fixture(pending_document(2, 2));
+    let probe = Arc::new(ConcurrencyProbeClient::new(10));
+    let client: Arc<dyn TranslationClient> = probe.clone();
+
+    run_transit(
+        client,
+        &fixture.store,
+        &fixture.state_dir,
+        &mut fixture.project,
+        &mut fixture.chapters,
+        &test_analysis(),
+        &concurrent_config(2),
+        None,
+    )
+    .await
+    .expect("concurrent transit should complete");
+
+    assert_eq!(
+        probe.max_active.load(Ordering::SeqCst),
+        2,
+        "in-flight translation batches must respect translation_concurrency"
+    );
+    for chapter in &fixture.chapters {
+        for segment in &chapter.segments {
+            let expected = format!("translated {}", segment.source);
+            assert_eq!(segment.target.as_deref(), Some(expected.as_str()));
+            assert_eq!(segment.status, ItemStatus::Translated);
+        }
+    }
+    fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
+}
+
+#[tokio::test]
+async fn out_of_order_batch_completion_writes_back_by_position() {
+    let mut fixture = transit_fixture(pending_document(2, 1));
+    let probe = Arc::new(ConcurrencyProbeClient::new(10).slow_on("Paragraph 0-0."));
+    let client: Arc<dyn TranslationClient> = probe.clone();
+
+    run_transit(
+        client,
+        &fixture.store,
+        &fixture.state_dir,
+        &mut fixture.project,
+        &mut fixture.chapters,
+        &test_analysis(),
+        &concurrent_config(2),
+        None,
+    )
+    .await
+    .expect("out-of-order completion should still write back correctly");
+
+    // 第二批先完成，写回仍必须落到各自段落的原位置。
+    for chapter in &fixture.chapters {
+        for segment in &chapter.segments {
+            let expected = format!("translated {}", segment.source);
+            assert_eq!(segment.target.as_deref(), Some(expected.as_str()));
+        }
+    }
+    assert_eq!(fixture.project.chapters_completed, 2);
+    assert_eq!(fixture.project.status, ProjectStatus::Translated);
+    fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
+}
+
+#[tokio::test]
+async fn serial_translation_sends_one_batch_at_a_time() {
+    let mut fixture = transit_fixture(pending_document(2, 2));
+    let probe = Arc::new(ConcurrencyProbeClient::new(5));
+    let client: Arc<dyn TranslationClient> = probe.clone();
+
+    run_transit(
+        client,
+        &fixture.store,
+        &fixture.state_dir,
+        &mut fixture.project,
+        &mut fixture.chapters,
+        &test_analysis(),
+        &concurrent_config(1),
+        None,
+    )
+    .await
+    .expect("serial transit should complete");
+
+    assert_eq!(probe.max_active.load(Ordering::SeqCst), 1);
+    for chapter in &fixture.chapters {
+        for segment in &chapter.segments {
+            let expected = format!("translated {}", segment.source);
+            assert_eq!(segment.target.as_deref(), Some(expected.as_str()));
+        }
+    }
+    fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
 }
 
 #[tokio::test]
@@ -653,7 +882,7 @@ async fn selected_chapter_leaves_other_chapters_untouched() {
         .expect("term store should open");
 
     run_transit(
-        &MockClient,
+        Arc::new(MockClient),
         &store,
         &state_dir,
         &mut project,
@@ -922,7 +1151,7 @@ async fn extraction_failure_does_not_fail_translation() {
     config.llm.max_retries = 0;
 
     run_transit(
-        &ExtractionFailingClient,
+        Arc::new(ExtractionFailingClient),
         &store,
         &state_dir,
         &mut project,

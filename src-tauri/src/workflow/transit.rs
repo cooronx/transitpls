@@ -1,4 +1,7 @@
 //! 主翻译流程：按章节和字符预算分批翻译，失败时回退到逐段翻译。
+//!
+//! `general.translation_concurrency` 大于 1 时由批次调度器并发执行：
+//! worker 只读快照调用模型，协调者在单线程中按批次位置写回状态。
 
 use super::common::{
     build_client, chapter_body_complete, load_translation_analysis, save_project_progress,
@@ -6,7 +9,7 @@ use super::common::{
 };
 use super::extraction::{
     clear_pending_extraction, extract_completed_chapter, process_extraction,
-    record_pending_extraction, retry_pending_extractions,
+    record_pending_extraction, retry_pending_extractions, store_extraction,
 };
 use super::titles::translate_missing_titles;
 use crate::analysis::BookAnalysis;
@@ -16,9 +19,11 @@ use crate::model::{Chapter, ItemStatus, PolishStatus, ProjectState, ProjectStatu
 use crate::pipeline;
 use crate::polish;
 use crate::state;
-use crate::terms::TermStore;
+use crate::terms::{Term, TermStore};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::task::JoinSet;
 
 /// 界面入口：加载配置后运行翻译。
 pub async fn transit_project(
@@ -71,7 +76,7 @@ pub(crate) async fn transit(
     state::save_project(state_dir, &project)?;
 
     let result = run_transit(
-        client.as_ref(),
+        Arc::clone(&client),
         &store,
         state_dir,
         &mut project,
@@ -121,8 +126,8 @@ pub(crate) async fn transit(
 
 /// 翻译指定章节（或全书），最后补齐章节标题。
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_transit<C: TranslationClient + ?Sized>(
-    client: &C,
+pub(crate) async fn run_transit(
+    client: Arc<dyn TranslationClient>,
     store: &TermStore,
     state_dir: &Path,
     project: &mut ProjectState,
@@ -132,7 +137,7 @@ pub(crate) async fn run_transit<C: TranslationClient + ?Sized>(
     selected_chapter: Option<usize>,
 ) -> Result<(), String> {
     retry_pending_extractions(
-        client,
+        client.as_ref(),
         store,
         state_dir,
         project,
@@ -145,23 +150,44 @@ pub(crate) async fn run_transit<C: TranslationClient + ?Sized>(
     let chapter_indices = selected_chapter
         .map(|index| vec![index])
         .unwrap_or_else(|| (0..chapters.len()).collect());
-    for chapter_index in chapter_indices {
-        translate_chapter(
-            client,
+    if config.general.translation_concurrency <= 1 {
+        // 串行模式保留批次间最近译文参考，行为与并发化之前完全一致。
+        for chapter_index in chapter_indices {
+            translate_chapter(
+                client.as_ref(),
+                store,
+                state_dir,
+                project,
+                chapters,
+                chapter_index,
+                analysis,
+                config,
+            )
+            .await?;
+        }
+    } else {
+        translate_batches_concurrent(
+            &client,
             store,
             state_dir,
             project,
             chapters,
-            chapter_index,
             analysis,
             config,
+            &chapter_indices,
         )
         .await?;
     }
 
     if chapters.iter().all(chapter_body_complete) {
         translate_missing_titles(
-            client, store, state_dir, project, chapters, analysis, config,
+            client.as_ref(),
+            store,
+            state_dir,
+            project,
+            chapters,
+            analysis,
+            config,
         )
         .await?;
     }
@@ -239,11 +265,18 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                         chapter_index,
                         &untranslated,
                         config,
+                        None,
                     )
                     .await?;
                 }
                 Err(_) => {
                     for &index in &untranslated {
+                        let recent = pipeline::recent_targets(
+                            chapters,
+                            chapter_index,
+                            index,
+                            config.pipeline.recent_context_chars,
+                        );
                         translate_one_with_fallback(
                             client,
                             store,
@@ -254,6 +287,7 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                             index,
                             analysis,
                             digest.as_deref(),
+                            &recent,
                             config,
                         )
                         .await?;
@@ -288,6 +322,272 @@ fn cloned_segments(chapters: &[Chapter], chapter_index: usize, indices: &[usize]
         .iter()
         .map(|&index| chapters[chapter_index].segments[index].clone())
         .collect()
+}
+
+/// 一个待翻译批次的调度快照：批次在原书中的位置、原文片段与请求固定上下文。
+#[derive(Clone)]
+struct BatchPlan {
+    chapter_index: usize,
+    indices: Vec<usize>,
+    digest: Option<String>,
+    segments: Vec<Segment>,
+}
+
+/// worker 返回给协调者的结果；worker 自身不写任何项目状态。
+struct PreparedBatch {
+    translations: Result<Vec<String>, String>,
+    extracted: Option<Result<Vec<Term>, String>>,
+}
+
+type BatchJoin = (usize, PreparedBatch);
+
+/// 把待翻译的批次铺成队列；已翻译的批次在开始前跳过。
+fn plan_batches(
+    chapters: &[Chapter],
+    chapter_indices: &[usize],
+    max_chars: usize,
+) -> Vec<BatchPlan> {
+    let mut plans = Vec::new();
+    for &chapter_index in chapter_indices {
+        let chapter = &chapters[chapter_index];
+        let digest = chapter
+            .meta
+            .get("source_digest")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        for range in pipeline::batch_ranges(&chapter.segments, max_chars) {
+            let indices = range
+                .filter(|&index| {
+                    let segment = &chapter.segments[index];
+                    segment.target.is_none() && segment.target_before_polish.is_none()
+                })
+                .collect::<Vec<_>>();
+            if indices.is_empty() {
+                continue;
+            }
+            plans.push(BatchPlan {
+                chapter_index,
+                segments: indices
+                    .iter()
+                    .map(|&index| chapter.segments[index].clone())
+                    .collect(),
+                indices,
+                digest: digest.clone(),
+            });
+        }
+    }
+    plans
+}
+
+/// 并发翻译：最多 N 个批次同时在飞，完成一批就按其在原书中的位置写回一批。
+#[allow(clippy::too_many_arguments)]
+async fn translate_batches_concurrent(
+    client: &Arc<dyn TranslationClient>,
+    store: &TermStore,
+    state_dir: &Path,
+    project: &mut ProjectState,
+    chapters: &mut [Chapter],
+    analysis: &BookAnalysis,
+    config: &AppConfig,
+    chapter_indices: &[usize],
+) -> Result<(), String> {
+    let concurrency = config.general.translation_concurrency.max(1);
+    let plans = plan_batches(
+        chapters,
+        chapter_indices,
+        config.segment.max_chars_per_batch,
+    );
+    let project_snapshot = Arc::new(project.clone());
+    let analysis_snapshot = Arc::new(analysis.clone());
+    let mut pending = (0..plans.len()).collect::<VecDeque<_>>();
+    let mut tasks: JoinSet<BatchJoin> = JoinSet::new();
+
+    while !pending.is_empty() || !tasks.is_empty() {
+        while tasks.len() < concurrency {
+            let Some(plan_index) = pending.pop_front() else {
+                break;
+            };
+            spawn_translation_batch(
+                &mut tasks,
+                client,
+                store,
+                &project_snapshot,
+                &analysis_snapshot,
+                config.llm.max_retries,
+                plan_index,
+                plans[plan_index].clone(),
+            );
+        }
+        // 完成顺序与批次顺序无关，写回只依据批次位置；每个结果在下一个
+        // await 之前落盘，中断或取消最多丢失在途批次，不丢已完成进度。
+        let Some(joined) = tasks.join_next().await else {
+            break;
+        };
+        let (plan_index, prepared) =
+            joined.map_err(|error| format!("translation worker failed: {error}"))?;
+        apply_prepared_batch(
+            client,
+            store,
+            state_dir,
+            project,
+            chapters,
+            analysis,
+            config,
+            &plans[plan_index],
+            prepared,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// 在任务池中发起一个批次请求；worker 只读快照并调用模型。
+#[allow(clippy::too_many_arguments)]
+fn spawn_translation_batch(
+    tasks: &mut JoinSet<BatchJoin>,
+    client: &Arc<dyn TranslationClient>,
+    store: &TermStore,
+    project: &Arc<ProjectState>,
+    analysis: &Arc<BookAnalysis>,
+    max_retries: usize,
+    plan_index: usize,
+    plan: BatchPlan,
+) {
+    let client = Arc::clone(client);
+    let store = store.clone();
+    let project = Arc::clone(project);
+    let analysis = Arc::clone(analysis);
+    tasks.spawn(async move {
+        let joined_sources = plan
+            .segments
+            .iter()
+            .map(|segment| segment.source.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let translations = match store.relevant(&joined_sources) {
+            Ok(terms) => {
+                // 并发模式下不再注入最近译文，避免依赖完成顺序。
+                request_translation(
+                    client.as_ref(),
+                    &plan.segments,
+                    &project,
+                    &analysis,
+                    plan.digest.as_deref(),
+                    &terms,
+                    &[],
+                    max_retries,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        let extracted = match &translations {
+            Ok(translations) => {
+                let target_text = translations
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                Some(
+                    crate::terms::extract_terms_resilient(
+                        client.as_ref(),
+                        &joined_sources,
+                        &target_text,
+                        plan.chapter_index,
+                        max_retries,
+                    )
+                    .await,
+                )
+            }
+            Err(_) => None,
+        };
+        (
+            plan_index,
+            PreparedBatch {
+                translations,
+                extracted,
+            },
+        )
+    });
+}
+
+/// 协调者写回：成功批次按位置写入草稿并收尾，失败批次回退到逐段翻译。
+#[allow(clippy::too_many_arguments)]
+async fn apply_prepared_batch(
+    client: &Arc<dyn TranslationClient>,
+    store: &TermStore,
+    state_dir: &Path,
+    project: &mut ProjectState,
+    chapters: &mut [Chapter],
+    analysis: &BookAnalysis,
+    config: &AppConfig,
+    plan: &BatchPlan,
+    prepared: PreparedBatch,
+) -> Result<(), String> {
+    let chapter_index = plan.chapter_index;
+    match prepared.translations {
+        Ok(translations) => {
+            for (&index, translation) in plan.indices.iter().zip(translations) {
+                store_draft(&mut chapters[chapter_index].segments[index], translation);
+            }
+            state::write_chapter(state_dir, project, &chapters[chapter_index])?;
+            finalize_segments(
+                client.as_ref(),
+                store,
+                state_dir,
+                project,
+                chapters,
+                chapter_index,
+                &plan.indices,
+                config,
+                prepared.extracted,
+            )
+            .await?;
+        }
+        Err(error) => {
+            state::append_log(
+                state_dir,
+                project,
+                "translation_batch_failed",
+                serde_json::json!({
+                    "chapter_id": chapters[chapter_index].id,
+                    "segments": plan.indices.len(),
+                    "error": error,
+                }),
+            )?;
+            for &index in &plan.indices {
+                translate_one_with_fallback(
+                    client.as_ref(),
+                    store,
+                    state_dir,
+                    project,
+                    chapters,
+                    chapter_index,
+                    index,
+                    analysis,
+                    plan.digest.as_deref(),
+                    // 并发模式与批次请求一致，不注入最近译文。
+                    &[],
+                    config,
+                )
+                .await?;
+            }
+        }
+    }
+    // 整章抽取依赖章节已经完整，且包含模型调用，统一放回协调者串行执行。
+    if chapter_body_complete(&chapters[chapter_index]) {
+        extract_completed_chapter(
+            client.as_ref(),
+            store,
+            state_dir,
+            project,
+            chapters,
+            chapter_index,
+            config,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// 保存初稿：`target_before_polish` 同时作为润色输入和可导出的译文，
@@ -339,14 +639,9 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
     segment_index: usize,
     analysis: &BookAnalysis,
     digest: Option<&str>,
+    recent: &[RecentTarget],
     config: &AppConfig,
 ) -> Result<(), String> {
-    let recent = pipeline::recent_targets(
-        chapters,
-        chapter_index,
-        segment_index,
-        config.pipeline.recent_context_chars,
-    );
     let segment = chapters[chapter_index].segments[segment_index].clone();
     let terms = store.relevant(&segment.source)?;
     let translations = request_translation(
@@ -356,7 +651,7 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         analysis,
         digest,
         &terms,
-        &recent,
+        recent,
         config.llm.max_retries,
     )
     .await;
@@ -382,11 +677,15 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         chapter_index,
         &[segment_index],
         config,
+        None,
     )
     .await
 }
 
-/// 批次收尾：更新状态、登记待抽取、写回章节并立即尝试术语抽取。
+/// 批次收尾：更新状态、登记待抽取、写回章节并处理术语抽取。
+///
+/// `extracted` 为 `Some` 表示术语已在 worker 中抽取完成（并发模式），协调者
+/// 只负责入库；为 `None` 时在本函数内调用模型抽取（串行模式）。
 #[allow(clippy::too_many_arguments)]
 async fn finalize_segments<C: TranslationClient + ?Sized>(
     client: &C,
@@ -397,6 +696,7 @@ async fn finalize_segments<C: TranslationClient + ?Sized>(
     chapter_index: usize,
     indices: &[usize],
     config: &AppConfig,
+    extracted: Option<Result<Vec<Term>, String>>,
 ) -> Result<(), String> {
     if indices.is_empty() {
         return Ok(());
@@ -438,15 +738,20 @@ async fn finalize_segments<C: TranslationClient + ?Sized>(
     )?;
     save_project_progress(state_dir, project, chapters)?;
     store.queue_extraction(&extraction)?;
-    if let Err(error) = process_extraction(
-        client,
-        store,
-        &extraction,
-        chapter_index,
-        config.llm.max_retries,
-    )
-    .await
-    {
+    let outcome = match extracted {
+        Some(result) => result.and_then(|terms| store_extraction(store, &extraction, &terms)),
+        None => {
+            process_extraction(
+                client,
+                store,
+                &extraction,
+                chapter_index,
+                config.llm.max_retries,
+            )
+            .await
+        }
+    };
+    if let Err(error) = outcome {
         // Term extraction is auxiliary: keep translation progress and retry
         // the pending extraction on a later run.
         state::append_log(

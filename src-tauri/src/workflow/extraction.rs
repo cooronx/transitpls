@@ -9,7 +9,7 @@ use crate::llm::TranslationClient;
 use crate::model::{Chapter, ProjectState};
 use crate::pipeline;
 use crate::state;
-use crate::terms::{self, PendingExtraction, TermStore};
+use crate::terms::{self, PendingExtraction, Term, TermStore};
 use std::path::Path;
 
 /// 章节正文完成后抽取一次整章术语，每章只做一次。
@@ -217,8 +217,17 @@ pub(super) async fn process_extraction<C: TranslationClient + ?Sized>(
         max_retries,
     )
     .await?;
+    store_extraction(store, extraction, &extracted)
+}
+
+/// 把已抽取的术语写入术语库并标记批次完成；并发模式下由协调者调用。
+pub(super) fn store_extraction(
+    store: &TermStore,
+    extraction: &PendingExtraction,
+    extracted: &[Term],
+) -> Result<(), String> {
     for term in extracted {
-        store.insert_with_evidence(&term, &extraction.source_text, &extraction.target_text)?;
+        store.insert_with_evidence(term, &extraction.source_text, &extraction.target_text)?;
     }
     store.complete_extraction(&extraction.chapter_id, &extraction.batch_key)
 }

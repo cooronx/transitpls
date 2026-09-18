@@ -33,6 +33,8 @@ pub struct AppConfig {
 pub struct GeneralConfig {
     /// 工作台每页显示的段落数。
     pub visible_segments: usize,
+    /// 主翻译链路同时在飞的批次数。
+    pub translation_concurrency: usize,
     /// 重译并发数。
     pub retranslation_concurrency: usize,
     /// 润色批次并发数。
@@ -43,6 +45,7 @@ impl Default for GeneralConfig {
     fn default() -> Self {
         Self {
             visible_segments: 100,
+            translation_concurrency: 3,
             retranslation_concurrency: 3,
             polish_concurrency: 3,
         }
@@ -343,6 +346,9 @@ fn validate(config: &AppConfig) -> Result<(), String> {
     if config.general.retranslation_concurrency == 0 {
         return Err("general.retranslation_concurrency must be greater than zero".to_string());
     }
+    if config.general.translation_concurrency == 0 {
+        return Err("general.translation_concurrency must be greater than zero".to_string());
+    }
     if config.general.polish_concurrency == 0 {
         return Err("general.polish_concurrency must be greater than zero".to_string());
     }
@@ -398,6 +404,7 @@ mod tests {
         assert!(!config.pipeline.polish);
         assert_eq!(config.pipeline.recent_context_chars, 2_000);
         assert_eq!(config.general.visible_segments, 100);
+        assert_eq!(config.general.translation_concurrency, 3);
         assert_eq!(config.general.retranslation_concurrency, 3);
         assert_eq!(config.general.polish_concurrency, 3);
     }
