@@ -1,34 +1,43 @@
 :root {
-    font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, "Microsoft YaHei UI", "PingFang SC", sans-serif;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
     font-size: 13px;
-    color: #1b1b1b;
-    background: #f3f3f3;
+    color: var(--text);
+    background: var(--bg);
     font-synthesis: none;
     text-rendering: optimizeLegibility;
-    --accent: #0067c0;
-    --accent-hover: #1975c5;
-    --accent-pressed: #005a9e;
-    --accent-soft: rgba(0, 103, 192, .09);
-    --bg: #f3f3f3;
+    -webkit-font-smoothing: antialiased;
+    color-scheme: light;
+    --accent: #0066cc;
+    --accent-focus: #0071e3;
+    --accent-on-dark: #2997ff;
+    --accent-soft: rgba(0, 102, 204, .08);
+    --accent-stroke: rgba(0, 102, 204, .25);
+    --bg: #f5f5f7;
     --layer: #ffffff;
-    --layer-alt: #f9f9f9;
-    --subtle-hover: #f5f5f5;
-    --subtle-pressed: #ededed;
-    --stroke: #e5e5e5;
-    --stroke-soft: #ededed;
-    --control-stroke: #d1d1d1;
-    --control-stroke-bottom: #8a8a8a;
-    --text: #1b1b1b;
-    --text-secondary: #5d5d5d;
+    --layer-alt: #fafafc;
+    --layer-frosted: rgba(245, 245, 247, .8);
+    --subtle-hover: #f5f5f7;
+    --subtle-pressed: #e8e8ed;
+    --stroke: #e0e0e0;
+    --stroke-soft: #f0f0f0;
+    --control-stroke: #d2d2d7;
+    --text: #1d1d1f;
+    --text-secondary: #333333;
     --text-tertiary: #7a7a7a;
-    --text-disabled: #9a9a9a;
+    --text-disabled: #7a7a7a;
+    --nav-bg: #000000;
+    --on-dark: #ffffff;
+    --on-dark-muted: #cccccc;
+    --dark-hover: #272729;
+    --dark-pressed: #2a2a2c;
     --danger: #c42b1c;
     --ok: #0f7b0f;
     --warn: #9d5d00;
-    --r-control: 4px;
-    --r-card: 8px;
+    --r-control: 8px;
+    --r-capsule: 11px;
+    --r-card: 18px;
+    --r-pill: 9999px;
     --titlebar-h: 40px;
-    --shadow-flyout: 0 8px 16px rgba(0, 0, 0, .14);
     --nav-h: 40px
 }
 
@@ -56,6 +65,19 @@ textarea {
 button {
     user-select: none;
     -webkit-user-select: none
+}
+
+button:focus-visible,
+summary:focus-visible,
+input[type="checkbox"]:focus-visible {
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
+}
+
+h1,
+h2 {
+    font-family: "SF Pro Display", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+    letter-spacing: -.01em
 }
 
 h1,
@@ -160,8 +182,9 @@ p {
     align-items: center;
     gap: 8px;
     padding: 0 8px 0 12px;
-    background: var(--bg);
-    border-bottom: 1px solid var(--stroke);
+    background: var(--nav-bg);
+    color: var(--on-dark);
+    border-bottom: 1px solid var(--dark-hover);
     user-select: none;
     -webkit-user-select: none
 }
@@ -176,7 +199,7 @@ p {
 .titlebar-suffix {
     flex: none;
     font-size: 12px;
-    color: var(--text-tertiary);
+    color: var(--on-dark-muted);
     white-space: nowrap
 }
 
@@ -200,19 +223,19 @@ p {
     border-bottom: 2px solid transparent;
     background: transparent;
     font-size: 13px;
-    color: var(--text-secondary);
+    color: var(--on-dark-muted);
     cursor: default
 }
 
 .titlebar-nav button:hover {
-    color: var(--text);
-    background: rgba(0, 0, 0, .04)
+    color: var(--on-dark);
+    background: var(--dark-hover)
 }
 
 .titlebar-nav button.active {
-    color: var(--text);
+    color: var(--on-dark);
     font-weight: 600;
-    border-bottom-color: var(--accent)
+    border-bottom-color: var(--accent-on-dark)
 }
 
 .titlebar-actions {
@@ -231,7 +254,7 @@ p {
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 12px;
-    color: var(--text-secondary)
+    color: var(--on-dark-muted)
 }
 
 .model-chip i {
@@ -239,7 +262,7 @@ p {
     height: 6px;
     flex: none;
     border-radius: 50%;
-    background: var(--accent)
+    background: var(--accent-on-dark)
 }
 
 .window-controls {
@@ -257,16 +280,16 @@ p {
     border: 0;
     border-radius: 0;
     background: transparent;
-    color: var(--text);
+    color: var(--on-dark);
     cursor: default
 }
 
 .window-button:hover {
-    background: rgba(0, 0, 0, .06)
+    background: var(--dark-hover)
 }
 
 .window-button:active {
-    background: rgba(0, 0, 0, .1)
+    background: var(--dark-pressed)
 }
 
 .window-button.close:hover {
@@ -316,8 +339,32 @@ p {
 
 .icon-button.active {
     background: var(--accent-soft);
-    border-color: rgba(0, 103, 192, .35);
+    border-color: var(--accent-stroke);
     color: var(--accent)
+}
+
+.titlebar-actions .icon-button {
+    color: var(--on-dark-muted)
+}
+
+.titlebar-actions .icon-button:hover,
+.titlebar-actions .icon-button.active {
+    background: var(--dark-hover);
+    color: var(--accent-on-dark)
+}
+
+.titlebar-actions .icon-button:active {
+    background: var(--dark-pressed)
+}
+
+.titlebar :focus-visible {
+    outline-color: var(--accent-on-dark)
+}
+
+.titlebar-nav button:focus-visible,
+.window-button:focus-visible,
+.project-open:focus-visible {
+    outline-offset: -3px
 }
 
 .icon-button svg {
@@ -346,11 +393,11 @@ p {
 }
 
 .project-trigger:hover:not(:disabled) {
-    background: rgba(0, 0, 0, .05)
+    background: var(--dark-hover)
 }
 
 .project-trigger:active:not(:disabled) {
-    background: rgba(0, 0, 0, .08)
+    background: var(--dark-pressed)
 }
 
 .project-trigger b {
@@ -364,7 +411,7 @@ p {
     width: 12px;
     height: 12px;
     flex: none;
-    color: var(--text-secondary)
+    color: var(--on-dark-muted)
 }
 
 .menu-backdrop {
@@ -382,10 +429,15 @@ p {
     top: 34px;
     width: 320px;
     background: var(--layer);
+    color: var(--text);
     border: 1px solid var(--stroke);
     border-radius: var(--r-card);
-    box-shadow: var(--shadow-flyout);
     overflow: hidden
+}
+
+.project-menu :focus-visible {
+    outline-color: var(--accent-focus);
+    outline-offset: -2px
 }
 
 .project-menu>header {
@@ -469,7 +521,7 @@ p {
     display: grid;
     place-items: center;
     border-radius: 2px 4px 4px 2px;
-    background: #4a4a4a;
+    background: var(--dark-hover);
     color: #fff;
     font-size: 11px;
     overflow: hidden
@@ -512,12 +564,19 @@ p {
     line-height: 1;
     white-space: nowrap;
     cursor: default;
-    transition: background-color .1s ease, border-color .1s ease, color .1s ease
+    transition: background-color .16s ease, border-color .16s ease, color .16s ease, transform .16s ease
 }
 
 .btn:focus-visible {
-    outline: 2px solid var(--text);
-    outline-offset: 1px
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
+}
+
+.btn:active:not(:disabled),
+.icon-button:active:not(:disabled),
+.project-trigger:active:not(:disabled),
+.load-more-segments:active {
+    transform: scale(.95)
 }
 
 .btn svg {
@@ -544,28 +603,25 @@ p {
 }
 
 .btn-primary {
+    border-radius: var(--r-pill);
     background: var(--accent);
     color: #fff
 }
 
 .btn-primary:hover:not(:disabled) {
-    background: var(--accent-hover)
-}
-
-.btn-primary:active:not(:disabled) {
-    background: var(--accent-pressed)
+    background: var(--accent-focus)
 }
 
 .btn-primary:disabled {
-    background: #c5c5c5;
-    color: #8f8f8f
+    background: var(--stroke-soft);
+    color: var(--text-disabled)
 }
 
 .btn-quiet {
-    background: #fdfdfd;
-    border-color: var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
-    color: var(--text)
+    background: var(--layer-alt);
+    border-color: var(--stroke-soft);
+    border-radius: var(--r-capsule);
+    color: var(--text-secondary)
 }
 
 .btn-quiet:hover:not(:disabled) {
@@ -584,9 +640,8 @@ p {
 }
 
 .btn-danger {
-    background: #fdfdfd;
-    border-color: var(--control-stroke);
-    border-bottom-color: #d1a3a0;
+    background: var(--layer-alt);
+    border-color: var(--stroke-soft);
     color: var(--danger)
 }
 
@@ -678,7 +733,7 @@ p {
     display: grid;
     place-items: center;
     border-radius: 2px 4px 4px 2px;
-    background: #4a4a4a;
+    background: var(--dark-hover);
     color: #fff;
     font-size: 13px;
     overflow: hidden
@@ -758,7 +813,8 @@ p {
 }
 
 .chapter-item.active {
-    background: rgba(0, 0, 0, .07)
+    background: var(--accent-soft);
+    color: var(--accent)
 }
 
 .chapter-item.active::before {
@@ -944,7 +1000,8 @@ p {
     align-items: center;
     gap: 8px;
     padding: 0 12px;
-    background: var(--bg);
+    background: var(--layer-frosted);
+    backdrop-filter: saturate(180%) blur(20px);
     border-bottom: 1px solid var(--stroke)
 }
 
@@ -978,16 +1035,15 @@ p {
     gap: 6px;
     padding: 0 8px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
-    border-radius: var(--r-control);
-    background: #fdfdfd;
+    border-radius: var(--r-pill);
+    background: var(--layer);
     color: var(--text-tertiary)
 }
 
 .search-field:focus-within {
-    border-color: var(--control-stroke);
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .search-field svg {
@@ -1081,7 +1137,7 @@ p {
 }
 
 .segment-card:hover {
-    background: #fafafa
+    background: var(--layer-alt)
 }
 
 .segment-card.failed {
@@ -1132,7 +1188,7 @@ p {
     margin-top: 6px;
     font-size: 14px;
     line-height: 1.6;
-    color: #242424;
+    color: var(--text);
     white-space: pre-wrap;
     user-select: text;
     -webkit-user-select: text
@@ -1164,7 +1220,7 @@ p {
     align-items: center;
     gap: 4px;
     padding: 2px 7px;
-    border-radius: var(--r-control);
+    border-radius: var(--r-pill);
     background: rgba(0, 0, 0, .06);
     color: var(--text-secondary);
     font-style: normal;
@@ -1206,11 +1262,10 @@ p {
     height: 30px;
     padding: 0 14px;
     margin: 12px 0 16px;
-    border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
-    border-radius: var(--r-control);
-    background: #fdfdfd;
-    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: var(--r-pill);
+    background: transparent;
+    color: var(--accent);
     font-size: 12px;
     cursor: default
 }
@@ -1276,8 +1331,8 @@ p {
 }
 
 .drawer-tabs button.active {
-    background: rgba(0, 0, 0, .07);
-    color: var(--text);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-weight: 600
 }
 
@@ -1505,8 +1560,8 @@ p {
 }
 
 .inspector-tabs button.active {
-    background: rgba(0, 0, 0, .07);
-    color: var(--text);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-weight: 600
 }
 
@@ -1562,9 +1617,8 @@ p {
     height: 32px;
     padding: 0 10px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
     border-radius: var(--r-control);
-    background: #fdfdfd;
+    background: var(--layer);
     color: var(--text);
     font-size: 12px;
     outline: 0
@@ -1572,8 +1626,9 @@ p {
 
 .field input:focus,
 .field select:focus {
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .field input:disabled,
@@ -1652,9 +1707,9 @@ p {
     flex: none;
     width: 40px;
     height: 20px;
-    border: 1px solid var(--text-secondary);
-    border-radius: 10px;
-    background: transparent;
+    border: 1px solid var(--control-stroke);
+    border-radius: var(--r-pill);
+    background: var(--control-stroke);
     cursor: default;
     transition: background-color .15s ease, border-color .15s ease
 }
@@ -1666,7 +1721,7 @@ p {
     width: 12px;
     height: 12px;
     border-radius: 50%;
-    background: var(--text-secondary);
+    background: var(--layer);
     transition: left .15s ease, background-color .15s ease
 }
 
@@ -1737,9 +1792,8 @@ p {
     height: 32px;
     padding: 0 9px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
     border-radius: var(--r-control);
-    background: #fdfdfd;
+    background: var(--layer);
     color: var(--text);
     font-size: 12px;
     outline: 0
@@ -1747,8 +1801,9 @@ p {
 
 .compact-fields input:focus,
 .number-with-unit input:focus {
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .field-hint {
@@ -1989,7 +2044,7 @@ p {
     display: grid;
     place-items: center;
     border-radius: 2px 5px 5px 2px;
-    background: #4a4a4a;
+    background: var(--dark-hover);
     color: #fff;
     font-size: 18px;
     overflow: hidden
@@ -2091,7 +2146,7 @@ p {
 
 .pending-banner {
     background: var(--accent-soft);
-    border: 1px solid rgba(0, 103, 192, .25);
+    border: 1px solid var(--accent-stroke);
     color: var(--accent)
 }
 
@@ -2212,17 +2267,17 @@ p {
     height: 32px;
     padding: 0 10px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
     border-radius: var(--r-control);
-    background: #fdfdfd;
+    background: var(--layer);
     color: var(--text);
     font-size: 12px;
     outline: 0
 }
 
 .text-input:focus {
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .impact-panel {
@@ -2350,9 +2405,14 @@ p {
     height: 28px;
     padding: 0 8px;
     border: 1px solid var(--control-stroke);
-    border-bottom: 1px solid var(--accent);
     border-radius: var(--r-control);
     outline: 0
+}
+
+.term-row input:focus {
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .term-row b {
@@ -2414,8 +2474,13 @@ p {
 }
 
 .settings-nav button.active {
-    background: rgba(0, 0, 0, .07);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-weight: 600
+}
+
+.settings-nav button.active svg {
+    color: inherit
 }
 
 .settings-nav button.active::before {
@@ -2465,7 +2530,7 @@ p {
     gap: 5px;
     flex: none;
     padding: 3px 8px;
-    border-radius: var(--r-control);
+    border-radius: var(--r-pill);
     background: rgba(15, 123, 15, .1);
     color: var(--ok);
     font-size: 11px;
@@ -2537,9 +2602,8 @@ p {
     height: 32px;
     padding: 0 10px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
     border-radius: var(--r-control);
-    background: #fdfdfd;
+    background: var(--layer);
     color: var(--text);
     font-size: 12px;
     outline: 0
@@ -2547,8 +2611,9 @@ p {
 
 .setting-control>input:focus,
 .setting-control>select:focus {
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .preset-input,
@@ -2566,9 +2631,8 @@ p {
     height: 32px;
     padding: 0 10px;
     border: 1px solid var(--control-stroke);
-    border-bottom-color: var(--control-stroke-bottom);
     border-radius: var(--r-control);
-    background: #fdfdfd;
+    background: var(--layer);
     color: var(--text);
     font-size: 12px;
     outline: 0
@@ -2576,8 +2640,9 @@ p {
 
 .preset-input select:focus,
 .secret-input input:focus {
-    border-bottom: 1px solid var(--accent);
-    box-shadow: inset 0 -1px 0 var(--accent)
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
 }
 
 .preset-input .btn,
@@ -2669,10 +2734,9 @@ p {
     padding: 12px 12px 12px 16px;
     border: 1px solid var(--stroke);
     border-radius: var(--r-card);
-    background: rgba(249, 249, 249, .92);
-    backdrop-filter: blur(30px) saturate(125%);
-    -webkit-backdrop-filter: blur(30px) saturate(125%);
-    box-shadow: var(--shadow-flyout)
+    background: var(--layer-frosted);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px)
 }
 
 .activity-dock>svg {
@@ -2733,11 +2797,11 @@ p {
     padding: 12px 40px 12px 16px;
     border: 1px solid var(--stroke);
     border-radius: var(--r-card);
-    background: var(--layer);
+    background: var(--layer-frosted);
+    backdrop-filter: saturate(180%) blur(20px);
     color: var(--text);
     font-size: 12px;
-    line-height: 1.5;
-    box-shadow: var(--shadow-flyout)
+    line-height: 1.5
 }
 
 .toast-close {
@@ -2765,6 +2829,21 @@ p {
 }
 
 /* ---------- Responsive ---------- */
+
+@media (prefers-reduced-motion: reduce) {
+    .btn,
+    .toggle,
+    .toggle i {
+        transition: none
+    }
+
+    .btn:active:not(:disabled),
+    .icon-button:active:not(:disabled),
+    .project-trigger:active:not(:disabled),
+    .load-more-segments:active {
+        transform: none
+    }
+}
 
 @media (max-width:1400px) {
     .btn-label {
