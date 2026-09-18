@@ -1,5 +1,6 @@
 //! 术语抽取：调用模型从原文/译文中提取术语，并对空响应做降级处理。
 
+use super::matching::is_untranslated_source;
 use super::sqlite::validate_term;
 use super::{Term, TermPolicy, TermStatus};
 use crate::llm::{TranslationClient, EMPTY_COMPLETION_ERROR};
@@ -77,20 +78,33 @@ impl ExtractedTerm {
 
 /// 从一段原文/译文中抽取术语，失败时按 `max_retries` 退避重试。
 ///
-/// 模型返回空补全会直接报错，交由 `extract_terms_resilient` 决定是否拆分批次。
+/// `known_terms` 是当前批次命中的既有术语，模型应沿用其译名而不是另造一个；
+/// 返回空补全会直接报错，交由 `extract_terms_resilient` 决定是否拆分批次。
 pub async fn extract_terms<C: TranslationClient + ?Sized>(
     client: &C,
     source_text: &str,
     target_text: &str,
+    known_terms: &[Term],
     chapter: usize,
     max_retries: usize,
 ) -> Result<Vec<Term>, ExtractionError> {
+    let known = known_terms
+        .iter()
+        .map(|term| {
+            serde_json::json!({
+                "source": term.source,
+                "target": term.target,
+                "aliases": term.aliases,
+            })
+        })
+        .collect::<Vec<_>>();
     let user = serde_json::json!({
         "source": source_text,
         "target": target_text,
+        "known_terms": known,
     })
     .to_string();
-    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
+    let system = "TASK:TERM_EXTRACTION Extract names, places, organizations, domain terms, forms of address, speech habits, and fixed expressions whose translations should stay consistent. known_terms lists the existing glossary; whenever a known source or alias appears, reuse its target exactly and never propose another translation for it. Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. For example, use term rather than domain term and person rather than name. Every field is required; use null for absent reading, gender, and note. Return an empty array when nothing qualifies.";
     let schema = crate::schema::response_schema::<ExtractionResponse>();
     let mut last_error = None;
     for attempt in 0..=max_retries {
@@ -110,6 +124,7 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
                         .terms
                         .into_iter()
                         .map(|term| term.into_term(chapter))
+                        .filter(|term| !is_untranslated_source(&term.source, &term.target))
                         .collect::<Vec<_>>();
                     match terms.iter().try_for_each(validate_term) {
                         Ok(()) => return Ok(terms),
@@ -171,6 +186,7 @@ pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
     client: &C,
     source_text: &str,
     target_text: &str,
+    known_terms: &[Term],
     chapter: usize,
     max_retries: usize,
 ) -> Result<Vec<Term>, String> {
@@ -188,7 +204,7 @@ pub async fn extract_terms_resilient<C: TranslationClient + ?Sized>(
             .map(|(_, target)| target.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        match extract_terms(client, &source, &target, chapter, max_retries).await {
+        match extract_terms(client, &source, &target, known_terms, chapter, max_retries).await {
             Ok(terms) => merged.extend(terms),
             Err(ExtractionError::Response(_)) if batch.len() > 1 => {
                 let midpoint = batch.len() / 2;

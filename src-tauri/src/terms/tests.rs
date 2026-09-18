@@ -1,6 +1,7 @@
 //! terms 模块的单元测试：术语增删查、冲突裁定、别名匹配与抽取降级。
 
 use super::extract::ExtractionResponse;
+use super::matching::{is_untranslated_source, same_target_format};
 use super::{
     extract_terms, extract_terms_resilient, matches_text, PendingExtraction, Term, TermPolicy,
     TermStatus, TermStore,
@@ -273,7 +274,7 @@ fn persists_pending_extractions_until_completed() {
 
 #[tokio::test]
 async fn extracts_stable_terms_with_mock_client() {
-    let terms = extract_terms(&MockClient, "Alice arrived.", "爱丽丝到了。", 2, 0)
+    let terms = extract_terms(&MockClient, "Alice arrived.", "爱丽丝到了。", &[], 2, 0)
         .await
         .expect("mock extraction should work");
     assert_eq!(terms.len(), 1);
@@ -327,6 +328,7 @@ async fn empty_batch_response_splits_paragraphs_and_deduplicates_terms() {
         &EmptyBatchClient,
         "Alice arrived.\nAlice met Bob.",
         "爱丽丝到了。\n爱丽丝遇见了鲍勃。",
+        &[],
         1,
         0,
     )
@@ -371,6 +373,7 @@ async fn empty_single_paragraph_is_recorded_without_blocking() {
         },
         "No extractable response.",
         "没有可提取的响应。",
+        &[],
         1,
         0,
     )
@@ -418,6 +421,7 @@ async fn invalid_json_batch_splits_instead_of_failing() {
         &ProseBatchClient,
         "Alice arrived.\nAlice met Bob.",
         "爱丽丝到了。\n爱丽丝遇见了鲍勃。",
+        &[],
         1,
         0,
     )
@@ -440,4 +444,112 @@ fn matches_terms_in_legacy_text_with_flattened_ruby_readings() {
         "今日の安達さん"
     ));
     assert!(!matches_text("今日は安達さんに会った", "今日の安達さん"));
+}
+
+#[test]
+fn ignores_format_only_target_differences() {
+    let (store, path) = store("format-only");
+    store.insert(&term("ピンポン", "乒乓")).unwrap();
+    assert_eq!(
+        store.insert(&term("ピンポン", "《乒乓》")).unwrap(),
+        TermStatus::Ok
+    );
+    let stored = store.list().unwrap().remove(0);
+    assert_eq!(stored.target, "乒乓");
+    assert_eq!(stored.status, TermStatus::Ok);
+    assert!(store.conflict_details(true).unwrap().is_empty());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn classifies_format_differences_and_identity_terms() {
+    assert!(same_target_format("乒乓", "《乒乓》"));
+    assert!(same_target_format("修科", "修科—"));
+    assert!(!same_target_format("乒乓", "乒乓球"));
+    assert!(is_untranslated_source("しまむら", "しまむら"));
+    assert!(!is_untranslated_source("体育", "体育"));
+    assert!(!is_untranslated_source("Alice", "爱丽丝"));
+}
+
+struct FixedTermClient(&'static str, &'static str);
+
+#[async_trait]
+impl TranslationClient for FixedTermClient {
+    async fn complete(
+        &self,
+        _system_prompt: &str,
+        _user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        Ok(CompletionOutput {
+            text: serde_json::json!({ "terms": [json_term(self.0, self.1)] }).to_string(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn drops_extracted_terms_that_copy_the_kana_source_unchanged() {
+    let terms = extract_terms(
+        &FixedTermClient("しまむら", "しまむら"),
+        "しまむらは来た。",
+        "しまむらは来た。",
+        &[],
+        0,
+        0,
+    )
+    .await
+    .expect("identity extraction should parse");
+    assert!(terms.is_empty());
+
+    let terms = extract_terms(
+        &FixedTermClient("体育", "体育"),
+        "体育の時間。",
+        "体育课的时间。",
+        &[],
+        0,
+        0,
+    )
+    .await
+    .expect("shared kanji term should parse");
+    assert_eq!(terms.len(), 1);
+}
+
+struct PromptCaptureClient(Arc<Mutex<String>>);
+
+#[async_trait]
+impl TranslationClient for PromptCaptureClient {
+    async fn complete(
+        &self,
+        _system_prompt: &str,
+        user_prompt: &str,
+    ) -> Result<CompletionOutput, String> {
+        *self.0.lock().unwrap() = user_prompt.to_string();
+        Ok(CompletionOutput {
+            text: "{\"terms\":[]}".to_string(),
+            usage: Usage::default(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn extraction_prompt_lists_existing_targets() {
+    let prompt = Arc::new(Mutex::new(String::new()));
+    let mut alice = term("Alice", "爱丽丝");
+    alice.aliases.push("Alicia".to_string());
+    let terms = extract_terms(
+        &PromptCaptureClient(Arc::clone(&prompt)),
+        "Alice arrived.",
+        "爱丽丝到了。",
+        &[alice],
+        0,
+        0,
+    )
+    .await
+    .expect("empty extraction should parse");
+    assert!(terms.is_empty());
+
+    let value: serde_json::Value = serde_json::from_str(&prompt.lock().unwrap()).unwrap();
+    assert_eq!(value["known_terms"][0]["source"], "Alice");
+    assert_eq!(value["known_terms"][0]["target"], "爱丽丝");
+    assert_eq!(value["known_terms"][0]["aliases"][0], "Alicia");
 }

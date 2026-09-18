@@ -223,13 +223,14 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
             source_hash: String::new(),
             meta: serde_json::json!({}),
         };
+        let known_terms = store.relevant(&chapters[chapter_index].title)?;
         let translation = crate::llm::translate_titles(
             client,
             &[request],
             &project.source_language,
             &project.target_language,
             &analysis.style_guide,
-            &store.relevant(&chapters[chapter_index].title)?,
+            &known_terms,
             config.llm.max_retries,
         )
         .await?
@@ -239,6 +240,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
             client,
             &source,
             &translation,
+            &known_terms,
             chapter_index,
             config.llm.max_retries,
         )
@@ -297,6 +299,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
         client,
         &source,
         &draft,
+        &relevant_terms,
         chapter_index,
         config.llm.max_retries,
     )

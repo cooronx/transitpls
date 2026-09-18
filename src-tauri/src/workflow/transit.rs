@@ -481,6 +481,7 @@ fn spawn_translation_batch(
             }
             Err(error) => Err(error),
         };
+        let known_terms = store.relevant(&joined_sources).unwrap_or_default();
         let extracted = match &translations {
             Ok(translations) => {
                 let target_text = translations
@@ -493,6 +494,7 @@ fn spawn_translation_batch(
                         client.as_ref(),
                         &joined_sources,
                         &target_text,
+                        &known_terms,
                         plan.chapter_index,
                         max_retries,
                     )

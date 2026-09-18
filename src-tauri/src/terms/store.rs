@@ -1,6 +1,6 @@
 //! 术语库操作入口，封装 SQLite 事务。
 
-use super::matching::relevant_terms;
+use super::matching::{relevant_terms, same_target_format};
 use super::sqlite::{
     audit, find_term, initialize_schema, merge_term_metadata, parse_stored_term, read_policy,
     read_rule, record_candidate, record_conflict, record_evidence, row_to_term, sync_aliases,
@@ -87,7 +87,7 @@ impl TermStore {
                 record_evidence(&transaction, term, source_text, target_text)?;
                 TermStatus::Ok
             }
-            Some(existing) if existing.target == term.target => {
+            Some(existing) if same_target_format(&existing.target, &term.target) => {
                 merge_term_metadata(&transaction, &existing, term)?;
                 record_evidence(&transaction, term, source_text, target_text)?;
                 let mut aliases = existing.aliases;

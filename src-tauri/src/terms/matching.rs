@@ -109,6 +109,64 @@ pub(super) fn normalize(value: &str) -> String {
     value.nfkc().flat_map(char::to_lowercase).collect()
 }
 
+/// 译名比较用的签名：忽略大小写、全半角、空白与装饰性标点，
+/// 用于判断两个译名是否只是格式差异。
+pub(super) fn target_signature(value: &str) -> String {
+    normalize(value)
+        .chars()
+        .filter(|value| !value.is_whitespace() && !is_decorative_punctuation(*value))
+        .collect()
+}
+
+/// 两个译名是否只在标点、空白或大小写上不同。
+pub(super) fn same_target_format(left: &str, right: &str) -> bool {
+    target_signature(left) == target_signature(right)
+}
+
+/// 抽取结果是否只是把原文原样抄回。
+///
+/// 仅当原文含假名时才判定：像「体育」这类中日同形的汉字词保持原样是合理的。
+pub(super) fn is_untranslated_source(source: &str, target: &str) -> bool {
+    normalize(source) == normalize(target) && target.chars().any(is_kana)
+}
+
+fn is_decorative_punctuation(value: char) -> bool {
+    value.is_ascii_punctuation()
+        || matches!(
+            value,
+            '。' | '、'
+                | '，'
+                | '．'
+                | '！'
+                | '？'
+                | '：'
+                | '；'
+                | '・'
+                | '·'
+                | '…'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '《'
+                | '》'
+                | '〈'
+                | '〉'
+                | '【'
+                | '】'
+                | '（'
+                | '）'
+                | '“'
+                | '”'
+                | '‘'
+                | '’'
+                | '—'
+                | '–'
+                | '～'
+                | '〜'
+        )
+}
+
 fn is_cjk(value: char) -> bool {
     matches!(
         value,
