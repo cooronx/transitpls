@@ -617,6 +617,21 @@ p {
     color: var(--text-disabled)
 }
 
+.titlebar-actions .btn-primary {
+    background: var(--dark-hover);
+    color: var(--on-dark-muted)
+}
+
+.titlebar-actions .btn-primary:hover:not(:disabled) {
+    background: var(--dark-pressed);
+    color: var(--on-dark)
+}
+
+.titlebar-actions .btn-primary:disabled {
+    background: transparent;
+    color: var(--text-disabled)
+}
+
 .btn-quiet {
     background: var(--layer-alt);
     border-color: var(--stroke-soft);
@@ -637,6 +652,12 @@ p {
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent)
+}
+
+.toolbar-actions .btn-quiet.active {
+    background: var(--subtle-pressed);
+    border-color: var(--control-stroke);
+    color: var(--text)
 }
 
 .btn-danger {
@@ -1560,8 +1581,8 @@ p {
 }
 
 .inspector-tabs button.active {
-    background: var(--accent-soft);
-    color: var(--accent);
+    background: var(--subtle-pressed);
+    color: var(--text);
     font-weight: 600
 }
 
