@@ -121,7 +121,7 @@ pub fn validate_response(raw: &str, expected_count: usize) -> Result<Vec<String>
     Ok(response.translations)
 }
 
-/// 解析模型返回的 JSON，兼容代码块和前后说明文字。
+/// 解析模型返回的 JSON，兼容代码块、前后说明文字、单引号 JSON 与尾逗号。
 pub(crate) fn parse_json_response<T: DeserializeOwned>(raw: &str) -> Result<T, String> {
     let trimmed = raw.trim();
     let mut last_error = match serde_json::from_str(trimmed) {
@@ -130,13 +130,39 @@ pub(crate) fn parse_json_response<T: DeserializeOwned>(raw: &str) -> Result<T, S
     };
     // Models sometimes wrap the payload in prose or a code fence despite the
     // instructions; accept the outermost JSON value in that case.
-    for candidate in json_candidates(trimmed) {
+    let mut candidates: Vec<String> = vec![trimmed.to_string()];
+    candidates.extend(json_candidates(trimmed).into_iter().map(str::to_string));
+    let repaired: Vec<String> = candidates
+        .iter()
+        .filter_map(|candidate| repair_jsonish(candidate))
+        .collect();
+    candidates.extend(repaired);
+    for candidate in &candidates {
         match serde_json::from_str(candidate) {
             Ok(value) => return Ok(value),
             Err(error) => last_error = error.to_string(),
         }
     }
-    Err(last_error)
+    Err(format!(
+        "{last_error} (response starts with {})",
+        response_snippet(trimmed)
+    ))
+}
+
+/// 修复部分模型返回的 Python 风格 JSON：去掉对象/数组结尾的多余逗号，
+/// 并在整段没有双引号时把单引号换成双引号（有双引号时不做替换，避免破坏字符串）。
+fn repair_jsonish(text: &str) -> Option<String> {
+    let mut repaired = text.replace(",}", "}").replace(",]", "]");
+    if !text.contains('"') && repaired.contains('\'') {
+        repaired = repaired.replace('\'', "\"");
+    }
+    (repaired != text).then_some(repaired)
+}
+
+/// 错误信息里附带响应开头，便于判断模型实际返回了什么。
+fn response_snippet(text: &str) -> String {
+    let snippet: String = text.chars().take(120).collect();
+    format!("{snippet:?}")
 }
 
 /// Candidate JSON payloads inside a model response: the body of a fenced code

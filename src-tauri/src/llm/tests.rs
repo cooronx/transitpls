@@ -183,3 +183,41 @@ fn validates_strict_iso_language_response() {
     assert!(validate_language_response(r#"{"language":"jpn"}"#).is_err());
     assert!(validate_language_response(r#"{"language":"ja","extra":true}"#).is_err());
 }
+
+#[test]
+fn accepts_single_quoted_and_trailing_comma_json() {
+    let single = "{'translations': ['甲', '乙']}";
+    assert_eq!(
+        validate_response(single, 2).expect("single quoted JSON"),
+        vec!["甲", "乙"]
+    );
+    let fenced = "```json\n{'translations': ['甲', '乙']}\n```";
+    assert_eq!(
+        validate_response(fenced, 2).expect("fenced single quoted JSON"),
+        vec!["甲", "乙"]
+    );
+    let trailing = r#"{"translations": ["甲", "乙"],}"#;
+    assert_eq!(
+        validate_response(trailing, 2).expect("trailing comma JSON"),
+        vec!["甲", "乙"]
+    );
+    let apostrophe = r#"{"translations": ["it's fine", "ok"]}"#;
+    assert_eq!(
+        validate_response(apostrophe, 2).expect("apostrophe inside double quoted JSON"),
+        vec!["it's fine", "ok"]
+    );
+}
+
+#[test]
+fn parse_errors_quote_the_model_response() {
+    let error = validate_response("[DONE]", 2).expect_err("unparseable response");
+    assert!(
+        error.contains("[DONE]"),
+        "error should quote response: {error}"
+    );
+    let error = validate_response("", 2).expect_err("empty response");
+    assert!(
+        error.contains("EOF"),
+        "error should keep parse detail: {error}"
+    );
+}
