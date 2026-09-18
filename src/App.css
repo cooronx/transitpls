@@ -9,7 +9,6 @@
     color-scheme: light;
     --accent: #0066cc;
     --accent-focus: #0071e3;
-    --accent-on-dark: #2997ff;
     --accent-soft: rgba(0, 102, 204, .08);
     --accent-stroke: rgba(0, 102, 204, .25);
     --bg: #f5f5f7;
@@ -25,11 +24,7 @@
     --text-secondary: #333333;
     --text-tertiary: #7a7a7a;
     --text-disabled: #7a7a7a;
-    --nav-bg: #000000;
-    --on-dark: #ffffff;
-    --on-dark-muted: #cccccc;
     --dark-hover: #272729;
-    --dark-pressed: #2a2a2c;
     --danger: #c42b1c;
     --ok: #0f7b0f;
     --warn: #9d5d00;
@@ -182,9 +177,9 @@ p {
     align-items: center;
     gap: 8px;
     padding: 0 8px 0 12px;
-    background: var(--nav-bg);
-    color: var(--on-dark);
-    border-bottom: 1px solid var(--dark-hover);
+    background: var(--bg);
+    color: var(--text);
+    border-bottom: 1px solid var(--stroke);
     user-select: none;
     -webkit-user-select: none
 }
@@ -199,7 +194,7 @@ p {
 .titlebar-suffix {
     flex: none;
     font-size: 12px;
-    color: var(--on-dark-muted);
+    color: var(--text-secondary);
     white-space: nowrap
 }
 
@@ -223,19 +218,19 @@ p {
     border-bottom: 2px solid transparent;
     background: transparent;
     font-size: 13px;
-    color: var(--on-dark-muted);
+    color: var(--text-secondary);
     cursor: default
 }
 
 .titlebar-nav button:hover {
-    color: var(--on-dark);
-    background: var(--dark-hover)
+    color: var(--text);
+    background: var(--subtle-pressed)
 }
 
 .titlebar-nav button.active {
-    color: var(--on-dark);
+    color: var(--text);
     font-weight: 600;
-    border-bottom-color: var(--accent-on-dark)
+    border-bottom-color: var(--accent)
 }
 
 .titlebar-actions {
@@ -254,7 +249,7 @@ p {
     text-overflow: ellipsis;
     white-space: nowrap;
     font-size: 12px;
-    color: var(--on-dark-muted)
+    color: var(--text-secondary)
 }
 
 .model-chip i {
@@ -262,7 +257,7 @@ p {
     height: 6px;
     flex: none;
     border-radius: 50%;
-    background: var(--accent-on-dark)
+    background: var(--accent)
 }
 
 .window-controls {
@@ -280,16 +275,16 @@ p {
     border: 0;
     border-radius: 0;
     background: transparent;
-    color: var(--on-dark);
+    color: var(--text);
     cursor: default
 }
 
 .window-button:hover {
-    background: var(--dark-hover)
+    background: var(--subtle-pressed)
 }
 
 .window-button:active {
-    background: var(--dark-pressed)
+    background: var(--control-stroke)
 }
 
 .window-button.close:hover {
@@ -343,24 +338,6 @@ p {
     color: var(--accent)
 }
 
-.titlebar-actions .icon-button {
-    color: var(--on-dark-muted)
-}
-
-.titlebar-actions .icon-button:hover,
-.titlebar-actions .icon-button.active {
-    background: var(--dark-hover);
-    color: var(--accent-on-dark)
-}
-
-.titlebar-actions .icon-button:active {
-    background: var(--dark-pressed)
-}
-
-.titlebar :focus-visible {
-    outline-color: var(--accent-on-dark)
-}
-
 .titlebar-nav button:focus-visible,
 .window-button:focus-visible,
 .project-open:focus-visible {
@@ -393,11 +370,11 @@ p {
 }
 
 .project-trigger:hover:not(:disabled) {
-    background: var(--dark-hover)
+    background: var(--subtle-pressed)
 }
 
 .project-trigger:active:not(:disabled) {
-    background: var(--dark-pressed)
+    background: var(--control-stroke)
 }
 
 .project-trigger b {
@@ -411,7 +388,7 @@ p {
     width: 12px;
     height: 12px;
     flex: none;
-    color: var(--on-dark-muted)
+    color: var(--text-secondary)
 }
 
 .menu-backdrop {
@@ -617,21 +594,6 @@ p {
     color: var(--text-disabled)
 }
 
-.titlebar-actions .btn-primary {
-    background: var(--dark-hover);
-    color: var(--on-dark-muted)
-}
-
-.titlebar-actions .btn-primary:hover:not(:disabled) {
-    background: var(--dark-pressed);
-    color: var(--on-dark)
-}
-
-.titlebar-actions .btn-primary:disabled {
-    background: transparent;
-    color: var(--text-disabled)
-}
-
 .btn-quiet {
     background: var(--layer-alt);
     border-color: var(--stroke-soft);
@@ -652,12 +614,6 @@ p {
     background: var(--accent-soft);
     border-color: var(--accent);
     color: var(--accent)
-}
-
-.toolbar-actions .btn-quiet.active {
-    background: var(--subtle-pressed);
-    border-color: var(--control-stroke);
-    color: var(--text)
 }
 
 .btn-danger {
@@ -1581,8 +1537,8 @@ p {
 }
 
 .inspector-tabs button.active {
-    background: var(--subtle-pressed);
-    color: var(--text);
+    background: var(--accent-soft);
+    color: var(--accent);
     font-weight: 600
 }
 
