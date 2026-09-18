@@ -1367,7 +1367,11 @@ function Explorer({
       {project ? (
         <>
           <div className="project-summary">
-            <ProjectCover project={project} className="cover-sm" />
+            <ProjectCover
+              key={project.id}
+              project={projects.find((item) => item.id === project.id) ?? project}
+              className="cover-sm"
+            />
             <div className="project-summary-info">
               <b>{project.title}</b>
               <small>{fileName(project.source_file)}</small>
