@@ -26,7 +26,7 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
   <img src="resources/baihe.jpg" height="200" alt="" />
 </p>
 
-![TransItPls 翻译工作台](resources/311203FBD8F1F6C610A6B924ED814008.png)
+![TransItPls 翻译工作台](resources/image-1.png)
 
 <details>
   <summary>目录</summary>
@@ -70,27 +70,27 @@ TransItPls（译境）是一款基于 Tauri、React 和 Rust 构建的本地桌�
 
 集中查看本地翻译项目、章节总数和完成进度，也可以直接导入新书。
 
-![TransItPls 项目管理](resources/FB9418457A0CACFD5C883E6444995E2B.png)
+![TransItPls 项目管理](resources/image-2.png)
 
 ### 翻译工作台
 
 对照查看原文与译文，按章节跟踪翻译任务，并在侧栏调整语言、模型、分段和分析策略。
 
-![TransItPls 对照翻译工作台](resources/311203FBD8F1F6C610A6B924ED814008.png)
+![TransItPls 对照翻译工作台](resources/image-1.png)
 
 ### 模型与 API
 
 选择服务预设或填写兼容接口，在应用内测试连接后保存。API Key 仅保存在当前用户的 TransItPls 配置目录中。
 
-![TransItPls 模型与 API 设置](resources/D91F3211D757A038B20DA07CBD2232C9.png)
+![TransItPls 模型与 API 设置](resources/image-4.png)
 
 ### 术语与译名冲突
 
 浏览项目术语、修改固定译名，并对同一原文的多个候选译名进行人工裁定和影响范围重译。
 
-![TransItPls 术语库](resources/img.png)
+![TransItPls 术语库](resources/image-5.png)
 
-![TransItPls 译名冲突处理](resources/2DCCDFBDC918935211C03EFDDABD8F8A.png)
+![TransItPls 译名冲突处理](resources/image-3.png)
 
 <p align="right">（<a href="#readme-top">返回顶部</a>）</p>
 
