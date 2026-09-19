@@ -217,7 +217,42 @@ fn migrates_legacy_conflicts_without_losing_candidates() {
     let conflict = store.conflict_details(false).unwrap().remove(0);
     assert_eq!(conflict.unresolved_events, 1);
     assert_eq!(conflict.candidates.len(), 2);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    let version: i64 = connection
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1);
     std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn serializes_concurrent_writers_with_readers() {
+    let (store, path) = store("concurrent-writers");
+    let mode: String = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, "wal");
+    let mut workers = Vec::new();
+    for worker in 0..8 {
+        let path = path.clone();
+        workers.push(std::thread::spawn(move || {
+            let store = TermStore::open(&path).expect("store should open");
+            for round in 0..10 {
+                store
+                    .insert(&term(&format!("worker-{worker}-{round}"), "译名"))
+                    .expect("concurrent insert should not hit a locked database");
+                store
+                    .list()
+                    .expect("concurrent read should not hit a locked database");
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("worker should finish");
+    }
+    assert_eq!(store.list().expect("terms should list").len(), 80);
+    std::fs::remove_file(path).expect("database should be removed");
 }
 
 #[test]

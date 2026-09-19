@@ -2,14 +2,25 @@
 
 use super::matching::{matches_text, normalize};
 use super::{Term, TermPolicy, TermStatus};
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-/// 建表并执行兼容旧数据的迁移。
-pub(super) fn initialize_schema(connection: &Connection) -> Result<(), String> {
-    connection
+/// 当前 schema 版本；结构变化时提升版本号并追加迁移步骤。
+const SCHEMA_VERSION: i64 = 1;
+
+/// 建表并执行兼容旧数据的迁移；已是最新版本时直接返回。
+pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), String> {
+    let version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| format!("failed to read terms schema version: {error}"))?;
+    if version >= SCHEMA_VERSION {
+        return Ok(());
+    }
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("failed to start terms schema migration: {error}"))?;
+    transaction
         .execute_batch(
-            "PRAGMA foreign_keys = ON;
-             CREATE TABLE IF NOT EXISTS terms (
+            "CREATE TABLE IF NOT EXISTS terms (
                  source TEXT PRIMARY KEY,
                  target TEXT NOT NULL,
                  reading TEXT,
@@ -79,7 +90,7 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<(), String> {
         )
         .map_err(|error| format!("failed to initialize terms database: {error}"))?;
     // 把旧版本散落在 terms/term_candidates 中的数据补进规则、证据与冲突表。
-    connection
+    transaction
         .execute_batch(
             "INSERT OR IGNORE INTO term_rules (source, policy, manual_target)
          SELECT source, 'fixed', target FROM terms WHERE status = 'resolved';
@@ -105,7 +116,13 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<(), String> {
              SELECT 1 FROM term_conflicts c WHERE c.source = terms.source AND c.resolved = 0
          );",
         )
-        .map_err(|error| format!("failed to migrate terms database: {error}"))
+        .map_err(|error| format!("failed to migrate terms database: {error}"))?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(|error| format!("failed to record terms schema version: {error}"))?;
+    transaction
+        .commit()
+        .map_err(|error| format!("failed to commit terms schema migration: {error}"))
 }
 
 pub(super) fn read_policy(connection: &Connection, source: &str) -> Result<TermPolicy, String> {

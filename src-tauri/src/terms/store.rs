@@ -10,35 +10,44 @@ use super::{
     AliasConflict, ConflictCandidate, PendingExtraction, Term, TermCandidate, TermConflict,
     TermEvidence, TermPolicy, TermStatus,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::Duration;
 
-/// 并发翻译时 worker 的读连接可能与协调者的写事务重叠，
-/// 等待而不是直接抛出 `database is locked`。
+/// 兜底等待外部进程（CLI 等）持锁，而不是直接抛出 `database is locked`；
+/// 进程内读写冲突由单写者与 WAL 消除，不依赖超时值。
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 项目术语库，持有 `terms.db` 路径，每次操作独立打开连接。
+/// 每个 `terms.db` 在进程内只保留一个写连接：同一路径的写操作全部串行。
+static WRITERS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<Connection>>>>> = OnceLock::new();
+
+/// 项目术语库句柄，持有 `terms.db` 路径与进程内共享的写连接。
 #[derive(Debug, Clone)]
 pub struct TermStore {
-    path: std::path::PathBuf,
+    path: PathBuf,
+    writer: Arc<Mutex<Connection>>,
 }
 
 impl TermStore {
     /// 打开（必要时创建）术语库并初始化表结构。
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
         let path = path.as_ref().to_path_buf();
-        let connection = Connection::open(&path).map_err(|error| {
-            format!("failed to open terms database {}: {error}", path.display())
-        })?;
-        connection
-            .busy_timeout(BUSY_TIMEOUT)
-            .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
-        initialize_schema(&connection)?;
-        Ok(Self { path })
+        let writer = shared_writer(&path)?;
+        Ok(Self { path, writer })
     }
 
+    /// 取共享写连接；所有写操作经它串行执行。
+    fn writer(&self) -> MutexGuard<'_, Connection> {
+        // 写事务在 panic 展开时由 rusqlite 回滚，连接本身仍然一致，
+        // 因此中毒锁可以继续使用，避免术语库整体不可写。
+        self.writer
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 读操作使用独立连接；WAL 模式下不会与写事务互相阻塞。
     fn connect(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.path).map_err(|error| {
             format!(
@@ -49,10 +58,6 @@ impl TermStore {
         connection
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
-        // 外键约束按连接生效；删除术语依赖 ON DELETE CASCADE 清理关联表。
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(|error| format!("failed to enable terms database foreign keys: {error}"))?;
         Ok(connection)
     }
 
@@ -72,9 +77,9 @@ impl TermStore {
         target_text: &str,
     ) -> Result<TermStatus, String> {
         validate_term(term)?;
-        let mut connection = self.connect()?;
+        let mut connection = self.writer();
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("failed to start term transaction: {error}"))?;
         let existing = find_term(&transaction, &term.source)?;
         let policy = read_policy(&transaction, &term.source)?;
@@ -206,9 +211,9 @@ impl TermStore {
         if source.trim().is_empty() || target.trim().is_empty() {
             return Err("term source and resolved target must not be empty".to_string());
         }
-        let mut connection = self.connect()?;
+        let mut connection = self.writer();
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let action = if read_policy(&transaction, source)? == TermPolicy::Fixed {
             "modify_resolution"
@@ -247,9 +252,9 @@ impl TermStore {
 
     /// 删除术语，并由外键级联清理候选、证据、冲突、别名与人工规则。
     pub fn delete(&self, source: &str) -> Result<(), String> {
-        let mut connection = self.connect()?;
+        let mut connection = self.writer();
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| format!("failed to start term transaction: {error}"))?;
         let deleted = transaction
             .execute("DELETE FROM terms WHERE source = ?1", [source])
@@ -268,9 +273,9 @@ impl TermStore {
     /// 恢复为 `Automatic` 时会重新打开历史证据中的冲突；设置为其他策略
     /// 会把现有冲突标记为已解决。
     pub fn set_policy(&self, source: &str, policy: TermPolicy) -> Result<(), String> {
-        let mut connection = self.connect()?;
+        let mut connection = self.writer();
         let transaction = connection
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| error.to_string())?;
         let exists = transaction
             .query_row(
@@ -482,7 +487,7 @@ impl TermStore {
 
     /// 记录一个待补做的抽取任务（同章节同批次会被替换）。
     pub fn queue_extraction(&self, extraction: &PendingExtraction) -> Result<(), String> {
-        let connection = self.connect()?;
+        let connection = self.writer();
         connection
             .execute(
                 "INSERT OR REPLACE INTO pending_term_extractions
@@ -524,7 +529,7 @@ impl TermStore {
 
     /// 标记某个抽取任务已完成并移除。
     pub fn complete_extraction(&self, chapter_id: &str, batch_key: &str) -> Result<(), String> {
-        let connection = self.connect()?;
+        let connection = self.writer();
         connection
             .execute(
                 "DELETE FROM pending_term_extractions
@@ -534,4 +539,53 @@ impl TermStore {
             .map_err(|error| format!("failed to complete term extraction: {error}"))?;
         Ok(())
     }
+}
+
+/// 取（或创建）进程内唯一的写连接；同一路径只会有一个写者。
+fn shared_writer(path: &Path) -> Result<Arc<Mutex<Connection>>, String> {
+    let key = writer_key(path);
+    let registry = WRITERS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut registry = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(writer) = registry.get(&key).and_then(Weak::upgrade) {
+        return Ok(writer);
+    }
+    let writer = Arc::new(Mutex::new(open_writer(path)?));
+    registry.insert(key, Arc::downgrade(&writer));
+    Ok(writer)
+}
+
+/// 规范化父目录，避免同一文件的不同写法产生两个写连接。
+fn writer_key(path: &Path) -> PathBuf {
+    let Some(parent) = path
+        .parent()
+        .and_then(|dir| std::fs::canonicalize(dir).ok())
+    else {
+        return path.to_path_buf();
+    };
+    match path.file_name() {
+        Some(name) => parent.join(name),
+        None => parent,
+    }
+}
+
+/// 写字连接：WAL 让读连接不被写事务阻塞，事务一律 IMMEDIATE，
+/// busy timeout 只用于兜底外部进程的写锁。
+fn open_writer(path: &Path) -> Result<Connection, String> {
+    let mut connection = Connection::open(path)
+        .map_err(|error| format!("failed to open terms database {}: {error}", path.display()))?;
+    connection
+        .busy_timeout(BUSY_TIMEOUT)
+        .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
+    // 外键约束按连接生效；删除术语依赖 ON DELETE CASCADE 清理关联表。
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;",
+        )
+        .map_err(|error| format!("failed to configure terms database: {error}"))?;
+    initialize_schema(&mut connection)?;
+    Ok(connection)
 }
