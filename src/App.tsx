@@ -3297,7 +3297,7 @@ function EmptyState({ onImport }: { onImport: () => void }) {
       <Logo />
       <h1>开始第一个翻译项目</h1>
       <p>
-        导入 EPUB 或 TXT 文件，TransItPls 会沿用 CLI 的项目状态与断点续跑能力。
+        导入 EPUB 或 TXT 文件。
       </p>
       <button type="button" className="btn btn-primary" onClick={onImport}>
         <Plus />

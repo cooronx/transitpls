@@ -25,6 +25,27 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::task::JoinSet;
 
+/// 连续失败熔断阈值：达到后中止本轮翻译，避免服务不可用时继续发请求。
+const MAX_CONSECUTIVE_FAILURES: usize = 5;
+
+/// 本轮翻译的连续失败计数；任一成功即清零。
+#[derive(Default)]
+struct FailureTracker {
+    consecutive: usize,
+}
+
+impl FailureTracker {
+    fn record_success(&mut self) {
+        self.consecutive = 0;
+    }
+
+    /// 记录一次最终失败；达到阈值时返回 `true`。
+    fn record_failure(&mut self) -> bool {
+        self.consecutive += 1;
+        self.consecutive >= MAX_CONSECUTIVE_FAILURES
+    }
+}
+
 /// 界面入口：加载配置后运行翻译。
 pub async fn transit_project(
     config_path: Option<PathBuf>,
@@ -150,6 +171,7 @@ pub(crate) async fn run_transit(
     let chapter_indices = selected_chapter
         .map(|index| vec![index])
         .unwrap_or_else(|| (0..chapters.len()).collect());
+    let mut failures = FailureTracker::default();
     if config.general.translation_concurrency <= 1 {
         // 串行模式保留批次间最近译文参考。
         for chapter_index in chapter_indices {
@@ -162,6 +184,7 @@ pub(crate) async fn run_transit(
                 chapter_index,
                 analysis,
                 config,
+                &mut failures,
             )
             .await?;
         }
@@ -175,6 +198,7 @@ pub(crate) async fn run_transit(
             analysis,
             config,
             &chapter_indices,
+            &mut failures,
         )
         .await?;
     }
@@ -191,6 +215,27 @@ pub(crate) async fn run_transit(
         )
         .await?;
     }
+
+    let failed_segments = chapters
+        .iter()
+        .flat_map(|chapter| chapter.segments.iter())
+        .filter(|segment| segment.status == ItemStatus::Failed)
+        .collect::<Vec<_>>();
+    if !failed_segments.is_empty() {
+        state::append_log(
+            state_dir,
+            project,
+            "translation_failed_segments",
+            serde_json::json!({
+                "count": failed_segments.len(),
+                "segments": failed_segments
+                    .iter()
+                    .take(20)
+                    .map(|segment| segment.id.as_str())
+                    .collect::<Vec<_>>(),
+            }),
+        )?;
+    }
     save_project_progress(state_dir, project, chapters)
 }
 
@@ -205,6 +250,7 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
     chapter_index: usize,
     analysis: &BookAnalysis,
     config: &AppConfig,
+    failures: &mut FailureTracker,
 ) -> Result<(), String> {
     let digest = chapters[chapter_index]
         .meta
@@ -273,6 +319,7 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                         None,
                     )
                     .await?;
+                    failures.record_success();
                 }
                 Err(_) => {
                     for &index in &untranslated {
@@ -294,6 +341,7 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
                             digest.as_deref(),
                             &recent,
                             config,
+                            failures,
                         )
                         .await?;
                     }
@@ -400,6 +448,7 @@ async fn translate_batches_concurrent(
     analysis: &BookAnalysis,
     config: &AppConfig,
     chapter_indices: &[usize],
+    failures: &mut FailureTracker,
 ) -> Result<(), String> {
     let concurrency = config.general.translation_concurrency.max(1);
     let plans = plan_batches(
@@ -445,6 +494,7 @@ async fn translate_batches_concurrent(
             config,
             &plans[plan_index],
             prepared,
+            failures,
         )
         .await?;
     }
@@ -536,6 +586,7 @@ async fn apply_prepared_batch(
     config: &AppConfig,
     plan: &BatchPlan,
     prepared: PreparedBatch,
+    failures: &mut FailureTracker,
 ) -> Result<(), String> {
     let chapter_index = plan.chapter_index;
     match prepared.translations {
@@ -556,6 +607,7 @@ async fn apply_prepared_batch(
                 prepared.extracted,
             )
             .await?;
+            failures.record_success();
         }
         Err(error) => {
             state::append_log(
@@ -582,6 +634,7 @@ async fn apply_prepared_batch(
                     // 并发模式与批次请求一致，不注入最近译文。
                     &[],
                     config,
+                    failures,
                 )
                 .await?;
             }
@@ -642,7 +695,7 @@ pub(super) async fn request_translation<C: TranslationClient + ?Sized>(
     .await
 }
 
-/// 单段翻译兜底：失败时把该段标记为 `Failed`，成功则走与批次相同的收尾流程。
+/// 单段翻译兜底：最终失败时把该段标记为 `Failed` 并跳过，成功则走与批次相同的收尾流程。
 #[allow(clippy::too_many_arguments)]
 async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
     client: &C,
@@ -656,6 +709,7 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
     digest: Option<&str>,
     recent: &[RecentTarget],
     config: &AppConfig,
+    failures: &mut FailureTracker,
 ) -> Result<(), String> {
     let segment = chapters[chapter_index].segments[segment_index].clone();
     let terms = store.relevant(&segment.source)?;
@@ -680,7 +734,22 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         Err(error) => {
             chapters[chapter_index].segments[segment_index].status = ItemStatus::Failed;
             state::write_chapter(state_dir, project, &chapters[chapter_index])?;
-            return Err(format!("segment {} failed: {error}", segment.id));
+            state::append_log(
+                state_dir,
+                project,
+                "segment_failed",
+                serde_json::json!({
+                    "chapter_id": chapters[chapter_index].id,
+                    "segment_id": segment.id,
+                    "error": error,
+                }),
+            )?;
+            if failures.record_failure() {
+                return Err(format!(
+                    "translation aborted after {MAX_CONSECUTIVE_FAILURES} consecutive failed segments; see the project log"
+                ));
+            }
+            return Ok(());
         }
     };
     store_draft(
@@ -699,7 +768,9 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
         config,
         None,
     )
-    .await
+    .await?;
+    failures.record_success();
+    Ok(())
 }
 
 /// 批次收尾：更新状态、登记待抽取、写回章节并处理术语抽取。
