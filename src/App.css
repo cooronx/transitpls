@@ -1271,8 +1271,32 @@ p {
     background: var(--layer-alt);
     border-top: 1px solid var(--stroke);
     display: flex;
-    flex-direction: column;
-    max-height: 42vh
+    flex-direction: column
+}
+
+.drawer-resize {
+    flex: none;
+    height: 6px;
+    cursor: row-resize;
+    touch-action: none;
+    position: relative
+}
+
+.drawer-resize::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    top: 2px;
+    width: 36px;
+    height: 2px;
+    margin-left: -18px;
+    border-radius: 1px;
+    background: var(--stroke)
+}
+
+.drawer-resize:hover::after,
+.drawer-resize.dragging::after {
+    background: var(--accent)
 }
 
 .drawer-head {

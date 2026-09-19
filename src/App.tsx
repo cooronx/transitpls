@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { confirm as confirmDialog, open } from "@tauri-apps/plugin-dialog";
@@ -1619,6 +1626,14 @@ function SegmentCard({ segment }: { segment: Segment }) {
     </article>
   );
 }
+const MIN_DRAWER_HEIGHT = 120;
+const DEFAULT_DRAWER_HEIGHT = 200;
+
+function drawerMaxHeight(element: HTMLElement | null) {
+  const available = element?.parentElement?.clientHeight ?? window.innerHeight;
+  return Math.max(MIN_DRAWER_HEIGHT, Math.min(available * 0.8, available - 140));
+}
+
 function Tray({
   detail,
   tray,
@@ -1634,8 +1649,59 @@ function Tray({
   onToggle: () => void;
   onOpenTerms: () => void;
 }) {
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const dragRef = useRef<{ startY: number; startHeight: number } | null>(null);
+  const [height, setHeight] = useState(DEFAULT_DRAWER_HEIGHT);
+  const [dragging, setDragging] = useState(false);
+  const clampHeight = (value: number) =>
+    Math.min(drawerMaxHeight(drawerRef.current), Math.max(MIN_DRAWER_HEIGHT, value));
+  useEffect(() => {
+    const onResize = () => setHeight((value) => clampHeight(value));
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!open) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    dragRef.current = { startY: event.clientY, startHeight: height };
+    setDragging(true);
+    document.body.style.cursor = "row-resize";
+    document.body.style.userSelect = "none";
+  };
+  const resize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    setHeight(clampHeight(drag.startHeight - (event.clientY - drag.startY)));
+  };
+  const endResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    setDragging(false);
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  };
   return (
-    <section className={`drawer ${open ? "open" : ""}`}>
+    <section
+      ref={drawerRef}
+      className={`drawer ${open ? "open" : ""}`}
+      style={open ? { height } : undefined}
+    >
+      {open && (
+        <div
+          className={`drawer-resize ${dragging ? "dragging" : ""}`}
+          role="separator"
+          aria-label="拖动调整底部面板高度"
+          aria-orientation="horizontal"
+          onPointerDown={startResize}
+          onPointerMove={resize}
+          onPointerUp={endResize}
+          onPointerCancel={endResize}
+          onDoubleClick={() => setHeight(clampHeight(DEFAULT_DRAWER_HEIGHT))}
+        />
+      )}
       <header className="drawer-head">
         <div className="drawer-tabs">
           <button
