@@ -107,6 +107,35 @@ fn resolves_to_an_arbitrary_target_and_hides_settled_conflicts() {
 }
 
 #[test]
+fn deletes_term_with_evidence_conflicts_aliases_and_rules() {
+    let (store, path) = store("delete");
+    let mut alice = term("Alice", "爱丽丝");
+    alice.aliases.push("Alicia".to_string());
+    store.insert(&alice).unwrap();
+    store.insert(&term("Alice", "艾丽斯")).unwrap();
+    store.resolve("Alice", "阿丽丝").unwrap();
+    let mut bob = term("Bob", "鲍勃");
+    bob.aliases.push("Alicia".to_string());
+    store.insert(&bob).unwrap();
+    assert_eq!(store.alias_conflicts().unwrap().len(), 1);
+
+    store.delete("Alice").unwrap();
+
+    assert!(store
+        .list()
+        .unwrap()
+        .iter()
+        .all(|value| value.source != "Alice"));
+    assert!(store.conflicts().unwrap().is_empty());
+    assert!(store.conflict_details(true).unwrap().is_empty());
+    assert!(store.alias_conflicts().unwrap().is_empty());
+    assert!(store.delete("Alice").is_err());
+    // 已删除的人工规则不应影响重新收录。
+    assert_eq!(store.insert(&alice).unwrap(), TermStatus::Ok);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn manual_decision_stays_authoritative_while_new_evidence_is_kept() {
     let (store, path) = store("manual-authority");
     store.insert(&term("Alice", "爱丽丝")).unwrap();
@@ -565,6 +594,9 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     let (system, user) = &*prompt.lock().unwrap();
     assert!(system.contains("Report the target wording actually present"));
     assert!(!system.contains("reuse its target exactly"));
+    assert!(system.contains("Extract only terminology"));
+    assert!(system.contains("Exclude ordinary nouns"));
+    assert!(system.contains("Return an empty array when nothing qualifies"));
     let value: serde_json::Value = serde_json::from_str(user).unwrap();
     assert_eq!(value["known_terms"][0]["source"], "Alice");
     assert_eq!(value["known_terms"][0]["target"], "爱丽丝");

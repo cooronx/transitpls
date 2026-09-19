@@ -2105,6 +2105,23 @@ p {
     cursor: pointer
 }
 
+.term-filter {
+    height: 32px;
+    padding: 0 8px;
+    border: 1px solid var(--control-stroke);
+    border-radius: var(--r-control);
+    background: var(--layer);
+    color: var(--text);
+    font-size: 12px;
+    outline: 0
+}
+
+.term-filter:focus {
+    border-color: var(--accent-focus);
+    outline: 2px solid var(--accent-focus);
+    outline-offset: 2px
+}
+
 .term-error,
 .pending-banner {
     display: flex;
@@ -2352,13 +2369,19 @@ p {
 
 .term-row {
     display: grid;
-    grid-template-columns: 1.2fr 1.2fr .6fr .7fr .6fr 76px;
+    grid-template-columns: 1.2fr 1.2fr .6fr .7fr .6fr 148px;
     gap: 12px;
     align-items: center;
     min-height: 40px;
     padding: 6px 16px;
     border-top: 1px solid var(--stroke-soft);
     font-size: 12px
+}
+
+.term-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px
 }
 
 .term-row:hover {

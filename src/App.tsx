@@ -2412,6 +2412,7 @@ function TermsView({
   const [conflictIndex, setConflictIndex] = useState(0);
   const [editing, setEditing] = useState<string | null>(null);
   const [target, setTarget] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
   const [impact, setImpact] = useState<AffectedContent[]>([]);
   const [impactSource, setImpactSource] = useState<string | null>(null);
   const [allConflictImpacts, setAllConflictImpacts] = useState(false);
@@ -2429,6 +2430,9 @@ function TermsView({
   const pendingConflictCount = (detail?.termConflicts ?? []).filter(
     (item) => item.unresolved_events > 0,
   ).length;
+  const filteredTerms = (detail?.terms ?? []).filter(
+    (term) => typeFilter === "all" || term.type === typeFilter,
+  );
   const conflict =
     conflicts[Math.min(conflictIndex, Math.max(0, conflicts.length - 1))];
   useEffect(() => {
@@ -2531,6 +2535,21 @@ function TermsView({
       setImpact([]);
       await onReload();
     });
+  const remove = (source: string) =>
+    run("删除术语", async () => {
+      if (!detail) return;
+      const confirmed = await confirmDialog(
+        `删除术语「${source}」？相关证据、冲突与人工规则会一并删除。`,
+        { title: "确认删除术语", kind: "warning" },
+      );
+      if (!confirmed) return;
+      await invoke("ui_delete_term", {
+        projectId: detail.project.id,
+        source,
+      });
+      setEditing((current) => (current === source ? null : current));
+      await onReload();
+    });
   const retranslate = () =>
     run("重译", async () => {
       if (!detail || !selected.size) return;
@@ -2576,6 +2595,19 @@ function TermsView({
           </p>
         </div>
         <div className="page-head-actions">
+          <select
+            className="term-filter"
+            aria-label="按类型筛选术语"
+            value={typeFilter}
+            onChange={(event) => setTypeFilter(event.target.value)}
+          >
+            <option value="all">全部</option>
+            {Object.entries(termTypeText).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
           <label className="history-toggle">
             <input
               type="checkbox"
@@ -2718,7 +2750,7 @@ function TermsView({
             </div>
           </section>
         )}
-        {detail && !conflict && detail.terms.length > 0 && (
+        {detail && !conflict && detail.terms.length === 0 && (
           <div className="panel-empty">
             当前没有{showResolved ? "冲突记录" : "待处理冲突"}
           </div>
@@ -2823,7 +2855,7 @@ function TermsView({
             </footer>
           </section>
         )}
-        {detail && detail.terms.length ? (
+        {detail && filteredTerms.length ? (
           <div className="term-table">
             <div className="term-row term-head">
               <span>原文</span>
@@ -2833,7 +2865,7 @@ function TermsView({
               <span>状态</span>
               <span>操作</span>
             </div>
-            {detail.terms.map((term) => {
+            {filteredTerms.map((term) => {
               const state = termState(term);
               return (
                 <div className="term-row" key={term.source}>
@@ -2860,32 +2892,44 @@ function TermsView({
                       保存
                     </button>
                   ) : (
-                    <button
-                      type="button"
-                      className="btn btn-quiet sm"
-                      onClick={() => {
-                        if (
-                          term.policy === "ignored" ||
-                          term.policy === "non_fixed"
-                        ) {
-                          void setPolicy(term.source, "automatic");
-                        } else {
-                          setEditing(term.source);
-                          setTarget(term.target);
-                        }
-                      }}
-                    >
-                      {term.policy === "ignored" || term.policy === "non_fixed"
-                        ? "恢复"
-                        : "修改"}
-                    </button>
+                    <span className="term-actions">
+                      <button
+                        type="button"
+                        className="btn btn-quiet sm"
+                        onClick={() => {
+                          if (
+                            term.policy === "ignored" ||
+                            term.policy === "non_fixed"
+                          ) {
+                            void setPolicy(term.source, "automatic");
+                          } else {
+                            setEditing(term.source);
+                            setTarget(term.target);
+                          }
+                        }}
+                      >
+                        {term.policy === "ignored" || term.policy === "non_fixed"
+                          ? "恢复"
+                          : "修改"}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-danger sm"
+                        disabled={Boolean(working)}
+                        onClick={() => void remove(term.source)}
+                      >
+                        删除
+                      </button>
+                    </span>
                   )}
                 </div>
               );
             })}
           </div>
         ) : (
-          <div className="panel-empty">暂无术语数据</div>
+          <div className="panel-empty">
+            {detail?.terms.length ? "该类型下暂无术语" : "暂无术语数据"}
+          </div>
         )}
       </div>
     </div>

@@ -49,6 +49,7 @@ pub fn run() {
             ui::terms::ui_resolve_term,
             ui::terms::ui_set_term_policy,
             ui::terms::ui_undo_term_resolution,
+            ui::terms::ui_delete_term,
             ui::terms::ui_scan_term_impact,
             ui::terms::ui_retranslate,
             ui::terms::ui_restore_translation,

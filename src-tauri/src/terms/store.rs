@@ -49,6 +49,10 @@ impl TermStore {
         connection
             .busy_timeout(BUSY_TIMEOUT)
             .map_err(|error| format!("failed to set terms database busy timeout: {error}"))?;
+        // 外键约束按连接生效；删除术语依赖 ON DELETE CASCADE 清理关联表。
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| format!("failed to enable terms database foreign keys: {error}"))?;
         Ok(connection)
     }
 
@@ -239,6 +243,24 @@ impl TermStore {
     /// 撤销人工裁定，恢复自动策略。
     pub fn undo_resolution(&self, source: &str) -> Result<(), String> {
         self.set_policy(source, TermPolicy::Automatic)
+    }
+
+    /// 删除术语，并由外键级联清理候选、证据、冲突、别名与人工规则。
+    pub fn delete(&self, source: &str) -> Result<(), String> {
+        let mut connection = self.connect()?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| format!("failed to start term transaction: {error}"))?;
+        let deleted = transaction
+            .execute("DELETE FROM terms WHERE source = ?1", [source])
+            .map_err(|error| format!("failed to delete term: {error}"))?;
+        if deleted == 0 {
+            return Err(format!("term not found: {source}"));
+        }
+        audit(&transaction, source, "delete", serde_json::json!({}))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("failed to commit term deletion: {error}"))
     }
 
     /// 设置术语策略。

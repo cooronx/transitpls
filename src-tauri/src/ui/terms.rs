@@ -67,6 +67,23 @@ pub fn ui_undo_term_resolution(project_id: String, source: String) -> Result<(),
     )
 }
 
+/// 删除术语及其证据、冲突与人工规则。
+#[tauri::command]
+pub fn ui_delete_term(project_id: String, source: String) -> Result<(), String> {
+    let loaded = config::load(None)?;
+    let project = state::load_project(&loaded.state_dir, &project_id)?;
+    let store =
+        TermStore::open(state::project_dir(&loaded.state_dir, &project.id).join("terms.db"))?;
+    store.delete(&source)?;
+    polish::invalidate_round(&loaded.state_dir, &project.id)?;
+    state::append_log(
+        &loaded.state_dir,
+        &project,
+        "term_deleted",
+        serde_json::json!({ "source": source }),
+    )
+}
+
 /// 扫描术语在全书中的影响范围。
 #[tauri::command]
 pub fn ui_scan_term_impact(

@@ -16,6 +16,21 @@ use std::time::Duration;
 const BOOK_SAMPLE_CHARS: usize = 4_000;
 const CHAPTER_SAMPLE_CHARS: usize = 12_000;
 
+/// 开书分析提示词：`characters` 与 `terms` 采用与翻译后抽取相同的收录边界，
+/// 普通词、普通场所、章节标题与一次性对白不进入术语库。
+const BOOK_ANALYSIS_PROMPT: &str = concat!(
+    "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. ",
+    "Return only JSON with string fields genre, tone, narration, pacing, register, dialogue_style, and rhetoric; ",
+    "style_guide must be an array of non-empty strings; characters and terms must be arrays; book_synopsis must be null. ",
+    "characters and terms follow one inclusion rule: person names, proper place names, organization names, and concepts that carry a specific meaning in this work and need one consistent translation. ",
+    "Add a form of address only when it is tied to a specific character or identity and needs one consistent translation. ",
+    "Add a speech entry only for a catchphrase that a character repeatedly uses as a signature expression. ",
+    "Do not add ordinary nouns, verbs, adjectives, generic place names such as a shopping mall, chapter titles, one-off dialogue lines, greetings, or temporary descriptions; ",
+    "describe character tone, sentence-ending habits, and general speaking style in style_guide instead. ",
+    "Empty arrays are fine when the samples contain no terminology. ",
+    "Every character and term object must contain string source and target, nullable string reading and gender, string-array aliases, zero-based integer first_chapter, nullable string note, and type chosen from person, place, organization, term, appellation, speech, or fixed_expr.",
+);
+
 /// 全书分析结果，作为翻译与润色的共享上下文。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -125,13 +140,8 @@ pub async fn prepare<C: TranslationClient + ?Sized>(
             "samples": samples,
         })
         .to_string();
-        let mut value: BookAnalysis = call_json(
-            client,
-            "TASK:BOOK_STYLE_ANALYSIS Analyze the whole book's style. Return only JSON with string fields genre, tone, narration, pacing, register, dialogue_style, and rhetoric; style_guide must be an array of non-empty strings; characters and terms must be arrays; book_synopsis must be null. Every character and term object must contain string source and target, nullable string reading and gender, string-array aliases, zero-based integer first_chapter, nullable string note, and type chosen from person, place, organization, term, appellation, speech, or fixed_expr.",
-            &user,
-            max_retries,
-        )
-        .await?;
+        let mut value: BookAnalysis =
+            call_json(client, BOOK_ANALYSIS_PROMPT, &user, max_retries).await?;
         value.book_synopsis = None;
         validate_analysis(&value)?;
         state::write_json_atomic(&analysis_path, &value)?;
@@ -423,6 +433,15 @@ mod tests {
     fn samples_start_middle_and_end_without_duplicate_short_samples() {
         assert_eq!(sample_positions("短文", 10, 3), vec!["短文"]);
         assert_eq!(sample_positions("abcdefghij", 2, 3), vec!["ab", "ef", "ij"]);
+    }
+
+    #[test]
+    fn analysis_prompt_limits_terms_to_proper_names_and_work_concepts() {
+        let prompt = super::BOOK_ANALYSIS_PROMPT;
+        assert!(prompt.contains("person names"));
+        assert!(prompt.contains("Do not add ordinary nouns"));
+        assert!(prompt.contains("chapter titles"));
+        assert!(prompt.contains("Empty arrays are fine"));
     }
 
     #[tokio::test]
