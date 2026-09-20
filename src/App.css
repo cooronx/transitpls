@@ -1175,6 +1175,30 @@ p {
     color: var(--text)
 }
 
+.editing-guard { width: 100%; height: 100%; }
+.segment-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.segment-edit-input { width: 100%; min-height: 140px; resize: vertical; margin-top: 8px; padding: 10px; border: 1px solid var(--accent); border-radius: 6px; background: var(--layer); line-height: 1.7; font-size: 14px; }
+.segment-edit-input:focus-visible { outline: 2px solid var(--accent-soft); outline-offset: 2px; }
+.segment-edit-hint { font-size: 12px; color: var(--text-secondary); margin-top: 8px; }
+.segment-history { grid-column: 1 / -1; background: var(--layer-alt); border-top: 1px solid var(--stroke); padding: 16px; }
+.segment-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.segment-history-body { display: flex; gap: 16px; align-items: flex-start; }
+.segment-versions { flex: 0 0 190px; display: flex; flex-direction: column; gap: 6px; max-height: 330px; overflow: auto; }
+.segment-versions button { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; padding: 9px; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 6px; overflow-wrap: anywhere; }
+.segment-versions button[aria-pressed="true"] { border-color: var(--accent-stroke); background: var(--layer); }
+.segment-versions small, .segment-comparison small { color: var(--text-secondary); font-size: 12px; }
+.segment-comparison { flex: 1; min-width: 0; border: 1px solid var(--stroke); border-radius: 6px; background: var(--layer); padding: 12px; }
+.segment-comparison p { margin: 6px 0 16px; overflow-wrap: anywhere; }
+.segment-comparison ins { background: #e1f1e6; text-decoration: none; }
+.segment-comparison del { background: #fbe7e5; }
+.segment-feedback { grid-column: 1 / -1; padding: 8px 16px; color: var(--text-secondary); font-size: 12px; }
+.segment-feedback.error { color: var(--danger); }
+@media (max-width: 700px) {
+    .segment-history-body { flex-direction: column; }
+    .segment-versions { flex: none; width: 100%; max-height: 180px; }
+    .segment-comparison { width: 100%; }
+}
+
 .target-empty {
     flex: 1;
     min-height: 56px;

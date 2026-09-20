@@ -1,21 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { test } from "node:test";
-import ts from "typescript";
+import { loadTsx } from "./load-tsx.mjs";
 
-const appUrl = new URL("../src/App.tsx", import.meta.url);
-const require = createRequire(appUrl);
-const { outputText } = ts.transpileModule(
-  `${readFileSync(appUrl, "utf8")}\nexport { clampActivityPosition };`,
-  { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } },
-);
-const exports = {};
-new Function("require", "exports", outputText)(
-  (id) => (id.endsWith(".css") ? {} : require(id)),
-  exports,
-);
-const { clampActivityPosition } = exports;
+const { clampActivityPosition } = loadTsx(new URL("../src/App.tsx", import.meta.url), "export { clampActivityPosition };");
 
 test("progress dock stays inside the window when moved or its available space changes", () => {
   const size = { width: 360, height: 80 };

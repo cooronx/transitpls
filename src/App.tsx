@@ -44,6 +44,8 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import "./App.css";
+import { SegmentCard } from "./SegmentCard";
+import { EditingGuard, useEditingGuard } from "./EditingGuard";
 import providerPresets from "./provider-presets.json";
 
 type Status = "initialized" | "translating" | "translated" | "failed";
@@ -227,11 +229,6 @@ const statusText: Record<Status | ItemStatus, string> = {
   translated: "已完成",
   failed: "失败",
   pending: "待处理",
-};
-const polishStatusText: Record<PolishStatus, string> = {
-  pending: "待润色",
-  succeeded: "已润色",
-  failed: "润色失败",
 };
 const termTypeText: Record<string, string> = {
   person: "人名",
@@ -945,6 +942,7 @@ export default function App() {
   }
 
   return (
+    <EditingGuard>
     <div className={`app-shell ${isMac ? "is-macos" : ""}`}>
       <TitleBar
         project={detail?.project}
@@ -975,6 +973,8 @@ export default function App() {
               chapter={chapter}
               chapterIndex={chapterIndex}
               segments={segments}
+              onSegmentBusy={setBusy}
+              onSegmentChanged={() => reload(detail.project.id)}
               hasMoreSegments={matchingSegments.length > segments.length}
               onShowMore={() =>
                 setDisplaySegmentCount((count) => count + visibleSegmentCount)
@@ -1098,6 +1098,7 @@ export default function App() {
         </div>
       )}
     </div>
+    </EditingGuard>
   );
 }
 
@@ -1586,6 +1587,8 @@ function Explorer({
 }
 function Workspace({
   detail,
+  onSegmentBusy,
+  onSegmentChanged,
   chapter,
   chapterIndex,
   segments,
@@ -1605,6 +1608,8 @@ function Workspace({
   onOpenTerms,
 }: {
   detail: Detail;
+  onSegmentBusy: (label: string | null) => void;
+  onSegmentChanged: () => Promise<void>;
   chapter: Chapter;
   chapterIndex: number;
   segments: Segment[];
@@ -1623,6 +1628,7 @@ function Workspace({
   onExport: (f: "txt" | "epub") => void;
   onOpenTerms: () => void;
 }) {
+  const { dirtyId, pendingId } = useEditingGuard();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const done = chapter.segments.filter((s) => s.status === "translated").length;
   const chapterPercent = Math.round(
@@ -1642,6 +1648,8 @@ function Workspace({
           <Search />
           <input
             value={search}
+            disabled={!!dirtyId || !!pendingId}
+            title={dirtyId ? "保存或取消编辑后可搜索" : undefined}
             onChange={(e) => onSearch(e.target.value)}
             placeholder="搜索原文或译文…"
             aria-label="搜索原文或译文"
@@ -1710,7 +1718,7 @@ function Workspace({
       </div>
       <section className="segments">
         {segments.length ? (
-          segments.map((s) => <SegmentCard key={s.id} segment={s} />)
+          segments.map((s) => <SegmentCard key={`${detail.project.id}:${s.id}`} segment={s} projectId={detail.project.id} busy={busy} onBusy={onSegmentBusy} onChanged={onSegmentChanged} />)
         ) : (
           <div className="no-results">没有匹配的段落</div>
         )}
@@ -1734,43 +1742,6 @@ function Workspace({
         onOpenTerms={onOpenTerms}
       />
     </div>
-  );
-}
-function SegmentCard({ segment }: { segment: Segment }) {
-  const words = segment.source.trim().split(/\s+/).filter(Boolean).length;
-  return (
-    <article className={`segment-card ${segment.status}`}>
-      <div className="segment-source">
-        <header>
-          <span className="seg-index">#{segment.ordinal + 1}</span>
-          <span className="seg-meta">
-            {segment.kind === "heading" ? "标题" : "段落"} · {words} 词
-          </span>
-        </header>
-        <p>{segment.source}</p>
-      </div>
-      <div className="segment-target">
-        <header>
-          <span className="seg-meta">{segment.target?.length ?? 0} 字</span>
-          {segment.polish_status && (
-            <em className={`status-chip ${polishClass(segment.polish_status)}`}>
-              {polishStatusText[segment.polish_status]}
-            </em>
-          )}
-          <em className={`status-chip ${statusClass(segment.status)}`}>
-            {statusText[segment.status]}
-          </em>
-        </header>
-        {segment.target ? (
-          <p>{segment.target}</p>
-        ) : (
-          <div className="target-empty">
-            <span>等待翻译</span>
-            <small>运行本章翻译后将在此显示译文</small>
-          </div>
-        )}
-      </div>
-    </article>
   );
 }
 const MIN_DRAWER_HEIGHT = 120;
@@ -3528,9 +3499,6 @@ function statusClass(status: Status | ItemStatus) {
       : status === "translating"
         ? "active"
         : "muted";
-}
-function polishClass(status: PolishStatus) {
-  return status === "succeeded" ? "ok" : status === "failed" ? "danger" : "warn";
 }
 function termState(term: Term) {
   if (term.policy === "ignored") return { cls: "muted", text: "已忽略" };

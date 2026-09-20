@@ -1,7 +1,7 @@
 //! 批次规划与轮次快照摘要计算。
 
 use super::PlannedBatch;
-use crate::model::{Chapter, PolishStatus};
+use crate::model::Chapter;
 use crate::pipeline;
 use crate::terms::Term;
 use chrono::{SecondsFormat, Utc};
@@ -18,13 +18,7 @@ pub fn plan_batches(round_id: &str, chapters: &[Chapter], max_chars: usize) -> V
             .segments
             .iter()
             .enumerate()
-            .filter(|(_, segment)| {
-                segment.polish_status != Some(PolishStatus::Succeeded)
-                    && segment
-                        .target_before_polish
-                        .as_deref()
-                        .is_some_and(|draft| !draft.trim().is_empty())
-            })
+            .filter(|(_, segment)| crate::revisions::eligible_for_polish(segment))
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         if eligible.is_empty() {
@@ -55,6 +49,7 @@ pub(super) fn drafts_digest(chapters: &[Chapter]) -> String {
     for chapter in chapters {
         for segment in &chapter.segments {
             if let Some(draft) = &segment.target_before_polish {
+                hasher.update([u8::from(crate::revisions::is_protected(segment))]);
                 hasher.update(segment.id.as_bytes());
                 hasher.update([0x1f]);
                 hasher.update(draft.as_bytes());

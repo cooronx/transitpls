@@ -17,6 +17,10 @@ impl RecordingClient {
 
 #[async_trait]
 impl TranslationClient for RecordingClient {
+    fn model_name(&self) -> Option<&str> {
+        self.inner.model_name()
+    }
+
     fn record_failure(&self, stage: &str, details: serde_json::Value) -> Result<(), String> {
         self.recorder.record_failure(stage, details)
     }

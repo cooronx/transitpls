@@ -533,3 +533,49 @@ async fn polish_requires_a_complete_translation() {
     assert!(error.contains("全书翻译尚未完成"));
     std::fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
 }
+
+#[tokio::test]
+async fn polish_skips_manual_text_and_records_versions_for_other_segments() {
+    let mut fixture = fixture(1, 2);
+    crate::revisions::set_target(
+        &mut fixture.chapters[0].segments[0],
+        "人工定稿".into(),
+        crate::revisions::RevisionKind::Manual,
+        None,
+    )
+    .unwrap();
+    let client = Arc::new(ControlledClient::new(0));
+    let summary = run_round(
+        client.clone(),
+        &fixture.state_dir,
+        &fixture.project,
+        &mut fixture.chapters,
+        &analysis(),
+        &[],
+        &config(1),
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(*client.processed.lock().unwrap(), vec!["c0-s1"]);
+    let chapters = state::load_chapters(&fixture.state_dir, &fixture.project).unwrap();
+    assert_eq!(chapters[0].segments[0].target.as_deref(), Some("人工定稿"));
+    assert_eq!(
+        crate::revisions::history(&chapters[0].segments[0])
+            .unwrap()
+            .last()
+            .unwrap()
+            .kind,
+        crate::revisions::RevisionKind::Manual
+    );
+    assert_eq!(
+        crate::revisions::history(&chapters[0].segments[1])
+            .unwrap()
+            .last()
+            .unwrap()
+            .kind,
+        crate::revisions::RevisionKind::Polish
+    );
+    std::fs::remove_dir_all(fixture.dir).unwrap();
+}

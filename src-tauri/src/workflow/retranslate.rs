@@ -176,6 +176,7 @@ struct PreparedRetranslation {
     draft: Option<String>,
     target: String,
     extracted: Result<Vec<Term>, String>,
+    model: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -211,6 +212,13 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
             .iter()
             .position(|chapter| chapter.id == chapter_id)
             .ok_or_else(|| format!("chapter was removed: {chapter_id}"))?;
+        if chapters[chapter_index].segments.iter().any(|segment| {
+            segment.kind == SegmentKind::Heading
+                && segment.source.trim() == chapters[chapter_index].title.trim()
+                && crate::revisions::is_protected(segment)
+        }) {
+            return Err("此标题已人工修改，请在段落操作中预览重译并确认采用".into());
+        }
         let request = Segment {
             id: item_id.to_string(),
             ordinal: 0,
@@ -253,6 +261,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
             draft: None,
             target: translation,
             extracted,
+            model: client.model_name().map(str::to_string),
         });
     }
 
@@ -267,6 +276,9 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
                 .map(|segment_index| (chapter_index, segment_index))
         })
         .ok_or_else(|| format!("content was removed: {item_id}"))?;
+    if crate::revisions::is_protected(&chapters[chapter_index].segments[segment_index]) {
+        return Err("此段已人工修改，请在段落操作中预览重译并确认采用".into());
+    }
     let source = chapters[chapter_index].segments[segment_index]
         .source
         .clone();
@@ -317,6 +329,7 @@ async fn prepare_retranslation<C: TranslationClient + ?Sized>(
         draft: Some(draft.clone()),
         target: draft,
         extracted,
+        model: client.model_name().map(str::to_string),
     })
 }
 
@@ -334,16 +347,18 @@ fn apply_retranslation(
         if !segment.meta.is_object() {
             segment.meta = serde_json::json!({});
         }
-        if let Some(previous) = segment.target.clone() {
-            segment.meta["previous_target"] = serde_json::Value::String(previous);
-        }
         segment
             .meta
             .as_object_mut()
             .unwrap()
             .remove("retranslation_error");
+        crate::revisions::set_target(
+            segment,
+            prepared.target.clone(),
+            crate::revisions::RevisionKind::Retranslation,
+            prepared.model.as_deref(),
+        )?;
         segment.target_before_polish = prepared.draft;
-        segment.target = Some(prepared.target.clone());
         segment.polish_status = Some(PolishStatus::Pending);
         segment.status = ItemStatus::Translated;
         // 标题段落跟随章节标题一起更新。
@@ -376,6 +391,8 @@ fn apply_retranslation(
             chapters,
             chapter_index,
             prepared.target.clone(),
+            crate::revisions::RevisionKind::Retranslation,
+            prepared.model.as_deref(),
         )?;
     }
 

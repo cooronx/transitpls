@@ -18,6 +18,7 @@ pub mod parser;
 pub mod pipeline;
 pub mod polish;
 pub mod review;
+pub mod revisions;
 pub mod schema;
 pub mod state;
 pub mod terms;
@@ -33,6 +34,9 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            ui::editing::ui_segment_history,
+            ui::editing::ui_save_segment,
+            ui::editing::ui_preview_retranslation,
             ui::project::ui_bootstrap,
             ui::settings::ui_verify_and_save_model,
             ui::settings::ui_save_general,

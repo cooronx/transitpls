@@ -206,11 +206,13 @@ pub(super) fn restore_translation(
         for segment in &mut chapter.segments {
             if segment.kind == SegmentKind::Heading && segment.source.trim() == chapter.title.trim()
             {
-                segment.target = Some(previous.clone());
-                segment.polish_status = segment
-                    .target_before_polish
-                    .is_some()
-                    .then_some(crate::model::PolishStatus::Pending);
+                crate::revisions::set_target(
+                    segment,
+                    previous.clone(),
+                    crate::revisions::RevisionKind::Restore,
+                    None,
+                )?;
+                segment.polish_status = None;
             }
         }
         Ok(chapter_index)
@@ -231,14 +233,13 @@ pub(super) fn restore_translation(
             .and_then(|value| value.as_str())
             .map(str::to_string)
             .ok_or_else(|| "没有可恢复的旧译文".to_string())?;
-        let current = segment.target.replace(previous.clone());
-        if let Some(current) = current {
-            segment.meta["previous_target"] = serde_json::Value::String(current);
-        }
-        segment.polish_status = segment
-            .target_before_polish
-            .is_some()
-            .then_some(crate::model::PolishStatus::Pending);
+        crate::revisions::set_target(
+            segment,
+            previous.clone(),
+            crate::revisions::RevisionKind::Restore,
+            None,
+        )?;
+        segment.polish_status = None;
         segment
             .meta
             .as_object_mut()

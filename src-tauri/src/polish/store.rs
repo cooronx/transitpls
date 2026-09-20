@@ -1,7 +1,7 @@
 //! 轮次文件的读写与失效。
 
 use super::{PolishRound, PolishSummary, ROUND_FILE};
-use crate::model::{Chapter, PolishStatus};
+use crate::model::Chapter;
 use crate::state;
 use std::path::{Path, PathBuf};
 
@@ -14,13 +14,7 @@ pub fn pending_segment_count(chapters: &[Chapter]) -> usize {
     chapters
         .iter()
         .flat_map(|chapter| &chapter.segments)
-        .filter(|segment| {
-            segment.polish_status != Some(PolishStatus::Succeeded)
-                && segment
-                    .target_before_polish
-                    .as_deref()
-                    .is_some_and(|draft| !draft.trim().is_empty())
-        })
+        .filter(|segment| crate::revisions::eligible_for_polish(segment))
         .count()
 }
 

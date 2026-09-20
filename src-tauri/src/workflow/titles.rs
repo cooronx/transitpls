@@ -25,7 +25,7 @@ pub(super) async fn translate_missing_titles<C: TranslationClient + ?Sized>(
 ) -> Result<(), String> {
     for chapter in chapters.iter_mut() {
         if let Some(target_title) = chapter.target_title.clone() {
-            sync_heading_title(chapter, &target_title);
+            sync_heading_title(chapter, &target_title)?;
         }
     }
     let title_segments = chapters
@@ -78,7 +78,15 @@ pub(super) async fn translate_missing_titles<C: TranslationClient + ?Sized>(
         {
             Ok(translations) => {
                 for (&index, translation) in indices.iter().zip(translations) {
-                    apply_title(state_dir, project, chapters, index, translation)?;
+                    apply_title(
+                        state_dir,
+                        project,
+                        chapters,
+                        index,
+                        translation,
+                        crate::revisions::RevisionKind::Translation,
+                        client.model_name(),
+                    )?;
                 }
             }
             Err(_) => {
@@ -97,7 +105,15 @@ pub(super) async fn translate_missing_titles<C: TranslationClient + ?Sized>(
                         format!("chapter {} title failed: {error}", chapters[index].id)
                     })?
                     .remove(0);
-                    apply_title(state_dir, project, chapters, index, translation)?;
+                    apply_title(
+                        state_dir,
+                        project,
+                        chapters,
+                        index,
+                        translation,
+                        crate::revisions::RevisionKind::Translation,
+                        client.model_name(),
+                    )?;
                 }
             }
         }
@@ -112,21 +128,20 @@ pub(super) fn apply_title(
     chapters: &mut [Chapter],
     chapter_index: usize,
     translation: String,
+    kind: crate::revisions::RevisionKind,
+    model: Option<&str>,
 ) -> Result<(), String> {
-    chapters[chapter_index].target_title = Some(translation.clone());
-    sync_heading_title(&mut chapters[chapter_index], &translation);
+    crate::revisions::sync_title(&mut chapters[chapter_index], &translation, kind, model)?;
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
     save_project_progress(state_dir, project, chapters)
 }
 
 /// 把章节标题同步到正文中与章节同名的标题段落。
-pub(super) fn sync_heading_title(chapter: &mut Chapter, target_title: &str) {
-    for segment in &mut chapter.segments {
-        if segment.kind == SegmentKind::Heading && segment.source.trim() == chapter.title.trim() {
-            segment.target = Some(target_title.to_string());
-            segment.target_before_polish = None;
-            segment.polish_status = None;
-            segment.status = ItemStatus::Translated;
-        }
-    }
+pub(super) fn sync_heading_title(chapter: &mut Chapter, target_title: &str) -> Result<(), String> {
+    crate::revisions::sync_title(
+        chapter,
+        target_title,
+        crate::revisions::RevisionKind::Translation,
+        None,
+    )
 }

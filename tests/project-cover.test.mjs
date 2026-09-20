@@ -1,24 +1,10 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { test } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ts from "typescript";
+import { loadTsx } from "./load-tsx.mjs";
 
-const appUrl = new URL("../src/App.tsx", import.meta.url);
-const require = createRequire(appUrl);
-// Render the real sidebar without exporting a test-only API from the application.
-const { outputText } = ts.transpileModule(
-  `${readFileSync(appUrl, "utf8")}\nexport { Explorer };`,
-  { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } },
-);
-const exports = {};
-new Function("require", "exports", outputText)(
-  (id) => (id.endsWith(".css") ? {} : require(id)),
-  exports,
-);
-const { Explorer } = exports;
+const { Explorer } = loadTsx(new URL("../src/App.tsx", import.meta.url), "export { Explorer };");
 
 const project = {
   id: "book",

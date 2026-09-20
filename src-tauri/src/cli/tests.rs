@@ -420,6 +420,18 @@ async fn mock_polish_preserves_draft_and_saves_polished_target() {
         .as_deref()
         .is_some_and(|value| value.starts_with("[mock polished zh-CN]")));
     assert_eq!(segment.polish_status, Some(PolishStatus::Succeeded));
+    let revisions = crate::revisions::history(segment).unwrap();
+    assert_eq!(
+        revisions.first().unwrap().kind,
+        crate::revisions::RevisionKind::Translation
+    );
+    assert_eq!(
+        revisions.last().unwrap().kind,
+        crate::revisions::RevisionKind::Polish
+    );
+    assert!(revisions
+        .iter()
+        .all(|revision| revision.model.as_deref() == Some("mock")));
     let summary = polish::read_summary(&state_dir, &initialized.project.id, &chapters)
         .expect("polish summary should load")
         .expect("auto polish should create a round");
@@ -1101,6 +1113,14 @@ async fn retranslation_keeps_failed_text_and_saves_a_recovery_version_on_success
     )
     .await
     .unwrap();
+    assert_eq!(
+        crate::revisions::history(&chapters[0].segments[0])
+            .unwrap()
+            .last()
+            .unwrap()
+            .kind,
+        crate::revisions::RevisionKind::Retranslation
+    );
     assert_eq!(chapters[0].segments[0].meta["previous_target"], "旧译文");
     assert!(chapters[0].segments[0]
         .meta

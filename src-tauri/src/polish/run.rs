@@ -253,6 +253,7 @@ pub async fn run_round(
                         &round.batches[index].chapter_id,
                         &segment_ids,
                         &translations,
+                        client.model_name(),
                     )?;
                     round.batches[index].status = PolishBatchStatus::Succeeded;
                     round.batches[index].elapsed_ms = Some(elapsed_ms);
@@ -394,6 +395,7 @@ fn apply_batch(
     chapter_id: &str,
     segment_ids: &[String],
     translations: &[String],
+    model: Option<&str>,
 ) -> Result<(), String> {
     let chapter_index = chapters
         .iter()
@@ -405,7 +407,15 @@ fn apply_batch(
             .iter_mut()
             .find(|segment| &segment.id == id)
             .ok_or_else(|| format!("polish batch references missing segment {id}"))?;
-        segment.target = Some(translation.clone());
+        if crate::revisions::is_protected(segment) {
+            continue;
+        }
+        crate::revisions::set_target(
+            segment,
+            translation.clone(),
+            crate::revisions::RevisionKind::Polish,
+            model,
+        )?;
         segment.polish_status = Some(PolishStatus::Succeeded);
     }
     state::write_chapter(state_dir, project, &chapters[chapter_index])

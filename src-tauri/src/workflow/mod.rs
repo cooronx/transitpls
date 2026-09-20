@@ -3,6 +3,7 @@
 //! CLI 与桌面端共用这些入口；CLI 只负责参数解析和终端输出，界面负责进度事件与展示。
 
 mod common;
+pub(crate) mod editing;
 mod extraction;
 mod init;
 mod polish;

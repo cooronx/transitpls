@@ -3,6 +3,7 @@
 //! 每个 `ui_*` 函数都是一个 Tauri 命令；通过 `mod.rs` 重新导出，前端调用名保持不变。
 
 pub(crate) mod dto;
+pub(crate) mod editing;
 pub(crate) mod export;
 pub(crate) mod project;
 pub(crate) mod settings;

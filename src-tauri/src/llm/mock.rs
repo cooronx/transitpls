@@ -10,6 +10,10 @@ pub struct MockClient;
 
 #[async_trait]
 impl TranslationClient for MockClient {
+    fn model_name(&self) -> Option<&str> {
+        Some("mock")
+    }
+
     async fn complete(
         &self,
         system_prompt: &str,

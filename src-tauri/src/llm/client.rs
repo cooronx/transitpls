@@ -178,6 +178,10 @@ impl RigClient {
 
 #[async_trait]
 impl TranslationClient for RigClient {
+    fn model_name(&self) -> Option<&str> {
+        Some(&self.model_name)
+    }
+
     async fn complete(
         &self,
         system_prompt: &str,

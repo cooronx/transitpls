@@ -100,7 +100,7 @@ pub(super) async fn retry_pending_extractions<C: TranslationClient + ?Sized>(
             }
         }
     }
-    for extraction in store.pending_extractions()? {
+    for mut extraction in store.pending_extractions()? {
         let chapter_index = chapters
             .iter()
             .position(|chapter| chapter.id == extraction.chapter_id)
@@ -110,6 +110,8 @@ pub(super) async fn retry_pending_extractions<C: TranslationClient + ?Sized>(
                     extraction.chapter_id
                 )
             })?;
+        // 断点中的文本可能早于人工编辑；重试时使用当前保存的译文作为术语证据。
+        refresh_extraction_target(&mut extraction, &chapters[chapter_index]);
         let before_segment = if extraction.batch_key == "__chapter__" {
             chapters[chapter_index].segments.len()
         } else {
@@ -232,4 +234,58 @@ pub(super) fn store_extraction(
         store.insert_with_evidence(term, &extraction.source_text, &extraction.target_text)?;
     }
     store.complete_extraction(&extraction.chapter_id, &extraction.batch_key)
+}
+
+fn refresh_extraction_target(extraction: &mut PendingExtraction, chapter: &Chapter) {
+    let key = extraction
+        .batch_key
+        .strip_prefix("retranslate:")
+        .unwrap_or(&extraction.batch_key);
+    if key.strip_prefix("title:") == Some(chapter.id.as_str()) {
+        if let Some(target) = &chapter.target_title {
+            extraction.target_text = target.clone();
+        }
+        return;
+    }
+    let segments = if key == "__chapter__" {
+        chapter.segments.iter().collect::<Vec<_>>()
+    } else {
+        key.split('|')
+            .filter_map(|id| chapter.segments.iter().find(|segment| segment.id == id))
+            .collect()
+    };
+    if !segments.is_empty() && segments.iter().all(|segment| segment.target.is_some()) {
+        extraction.target_text = segments
+            .iter()
+            .filter_map(|segment| segment.target.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pending_extractions_use_current_saved_text_after_editing() {
+        let chapter: Chapter = serde_json::from_value(serde_json::json!({
+            "id":"c", "title":"title", "target_title":"人工标题", "status":"translated", "meta":{},
+            "segments":[{"id":"s", "ordinal":0, "source":"source", "target":"人工译文", "kind":"paragraph", "status":"translated", "source_hash":"hash", "meta":{}}]
+        })).unwrap();
+        for (key, expected) in [
+            ("s", "人工译文"),
+            ("retranslate:s", "人工译文"),
+            ("__chapter__", "人工译文"),
+            ("retranslate:title:c", "人工标题"),
+        ] {
+            let mut extraction = PendingExtraction {
+                chapter_id: "c".into(),
+                batch_key: key.into(),
+                source_text: "source".into(),
+                target_text: "过期译文".into(),
+            };
+            refresh_extraction_target(&mut extraction, &chapter);
+            assert_eq!(extraction.target_text, expected);
+        }
+    }
 }

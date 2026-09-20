@@ -33,6 +33,10 @@ pub(crate) const EMPTY_COMPLETION_ERROR: &str =
 /// 会覆盖它，把 `schema` 转发给服务端。
 #[async_trait]
 pub trait TranslationClient: Send + Sync {
+    fn model_name(&self) -> Option<&str> {
+        None
+    }
+
     /// 发起一次补全尝试。
     ///
     /// 无法请求结构化输出的客户端可以忽略 `schema`，只依赖提示词中的 JSON 要求。

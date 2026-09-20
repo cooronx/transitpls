@@ -117,7 +117,11 @@ pub(crate) async fn transit(
         "transit_completed",
         serde_json::json!({ "chapters": project.chapters_completed }),
     )?;
-    if chapter.is_none() && config.pipeline.polish && polish::book_translation_complete(&chapters) {
+    if chapter.is_none()
+        && config.pipeline.polish
+        && polish::book_translation_complete(&chapters)
+        && polish::pending_segment_count(&chapters) > 0
+    {
         let terms = store.list()?;
         if let Err(error) = polish::run_round(
             Arc::clone(&client),
@@ -304,7 +308,11 @@ async fn translate_chapter<C: TranslationClient + ?Sized>(
             {
                 Ok(translations) => {
                     for (&index, translation) in untranslated.iter().zip(translations) {
-                        store_draft(&mut chapters[chapter_index].segments[index], translation);
+                        store_draft(
+                            &mut chapters[chapter_index].segments[index],
+                            translation,
+                            client.model_name(),
+                        )?;
                     }
                     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
                     finalize_segments(
@@ -592,7 +600,11 @@ async fn apply_prepared_batch(
     match prepared.translations {
         Ok(translations) => {
             for (&index, translation) in plan.indices.iter().zip(translations) {
-                store_draft(&mut chapters[chapter_index].segments[index], translation);
+                store_draft(
+                    &mut chapters[chapter_index].segments[index],
+                    translation,
+                    client.model_name(),
+                )?;
             }
             state::write_chapter(state_dir, project, &chapters[chapter_index])?;
             finalize_segments(
@@ -658,11 +670,17 @@ async fn apply_prepared_batch(
 
 /// 保存初稿：`target_before_polish` 同时作为润色输入和可导出的译文，
 /// `polish_status` 记录该草稿是否已经润色过。
-fn store_draft(segment: &mut Segment, value: String) {
-    segment.target_before_polish = Some(value.clone());
-    segment.target = Some(value);
+fn store_draft(segment: &mut Segment, value: String, model: Option<&str>) -> Result<(), String> {
+    crate::revisions::set_target(
+        segment,
+        value.clone(),
+        crate::revisions::RevisionKind::Translation,
+        model,
+    )?;
+    segment.target_before_polish = Some(value);
     segment.polish_status = Some(PolishStatus::Pending);
     segment.status = ItemStatus::Translated;
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -755,7 +773,8 @@ async fn translate_one_with_fallback<C: TranslationClient + ?Sized>(
     store_draft(
         &mut chapters[chapter_index].segments[segment_index],
         translation,
-    );
+        client.model_name(),
+    )?;
     state::write_chapter(state_dir, project, &chapters[chapter_index])?;
     finalize_segments(
         client,

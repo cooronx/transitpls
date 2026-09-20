@@ -59,6 +59,9 @@ pub(super) fn write_chapter_at(project_dir: &Path, chapter: &Chapter) -> Result<
 pub fn normalize_polish_state(chapters: &mut [Chapter]) {
     for chapter in chapters.iter_mut() {
         for segment in chapter.segments.iter_mut() {
+            if crate::revisions::is_protected(segment) {
+                continue;
+            }
             let Some(draft) = segment
                 .target_before_polish
                 .as_deref()
