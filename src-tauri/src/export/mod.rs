@@ -5,19 +5,54 @@
 
 mod atomic;
 mod epub;
+mod paragraphs;
 mod punctuation;
 mod txt;
 
 #[cfg(test)]
 mod tests;
 
-use crate::model::{Chapter, ItemStatus, SegmentKind};
+use crate::model::ItemStatus;
 use crate::state::ExportSnapshot;
 use std::path::{Path, PathBuf};
 
 pub use atomic::write_atomic;
 pub use punctuation::normalize_chinese_punctuation;
 pub use txt::render_txt;
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize, serde::Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExportOptions {
+    pub bilingual: bool,
+    pub order: Option<ExportOrder>,
+}
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Deserialize,
+    serde::Serialize,
+    clap::ValueEnum,
+)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExportOrder {
+    #[default]
+    TargetFirst,
+    SourceFirst,
+}
+
+impl ExportOptions {
+    pub fn validate(self) -> Result<(), String> {
+        if !self.bilingual && self.order.is_some() {
+            return Err("export order requires bilingual mode".to_string());
+        }
+        Ok(())
+    }
+}
 
 /// 导出格式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +71,7 @@ impl ExportFormat {
 }
 
 /// 默认输出路径：源文件同级的 `output/{书名}.zh.{扩展名}`。
-pub fn default_output_path(input: &Path, format: ExportFormat) -> PathBuf {
+pub fn default_output_path(input: &Path, format: ExportFormat, options: ExportOptions) -> PathBuf {
     let stem = input
         .file_stem()
         .and_then(|value| value.to_str())
@@ -45,7 +80,11 @@ pub fn default_output_path(input: &Path, format: ExportFormat) -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("output")
-        .join(format!("{stem}.zh.{}", format.extension()))
+        .join(format!(
+            "{stem}.{}.{}",
+            if options.bilingual { "zh-bi" } else { "zh" },
+            format.extension()
+        ))
 }
 
 /// 导出前校验：章节数量一致，且每章都有译文标题、每个段落都有非空译文。
@@ -86,31 +125,22 @@ pub fn validate_snapshot(snapshot: &ExportSnapshot) -> Result<(), String> {
 }
 
 /// 渲染 EPUB：按源格式选择回填或生成。
-pub fn render_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
+pub fn render_epub(snapshot: &ExportSnapshot, options: ExportOptions) -> Result<Vec<u8>, String> {
+    options.validate()?;
     validate_snapshot(snapshot)?;
-    let source_is_epub = Path::new(&snapshot.project.source_file)
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("epub"));
-    if source_is_epub {
+    if source_is_epub(snapshot) {
+        if options.bilingual {
+            return Err("bilingual EPUB refill is not yet supported".to_string());
+        }
         epub::refill_epub(snapshot)
     } else {
-        epub::generate_epub(snapshot)
+        epub::generate_epub(snapshot, options)
     }
 }
 
-/// 找到与章节标题相同的第一个标题段落，导出时跳过它避免标题重复。
-pub(super) fn first_matching_heading(chapter: &Chapter, normalized_title: &str) -> Option<usize> {
-    chapter
-        .segments
-        .iter()
-        .enumerate()
-        .find(|(_, segment)| {
-            segment.kind == SegmentKind::Heading
-                && segment
-                    .target
-                    .as_deref()
-                    .is_some_and(|target| normalize_chinese_punctuation(target) == normalized_title)
-        })
-        .map(|(index, _)| index)
+fn source_is_epub(snapshot: &ExportSnapshot) -> bool {
+    Path::new(&snapshot.project.source_file)
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("epub"))
 }

@@ -2,7 +2,7 @@
 
 use super::epub::rewrite_xhtml;
 use super::punctuation::normalize_chinese_punctuation;
-use super::{render_epub, render_txt};
+use super::{render_epub, render_txt, ExportOptions, ExportOrder};
 use crate::model::{Chapter, ItemStatus, ProjectState, ProjectStatus, Segment, SegmentKind};
 use crate::state::ExportSnapshot;
 use std::io::{Cursor, Read, Write};
@@ -73,7 +73,7 @@ fn punctuation_normalization_is_conservative() {
 
 #[test]
 fn txt_export_orders_content_and_avoids_duplicate_heading() {
-    let rendered = render_txt(&snapshot()).expect("TXT should render");
+    let rendered = render_txt(&snapshot(), Default::default()).expect("TXT should render");
     assert_eq!(rendered, "第一章\n\n你好， 世界！\n");
 }
 
@@ -81,8 +81,108 @@ fn txt_export_orders_content_and_avoids_duplicate_heading() {
 fn txt_export_rejects_incomplete_translation() {
     let mut snapshot = snapshot();
     snapshot.chapters[0].segments[1].target = None;
-    let error = render_txt(&snapshot).expect_err("incomplete export should fail");
+    let error =
+        render_txt(&snapshot, Default::default()).expect_err("incomplete export should fail");
     assert!(error.contains("empty translation"));
+}
+
+fn bilingual(order: ExportOrder) -> ExportOptions {
+    ExportOptions {
+        bilingual: true,
+        order: Some(order),
+    }
+}
+
+#[test]
+fn bilingual_txt_restores_paragraphs_in_both_formats_without_mutation() {
+    let mut snapshot = snapshot();
+    let source = "Hello, world! Again?";
+    snapshot.source_bytes =
+        format!("\u{feff}Chapter 1\r\n\r\n{source}\r\n\r\n{source}\r\n\r\n相同！").into_bytes();
+    snapshot.project.max_segment_chars = 13;
+    let template = snapshot.chapters[0].segments[1].clone();
+    snapshot.chapters[0].segments = crate::parser::split_long_text(source, 13)
+        .into_iter()
+        .cycle()
+        .take(4)
+        .chain(["相同！".to_string(), String::new()])
+        .enumerate()
+        .map(|(ordinal, source)| Segment {
+            ordinal,
+            source,
+            target: Some(
+                [
+                    "你好, 世界!",
+                    "再来?",
+                    "第二次!",
+                    "再来?",
+                    "相同!",
+                    "补充译文",
+                ][ordinal]
+                    .to_string(),
+            ),
+            target_before_polish: Some("旧稿".to_string()),
+            ..template.clone()
+        })
+        .collect();
+    let before = serde_json::to_value(&snapshot.chapters).unwrap();
+    let target_first = bilingual(ExportOrder::TargetFirst);
+    let rendered = render_txt(&snapshot, target_first).unwrap();
+    assert_eq!(rendered, format!("第一章\n\n你好， 世界！再来？\n{source}\n\n第二次！再来？\n{source}\n\n相同！\n\n补充译文\n"));
+    let source_first = render_txt(&snapshot, bilingual(ExportOrder::SourceFirst)).unwrap();
+    assert!(source_first.contains(&format!("{source}\n你好， 世界！再来？")));
+    for order in [ExportOrder::TargetFirst, ExportOrder::SourceFirst] {
+        let mut archive = ZipArchive::new(Cursor::new(
+            render_epub(&snapshot, bilingual(order)).unwrap(),
+        ))
+        .unwrap();
+        let chapter =
+            String::from_utf8(read_entry(&mut archive, "OEBPS/chapter-0001.xhtml")).unwrap();
+        assert_eq!(chapter.matches("data-transitpls-source=\"\"").count(), 2);
+        assert!(chapter.contains("prefers-color-scheme: dark"));
+        assert_eq!(chapter.matches("相同！").count(), 1);
+        assert_eq!(
+            chapter.find(source).unwrap() < chapter.find("你好， 世界！").unwrap(),
+            order == ExportOrder::SourceFirst
+        );
+    }
+    assert_eq!(serde_json::to_value(&snapshot.chapters).unwrap(), before);
+    snapshot.chapters[0].segments[2].source = "wrong source".to_string();
+    assert!(render_txt(&snapshot, target_first)
+        .unwrap_err()
+        .contains("TXT alignment failed"));
+    assert!(render_epub(&snapshot, target_first)
+        .unwrap_err()
+        .contains("TXT alignment failed"));
+}
+
+#[test]
+fn export_options_validate_order_and_keep_default_paths_distinct() {
+    use super::{default_output_path, ExportFormat};
+    use std::path::Path;
+    let options = bilingual(ExportOrder::TargetFirst);
+    assert_eq!(
+        default_output_path(Path::new("book.txt"), ExportFormat::Txt, options),
+        Path::new("output/book.zh-bi.txt")
+    );
+    assert_eq!(
+        default_output_path(
+            Path::new("book.txt"),
+            ExportFormat::Epub,
+            Default::default()
+        ),
+        Path::new("output/book.zh.epub")
+    );
+    let invalid = ExportOptions {
+        bilingual: false,
+        order: Some(ExportOrder::SourceFirst),
+    };
+    assert!(render_txt(&snapshot(), invalid)
+        .unwrap_err()
+        .contains("requires bilingual"));
+    assert!(
+        serde_json::from_str::<ExportOptions>(r#"{"bilingual":true,"order":"sideways"}"#).is_err()
+    );
 }
 
 #[test]
@@ -107,7 +207,7 @@ fn epub_refill_preserves_resources_and_updates_content_and_navigation() {
     snapshot.chapters[0].segments[1].target = Some("你好, 世界!".to_string());
     snapshot.source_bytes = source_epub();
 
-    let bytes = render_epub(&snapshot).expect("EPUB should render");
+    let bytes = render_epub(&snapshot, Default::default()).expect("EPUB should render");
     let mut archive = ZipArchive::new(Cursor::new(bytes)).expect("output should be a ZIP");
     let mimetype = archive.by_index(0).expect("mimetype should be first");
     assert_eq!(mimetype.name(), "mimetype");
@@ -135,7 +235,7 @@ fn epub_refill_preserves_resources_and_updates_content_and_navigation() {
 #[test]
 fn txt_source_generates_readable_basic_epub() {
     let snapshot = snapshot();
-    let bytes = render_epub(&snapshot).expect("basic EPUB should render");
+    let bytes = render_epub(&snapshot, Default::default()).expect("basic EPUB should render");
     let mut archive = ZipArchive::new(Cursor::new(bytes)).expect("output should be a ZIP");
     assert!(archive.by_name("META-INF/container.xml").is_ok());
     let chapter = String::from_utf8(read_entry(&mut archive, "OEBPS/chapter-0001.xhtml"))
@@ -152,7 +252,8 @@ fn epub_refill_rejects_source_alignment_mismatch() {
     let mut snapshot = snapshot();
     snapshot.project.source_file = "book.epub".to_string();
     snapshot.source_bytes = source_epub();
-    let error = render_epub(&snapshot).expect_err("mismatched source must fail");
+    let error =
+        render_epub(&snapshot, Default::default()).expect_err("mismatched source must fail");
     assert!(error.contains("EPUB alignment failed"));
 }
 
@@ -163,7 +264,7 @@ fn epub_refill_handles_chapters_split_across_spine_documents() {
     snapshot.chapters[0].segments[1].source = "Hello world!".to_string();
     snapshot.source_bytes = grouped_source_epub();
 
-    let bytes = render_epub(&snapshot).expect("grouped EPUB should render");
+    let bytes = render_epub(&snapshot, Default::default()).expect("grouped EPUB should render");
     let mut archive = ZipArchive::new(Cursor::new(bytes)).expect("output should be a ZIP");
     let opening = String::from_utf8(read_entry(&mut archive, "OEBPS/opening.xhtml"))
         .expect("opening should be UTF-8");

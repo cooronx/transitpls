@@ -1,7 +1,7 @@
 //! 从 TXT 快照生成基础 EPUB 3。
 
-use super::super::first_matching_heading;
 use super::super::punctuation::normalize_chinese_punctuation;
+use super::super::{paragraphs, ExportOptions};
 use crate::model::SegmentKind;
 use crate::state::ExportSnapshot;
 use quick_xml::escape::escape;
@@ -10,7 +10,10 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
 /// 生成基础 EPUB：每章一个 XHTML 文件，附 nav 目录。
-pub(in crate::export) fn generate_epub(snapshot: &ExportSnapshot) -> Result<Vec<u8>, String> {
+pub(in crate::export) fn generate_epub(
+    snapshot: &ExportSnapshot,
+    export_options: ExportOptions,
+) -> Result<Vec<u8>, String> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     writer
         .start_file(
@@ -97,41 +100,49 @@ pub(in crate::export) fn generate_epub(snapshot: &ExportSnapshot) -> Result<Vec<
 </html>"#
     );
     write_epub_entry(&mut writer, "OEBPS/nav.xhtml", nav.as_bytes(), options)?;
-    for (index, chapter) in snapshot.chapters.iter().enumerate() {
+    let chapters = paragraphs::chapters(snapshot, export_options)?;
+    let style = if export_options.bilingual {
+        format!("<style>{}</style>", paragraphs::SOURCE_CSS)
+    } else {
+        String::new()
+    };
+    for (index, (chapter, blocks)) in snapshot.chapters.iter().zip(chapters).enumerate() {
         let chapter_title = normalize_chinese_punctuation(
             chapter
                 .target_title
                 .as_deref()
                 .expect("validated chapter title should exist"),
         );
-        let skip_heading = first_matching_heading(chapter, &chapter_title);
-        let paragraphs = chapter
-            .segments
+        let paragraphs = blocks
             .iter()
-            .enumerate()
-            .filter(|(segment_index, _)| Some(*segment_index) != skip_heading)
-            .map(|(_, segment)| {
-                let tag = match segment.kind {
+            .map(|block| {
+                let tag = match block.kind {
                     SegmentKind::Heading => "h2",
                     SegmentKind::Quote => "blockquote",
                     SegmentKind::Paragraph | SegmentKind::Metadata => "p",
                 };
-                format!(
-                    "    <{tag}>{}</{tag}>",
-                    escape(normalize_chinese_punctuation(
-                        segment
-                            .target
-                            .as_deref()
-                            .expect("validated segment target should exist")
-                    ))
-                )
+                block
+                    .texts(export_options)
+                    .map(|(source, text)| {
+                        let attributes = if source {
+                            format!(
+                                " data-transitpls-source=\"\" lang=\"{}\"",
+                                escape(&snapshot.project.source_language)
+                            )
+                        } else {
+                            String::new()
+                        };
+                        format!("    <{tag}{attributes}>{}</{tag}>", escape(text))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
             })
             .collect::<Vec<_>>()
             .join("\n");
         let chapter_xhtml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <html xmlns="http://www.w3.org/1999/xhtml" lang="{language}">
-  <head><title>{chapter_title}</title></head><body>
+  <head><title>{chapter_title}</title>{style}</head><body>
     <h1>{chapter_title}</h1>
 {paragraphs}
   </body>

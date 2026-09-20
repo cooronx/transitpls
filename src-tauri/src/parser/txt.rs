@@ -10,15 +10,27 @@ pub(super) fn parse_txt(
     max_chars: usize,
 ) -> Result<(String, Vec<Chapter>, String), String> {
     let bytes = std::fs::read(path).map_err(|error| format!("failed to read TXT: {error}"))?;
-    let text = decode_utf8(&bytes)?;
     let title = path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("Untitled")
         .to_string();
+    let chapters = txt_chapter_paragraphs(&bytes, &title)?
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, (title, paragraphs))| build_chapter(ordinal, title, paragraphs, max_chars))
+        .collect();
+    Ok((title, chapters, "txt".to_string()))
+}
+
+pub(crate) fn txt_chapter_paragraphs(
+    bytes: &[u8],
+    title: &str,
+) -> Result<Vec<(String, Vec<String>)>, String> {
+    let text = decode_utf8(bytes)?;
     let lines: Vec<&str> = text.lines().collect();
     let mut chapter_ranges: Vec<(String, Vec<String>)> = Vec::new();
-    let mut current_title = title.clone();
+    let mut current_title = title.to_string();
     let mut current_lines = Vec::new();
     for line in lines {
         let trimmed = line.trim();
@@ -36,15 +48,10 @@ pub(super) fn parse_txt(
         chapter_ranges.push((current_title, current_lines));
     }
 
-    let chapters = chapter_ranges
+    Ok(chapter_ranges
         .into_iter()
-        .enumerate()
-        .map(|(ordinal, (chapter_title, lines))| {
-            let paragraphs = split_txt_paragraphs(&lines);
-            build_chapter(ordinal, chapter_title, paragraphs, max_chars)
-        })
-        .collect();
-    Ok((title, chapters, "txt".to_string()))
+        .map(|(title, lines)| (title, split_txt_paragraphs(&lines)))
+        .collect())
 }
 
 /// 连续非空行合并为一段，空行分段。

@@ -9,11 +9,11 @@ pub(super) fn run(args: ExportArgs, state_dir: &Path) -> Result<i32, String> {
     let format = ExportFormat::from(args.format);
     let output = args
         .out
-        .unwrap_or_else(|| export::default_output_path(&args.input, format));
+        .unwrap_or_else(|| export::default_output_path(&args.input, format, Default::default()));
     let snapshot = state::load_export_snapshot(state_dir, &args.input)?;
     let bytes = match format {
-        ExportFormat::Txt => export::render_txt(&snapshot)?.into_bytes(),
-        ExportFormat::Epub => export::render_epub(&snapshot)?,
+        ExportFormat::Txt => export::render_txt(&snapshot, Default::default())?.into_bytes(),
+        ExportFormat::Epub => export::render_epub(&snapshot, Default::default())?,
     };
     export::write_atomic(&output, &bytes)?;
     println!("exported {}", output.display());

@@ -17,6 +17,7 @@ mod tests;
 pub(crate) use archive::normalize_zip_path;
 pub(crate) use opf::parse_chapter_navigation;
 pub(crate) use text::{normalize_source, split_long_text};
+pub(crate) use txt::txt_chapter_paragraphs;
 pub(crate) use xhtml::{block_kind, local_name, parse_xhtml_blocks};
 
 use crate::model::{Document, DocumentMetadata};
