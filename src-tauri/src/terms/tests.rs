@@ -65,6 +65,7 @@ fn inserts_and_lists_terms() {
     let terms = store.list().expect("terms should list");
     assert_eq!(terms.len(), 1);
     assert_eq!(terms[0].source, "Alice");
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -84,6 +85,7 @@ fn records_conflicts_without_overwriting_the_current_target() {
     assert_eq!(terms[0].target, "爱丽丝");
     assert_eq!(terms[0].status, TermStatus::Conflict);
     assert_eq!(store.conflicts().expect("conflicts should list").len(), 2);
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -103,6 +105,7 @@ fn resolves_to_an_arbitrary_target_and_hides_settled_conflicts() {
     assert_eq!(terms[0].target, "阿丽丝");
     assert_eq!(terms[0].status, TermStatus::Resolved);
     assert!(store.conflicts().expect("conflicts should list").is_empty());
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -132,6 +135,7 @@ fn deletes_term_with_evidence_conflicts_aliases_and_rules() {
     assert!(store.delete("Alice").is_err());
     // 已删除的人工规则不应影响重新收录。
     assert_eq!(store.insert(&alice).unwrap(), TermStatus::Ok);
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -158,6 +162,7 @@ fn manual_decision_stays_authoritative_while_new_evidence_is_kept() {
         .candidates
         .iter()
         .any(|candidate| candidate.target == "爱莉丝"));
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -188,6 +193,7 @@ fn policies_suppress_injection_and_restore_independent_conflicts() {
         .candidates
         .iter()
         .any(|candidate| candidate.target == "不会记录"));
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -222,6 +228,8 @@ fn migrates_legacy_conflicts_without_losing_candidates() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(version, 1);
+    drop(connection);
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -252,6 +260,7 @@ fn serializes_concurrent_writers_with_readers() {
         worker.join().expect("worker should finish");
     }
     assert_eq!(store.list().expect("terms should list").len(), 80);
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -276,6 +285,7 @@ fn filters_relevant_terms_by_source_and_alias() {
     assert!(relevant.iter().any(|term| term.source == "Alice"));
     assert!(relevant.iter().any(|term| term.source == "王都"));
     assert!(relevant.iter().any(|term| term.source == "アリス"));
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -305,6 +315,7 @@ fn records_ambiguous_aliases_and_does_not_inject_them() {
         .expect("terms should list")
         .iter()
         .all(|term| term.status == TermStatus::Ok));
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -333,6 +344,7 @@ fn persists_pending_extractions_until_completed() {
         .pending_extractions()
         .expect("pending extraction should list")
         .is_empty());
+    drop(store);
     std::fs::remove_file(path).expect("database should be removed");
 }
 
@@ -522,6 +534,7 @@ fn ignores_format_only_target_differences() {
     assert_eq!(stored.target, "乒乓");
     assert_eq!(stored.status, TermStatus::Ok);
     assert!(store.conflict_details(true).unwrap().is_empty());
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }
 
@@ -637,5 +650,6 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     assert_eq!(value["known_terms"][0]["target"], "爱丽丝");
     assert_eq!(value["known_terms"][0]["aliases"][0], "Alicia");
     assert_eq!(value["target"], "艾莉丝到了。");
+    drop(store);
     std::fs::remove_file(path).unwrap();
 }

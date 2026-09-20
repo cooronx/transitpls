@@ -374,6 +374,7 @@ async fn mock_transit_extracts_terms_after_saving_translation() {
         state::read_json(&project_dir.join("usage.json")).expect("usage should reload");
     assert_eq!(chapters[0].segments[0].target, first_target);
     assert_eq!(usage.calls.len(), call_count);
+    drop(store);
     fs::remove_dir_all(dir).expect("temp directory should be removed");
 }
 
@@ -702,6 +703,7 @@ async fn failed_batch_falls_back_to_individual_segments() {
     assert!(polish::read_summary(&state_dir, &project.id, &chapters)
         .expect("summary should load")
         .is_none());
+    drop(store);
     fs::remove_dir_all(dir).expect("temp directory should be removed");
 }
 
@@ -893,6 +895,7 @@ async fn concurrent_translation_limits_in_flight_batches() {
             assert_eq!(request["surrounding_source"]["after"], after);
         }
     }
+    drop(fixture.store);
     fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
 }
 
@@ -924,6 +927,7 @@ async fn out_of_order_batch_completion_writes_back_by_position() {
     }
     assert_eq!(fixture.project.chapters_completed, 2);
     assert_eq!(fixture.project.status, ProjectStatus::Translated);
+    drop(fixture.store);
     fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
 }
 
@@ -953,6 +957,7 @@ async fn serial_translation_sends_one_batch_at_a_time() {
             assert_eq!(segment.target.as_deref(), Some(expected.as_str()));
         }
     }
+    drop(fixture.store);
     fs::remove_dir_all(fixture.dir).expect("temp directory should be removed");
 }
 
@@ -1015,6 +1020,7 @@ async fn selected_chapter_leaves_other_chapters_untouched() {
         .all(|chapter| chapter.target_title.is_none()));
     assert_eq!(project.chapters_completed, 1);
     assert_eq!(project.status, ProjectStatus::Translating);
+    drop(store);
     fs::remove_dir_all(dir).expect("temp directory should be removed");
 }
 
@@ -1101,6 +1107,7 @@ async fn retranslation_keeps_failed_text_and_saves_a_recovery_version_on_success
         .get("retranslation_error")
         .is_none());
     assert_ne!(chapters[0].segments[0].target.as_deref(), Some("旧译文"));
+    drop(store);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1290,5 +1297,6 @@ async fn extraction_failure_does_not_fail_translation() {
         .expect("pending extractions should list")
         .iter()
         .any(|extraction| extraction.chapter_id == "chapter-1"));
+    drop(store);
     fs::remove_dir_all(dir).expect("temp directory should be removed");
 }
