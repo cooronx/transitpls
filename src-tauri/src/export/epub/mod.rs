@@ -29,8 +29,17 @@ pub(super) fn refill_epub(
         .map_err(|error| format!("invalid source EPUB: {error}"))?;
     let package = read_epub_package(&mut source)?;
     let chapters = aligned_chapters(snapshot, &mut source, &package)?;
+    let opf_dir = Path::new(&package.opf_path)
+        .parent()
+        .unwrap_or_else(|| Path::new(""));
+    let navigation_paths = package
+        .manifest
+        .values()
+        .filter(|item| item.properties.split_whitespace().any(|p| p == "nav"))
+        .map(|item| parser::normalize_zip_path(opf_dir, &item.href))
+        .collect();
     let mut replacements = if options.bilingual {
-        bilingual::rewrite_book(&chapters, &mut source, snapshot, options)?
+        bilingual::rewrite_book(&chapters, &mut source, snapshot, options, &navigation_paths)?
     } else {
         let mut replacements = HashMap::new();
         for document in chapters.iter().flatten() {
@@ -60,9 +69,6 @@ pub(super) fn refill_epub(
             })
         })
         .collect();
-    let opf_dir = Path::new(&package.opf_path)
-        .parent()
-        .unwrap_or_else(|| Path::new(""));
     for item in package.manifest.values() {
         let entry_path = parser::normalize_zip_path(opf_dir, &item.href);
         if item

@@ -202,6 +202,7 @@ pub(super) fn rewrite_book(
     archive: &mut ZipArchive<Cursor<&[u8]>>,
     snapshot: &ExportSnapshot,
     options: ExportOptions,
+    navigation_paths: &HashSet<String>,
 ) -> Result<HashMap<String, Vec<u8>>, String> {
     let mut anchors = HashMap::new();
     let resources = archive
@@ -220,7 +221,12 @@ pub(super) fn rewrite_book(
     }
     let mut documents = Vec::new();
     let mut mapping = AnchorMap::new();
-    for aligned in chapters.iter().flatten() {
+    // 目录始终只有译文；后续 nav 重写不会保留任何原文副本。
+    for aligned in chapters
+        .iter()
+        .flatten()
+        .filter(|document| !navigation_paths.contains(&document.path))
+    {
         let document = Document::parse(&aligned.xhtml)?;
         document.validate_blocks(aligned)?;
         let reserved = anchors
@@ -463,6 +469,9 @@ fn write_source(
                     Event::Start(copy)
                 },
             )?;
+        } else if let Event::CData(text) = &document.events[index] {
+            // 一些阅读器把 XHTML 交给 HTML 引擎，转义文本可避免 CDATA 被当成标签。
+            write(writer, Event::Text(BytesText::new(text.as_ref())))?;
         } else {
             write(writer, document.events[index].clone())?;
         }

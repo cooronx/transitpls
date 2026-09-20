@@ -317,7 +317,9 @@ fn bilingual_epub_preserves_ruby_resources_and_cross_document_footnotes() {
         chapter.target_title = Some(format!("第{}章", index + 1));
         for segment in &mut chapter.segments {
             segment.status = ItemStatus::Translated;
-            segment.target = Some(if segment.kind == SegmentKind::Heading {
+            segment.target = Some(if segment.source == "一致" {
+                "一致".into()
+            } else if segment.kind == SegmentKind::Heading {
                 chapter.target_title.clone().unwrap()
             } else {
                 format!("译文{} < & >!", segment.ordinal)
@@ -347,10 +349,13 @@ fn bilingual_epub_preserves_ruby_resources_and_cross_document_footnotes() {
         assert!(main.contains("<h1 id=\"top\"><span lang=\"zh-CN\">第1章</span></h1>"));
         assert!(main.contains("href=\"notes.xhtml#transitpls-source-"));
         assert!(main.contains("href=\"appendix.xhtml#static-note\""));
+        assert_eq!(main.matches("href=\"nav.xhtml#nav-entry\"").count(), 2);
+        assert_eq!(main.matches(">一致<").count(), 1);
         assert!(notes.contains("href=\"main.xhtml#transitpls-source-"));
         assert!(main.contains(" &lt; &amp; &gt;！"));
         assert!(main.contains("<ul><li>"));
         assert!(main.contains("<blockquote><p>"));
+        assert!(main.contains("&lt;終&gt;"));
         assert_eq!(
             main.find("<ruby>").unwrap() < main.find("译文1").unwrap(),
             order == ExportOrder::SourceFirst
@@ -360,10 +365,39 @@ fn bilingual_epub_preserves_ruby_resources_and_cross_document_footnotes() {
         assert!(!txt.contains("<ruby>"));
     }
     assert_eq!(serde_json::to_value(&snapshot.chapters).unwrap(), before);
+    let original = snapshot.source_bytes.clone();
+    for (old, new, error) in [
+        ("notes.xhtml#note", "notes.xhtml#missing", "missing anchor"),
+        ("id=\"opening\"", "id=\"top\"", "duplicate anchor"),
+        (
+            "<div id=\"transitpls-source-1\">",
+            "<div id=\"transitpls-source-1\">unsaved prefix",
+            "mixed nested text",
+        ),
+    ] {
+        snapshot.source_bytes = replace_fixture_xml(&original, old, new);
+        assert!(render_epub(&snapshot, bilingual(ExportOrder::TargetFirst))
+            .unwrap_err()
+            .contains(error));
+    }
+    snapshot.source_bytes = original;
     snapshot.chapters[0].segments[1].source = "different".into();
     assert!(render_epub(&snapshot, bilingual(ExportOrder::TargetFirst))
         .unwrap_err()
         .contains("alignment failed"));
+}
+
+fn replace_fixture_xml(bytes: &[u8], old: &str, new: &str) -> Vec<u8> {
+    let mut source = ZipArchive::new(Cursor::new(bytes)).unwrap();
+    let mut output = ZipWriter::new(Cursor::new(Vec::new()));
+    for index in 0..source.len() {
+        let mut entry = source.by_index(index).unwrap();
+        let mut text = String::new();
+        entry.read_to_string(&mut text).unwrap();
+        output.start_file(entry.name(), entry.options()).unwrap();
+        output.write_all(text.replace(old, new).as_bytes()).unwrap();
+    }
+    output.finish().unwrap().into_inner()
 }
 
 fn assert_epub_links_and_structure(archive: &mut ZipArchive<Cursor<Vec<u8>>>) {
@@ -462,11 +496,11 @@ fn bilingual_source_epub() -> Vec<u8> {
         ),
         (
             "OEBPS/content.opf",
-            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="book"><metadata><dc:identifier id="book">bilingual-test</dc:identifier><dc:title>Bilingual sample</dc:title><dc:language>ja</dc:language><meta property="dcterms:modified">2026-09-20T00:00:00Z</meta></metadata><manifest><item id="main" href="main.xhtml" media-type="application/xhtml+xml"/><item id="notes" href="notes.xhtml" media-type="application/xhtml+xml"/><item id="appendix" href="appendix.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="cover" href="cover.svg" media-type="image/svg+xml" properties="cover-image"/></manifest><spine><itemref idref="main"/><itemref idref="notes"/></spine></package>"#,
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="book"><metadata><dc:identifier id="book">bilingual-test</dc:identifier><dc:title>Bilingual sample</dc:title><dc:language>ja</dc:language><meta property="dcterms:modified">2026-09-20T00:00:00Z</meta></metadata><manifest><item id="main" href="main.xhtml" media-type="application/xhtml+xml"/><item id="notes" href="notes.xhtml" media-type="application/xhtml+xml"/><item id="appendix" href="appendix.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="cover" href="cover.svg" media-type="image/svg+xml" properties="cover-image"/></manifest><spine><itemref idref="appendix" linear="no"/><itemref idref="main"/><itemref idref="notes"/><itemref idref="nav"/></spine></package>"#,
         ),
         (
             "OEBPS/main.xhtml",
-            r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja"><head><title>Chapter 1</title><style>body { line-height: 1.6; } .lead { color: #224; }</style></head><body><h1 id="top">Chapter 1</h1><div id="transitpls-source-1"><p class="lead" id="opening"><ruby>彼女<rp>（</rp><rt>かのじょ</rt><rp>）</rp></ruby>は窓を開けた。<a id="ref" name="ref" epub:type="noteref" href="notes.xhtml#note">[1]</a>夜風が部屋に入ってきた。<img id="illustration" src="cover.svg" alt="cover"/></p><ul><li>リストの項目。</li><li><p>入れ子の段落。</p></li></ul><blockquote><p>引用された文章。</p></blockquote><p><a href="appendix.xhtml#static-note">別紙</a>を参照。<a href="#top">章頭</a></p></div></body></html>"##,
+            r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja"><head><title>Chapter 1</title><style>body { line-height: 1.6; } .lead { color: #224; }</style></head><body><h1 id="top">Chapter 1</h1><div id="transitpls-source-1"><p class="lead" id="opening"><ruby>彼女<rp>（</rp><rt>かのじょ</rt><rp>）</rp></ruby>は窓を開けた。<a id="ref" name="ref" epub:type="noteref" href="notes.xhtml#note">[1]</a>夜風が部屋に入ってきた。<img id="illustration" src="cover.svg" alt="cover"/></p><ul><li>リストの項目。</li><li><p>入れ子の段落。</p></li></ul><blockquote><p>引用された<q>文章</q>。A&amp;B<![CDATA[<終>]]><a name="legacy"></a></p></blockquote><p>一致</p><p><a href="appendix.xhtml#static-note">別紙</a>を参照。<a href="#top">章頭</a><a href="nav.xhtml#nav-entry">目次</a><a href="#legacy">印</a></p></div></body></html>"##,
         ),
         (
             "OEBPS/notes.xhtml",
@@ -474,11 +508,11 @@ fn bilingual_source_epub() -> Vec<u8> {
         ),
         (
             "OEBPS/appendix.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Appendix</title></head><body><p id="static-note">Untranslated appendix outside the spine.</p></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Appendix</title></head><body><p id="static-note">Appendix outside the translated chapters.</p></body></html>"#,
         ),
         (
             "OEBPS/nav.xhtml",
-            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="main.xhtml#top">Chapter 1</a></li></ol></nav></body></html>"#,
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li id="nav-entry"><a href="main.xhtml#top">Chapter 1</a></li></ol></nav></body></html>"#,
         ),
         ("OEBPS/cover.svg", COVER_SVG),
     ];
