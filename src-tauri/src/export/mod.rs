@@ -129,10 +129,7 @@ pub fn render_epub(snapshot: &ExportSnapshot, options: ExportOptions) -> Result<
     options.validate()?;
     validate_snapshot(snapshot)?;
     if source_is_epub(snapshot) {
-        if options.bilingual {
-            return Err("bilingual EPUB refill is not yet supported".to_string());
-        }
-        epub::refill_epub(snapshot)
+        epub::refill_epub(snapshot, options)
     } else {
         epub::generate_epub(snapshot, options)
     }

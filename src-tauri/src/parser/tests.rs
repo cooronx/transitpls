@@ -54,6 +54,16 @@ fn preserves_inline_punctuation_when_collecting_xhtml_text() {
 }
 
 #[test]
+fn keeps_inline_quotes_entities_and_cdata_in_the_parent_paragraph() {
+    let blocks = parse_xhtml_blocks(
+        r#"<x:div xmlns:x="http://www.w3.org/1999/xhtml"><x:p>Hello <x:q>world</x:q>! A&amp;B <![CDATA[<end>]]></x:p></x:div>"#,
+    );
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(blocks[0].0, 1);
+    assert_eq!(blocks[0].2, "Hello world! A&B <end>");
+}
+
+#[test]
 fn accepts_prefixed_opf_namespaces() {
     let xml = r#"
             <opf:package xmlns:opf="urn:opf" xmlns:dc="http://purl.org/dc/elements/1.1/">

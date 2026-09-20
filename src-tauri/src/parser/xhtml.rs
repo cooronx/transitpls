@@ -14,12 +14,20 @@ pub(crate) fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String
     let mut blocks = Vec::new();
     let mut current: Option<(usize, SegmentKind, String)> = None;
     let mut ordinal = 0;
+    let mut depth: usize = 0;
+    let mut block_depth = 0;
+    let mut after_reference = false;
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(event)) => {
-                let name = event.name().as_ref().to_ascii_lowercase();
+                depth += 1;
+                let name = local_name(event.name().as_ref());
                 if let Some(kind) = block_kind(&name) {
-                    current = Some((ordinal, kind, String::new()));
+                    // q 是行内引用，不能丢掉包围它的段落文字。
+                    if name != "q" || current.is_none() {
+                        current = Some((ordinal, kind, String::new()));
+                        block_depth = depth;
+                    }
                     ordinal += 1;
                 }
             }
@@ -28,19 +36,37 @@ pub(crate) fn parse_xhtml_blocks(input: &str) -> Vec<(usize, SegmentKind, String
                     let value = unescape(event.as_ref())
                         .map(|value| value.into_owned())
                         .unwrap_or_default();
-                    if should_separate_text(text, &value) {
+                    if !after_reference && should_separate_text(text, &value) {
                         text.push(' ');
                     }
                     text.push_str(value.trim());
+                    after_reference = false;
+                }
+            }
+            Ok(Event::CData(event)) => {
+                if let Some((_, _, text)) = current.as_mut() {
+                    if should_separate_text(text, event.as_ref()) {
+                        text.push(' ');
+                    }
+                    text.push_str(event.as_ref());
+                }
+            }
+            Ok(Event::GeneralRef(event)) => {
+                if let Some((_, _, text)) = current.as_mut() {
+                    if let Ok(value) = unescape(&format!("&{};", event.as_ref())) {
+                        text.push_str(&value);
+                    }
+                    after_reference = true;
                 }
             }
             Ok(Event::End(event)) => {
-                let name = event.name().as_ref().to_ascii_lowercase();
-                if block_kind(&name).is_some() {
+                let name = local_name(event.name().as_ref());
+                if block_kind(&name).is_some() && depth == block_depth {
                     if let Some(block) = current.take() {
                         blocks.push(block);
                     }
                 }
+                depth = depth.saturating_sub(1);
             }
             Ok(Event::Eof) => break,
             Err(_) => return fallback_xhtml_blocks(input),

@@ -1,6 +1,6 @@
 //! EPUB XML 重写：回填译文，并同步更新目录（nav/NCX）与元数据。
 
-use super::super::punctuation::normalize_chinese_punctuation;
+use super::super::paragraphs::{translated_text, Paragraph};
 use crate::model::Segment;
 use crate::parser;
 use quick_xml::escape::unescape;
@@ -20,7 +20,10 @@ pub(super) fn align_chapter_document(
     segment_index: &mut usize,
     xhtml: &str,
     max_chars: usize,
-) -> Result<HashMap<usize, String>, String> {
+) -> Result<HashMap<usize, Paragraph>, String> {
+    if max_chars == 0 {
+        return Err("EPUB alignment failed: max_segment_chars must be positive".to_string());
+    }
     let blocks = parser::parse_xhtml_blocks(xhtml);
     let mut replacements = HashMap::new();
     for (block_ordinal, kind, source) in blocks
@@ -44,18 +47,14 @@ pub(super) fn align_chapter_document(
                 ));
             }
         }
-        let translated = block_segments
-            .iter()
-            .map(|segment| {
-                normalize_chinese_punctuation(
-                    segment
-                        .target
-                        .as_deref()
-                        .expect("validated segment target should exist"),
-                )
-            })
-            .collect::<String>();
-        replacements.insert(block_ordinal, translated);
+        replacements.insert(
+            block_ordinal,
+            Paragraph {
+                source,
+                target: translated_text(block_segments),
+                kind,
+            },
+        );
         *segment_index = end;
     }
     Ok(replacements)
@@ -132,6 +131,22 @@ pub(in crate::export) fn rewrite_xhtml(
                 } else {
                     writer
                         .write_event(Event::CData(event.into_owned()))
+                        .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                }
+            }
+            Ok(Event::GeneralRef(event)) => {
+                if let Some((replacement, inserted)) =
+                    element_stack.iter_mut().rev().find_map(Option::as_mut)
+                {
+                    if !*inserted {
+                        writer
+                            .write_event(Event::Text(BytesText::new(replacement)))
+                            .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
+                        *inserted = true;
+                    }
+                } else {
+                    writer
+                        .write_event(Event::GeneralRef(event.into_owned()))
                         .map_err(|error| format!("failed to rewrite EPUB XHTML: {error}"))?;
                 }
             }

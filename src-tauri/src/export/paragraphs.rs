@@ -62,7 +62,7 @@ pub(super) fn chapters(
             })
             .collect()
     } else if source_is_epub(snapshot) {
-        return Err("bilingual TXT from EPUB is not yet supported".to_string());
+        super::epub::paragraphs(snapshot)?
     } else {
         restore_txt(snapshot)?
     };

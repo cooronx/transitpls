@@ -274,6 +274,202 @@ fn epub_refill_handles_chapters_split_across_spine_documents() {
     assert!(continuation.contains("<p>你好， 世界！</p>"));
 }
 
+#[test]
+fn bilingual_epub_preserves_ruby_resources_and_cross_document_footnotes() {
+    let fixture_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/export-fixtures");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    let source = fixture_dir.join("bilingual-source.epub");
+    std::fs::write(&source, bilingual_source_epub()).unwrap();
+    let document = crate::parser::parse_document(&source, Some("ja"), 12).unwrap();
+    let mut snapshot = snapshot();
+    snapshot.project.source_file = "bilingual-source.epub".into();
+    snapshot.project.source_language = "ja".into();
+    snapshot.project.max_segment_chars = 12;
+    snapshot.source_bytes = std::fs::read(&source).unwrap();
+    snapshot.chapters = document.chapters;
+    snapshot.project.chapters_total = snapshot.chapters.len();
+    for (index, chapter) in snapshot.chapters.iter_mut().enumerate() {
+        chapter.target_title = Some(format!("第{}章", index + 1));
+        for segment in &mut chapter.segments {
+            segment.status = ItemStatus::Translated;
+            segment.target = Some(if segment.kind == SegmentKind::Heading {
+                chapter.target_title.clone().unwrap()
+            } else {
+                format!("译文{} < & >!", segment.ordinal)
+            });
+        }
+    }
+    let before = serde_json::to_value(&snapshot.chapters).unwrap();
+    for order in [ExportOrder::TargetFirst, ExportOrder::SourceFirst] {
+        let bytes = render_epub(&snapshot, bilingual(order)).unwrap();
+        std::fs::write(
+            fixture_dir.join(format!("bilingual-{order:?}.epub")),
+            &bytes,
+        )
+        .unwrap();
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(
+            read_entry(&mut archive, "OEBPS/cover.svg"),
+            COVER_SVG.as_bytes()
+        );
+        assert_eq!(archive.len(), 8);
+        assert_epub_links_and_structure(&mut archive);
+        let main = String::from_utf8(read_entry(&mut archive, "OEBPS/main.xhtml")).unwrap();
+        let notes = String::from_utf8(read_entry(&mut archive, "OEBPS/notes.xhtml")).unwrap();
+        assert_eq!(main.matches("<img ").count(), 1);
+        assert_eq!(main.matches("<ruby>").count(), 1);
+        assert!(main.contains("<ruby>彼女<rp>（</rp><rt>かのじょ</rt><rp>）</rp></ruby>"));
+        assert!(main.contains("<h1 id=\"top\"><span lang=\"zh-CN\">第1章</span></h1>"));
+        assert!(main.contains("href=\"notes.xhtml#transitpls-source-"));
+        assert!(main.contains("href=\"appendix.xhtml#static-note\""));
+        assert!(notes.contains("href=\"main.xhtml#transitpls-source-"));
+        assert!(main.contains(" &lt; &amp; &gt;！"));
+        assert!(main.contains("<ul><li>"));
+        assert!(main.contains("<blockquote><p>"));
+        assert_eq!(
+            main.find("<ruby>").unwrap() < main.find("译文1").unwrap(),
+            order == ExportOrder::SourceFirst
+        );
+        let txt = render_txt(&snapshot, bilingual(order)).unwrap();
+        assert_eq!(txt.matches("リスト").count(), 1);
+        assert!(!txt.contains("<ruby>"));
+    }
+    assert_eq!(serde_json::to_value(&snapshot.chapters).unwrap(), before);
+    snapshot.chapters[0].segments[1].source = "different".into();
+    assert!(render_epub(&snapshot, bilingual(ExportOrder::TargetFirst))
+        .unwrap_err()
+        .contains("alignment failed"));
+}
+
+fn assert_epub_links_and_structure(archive: &mut ZipArchive<Cursor<Vec<u8>>>) {
+    use quick_xml::{events::Event, Reader, XmlVersion};
+    use std::collections::{HashMap, HashSet};
+    let paths = archive
+        .file_names()
+        .filter(|p| p.ends_with(".xhtml"))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut ids = HashMap::new();
+    let mut links = Vec::new();
+    for path in &paths {
+        let xml = String::from_utf8(read_entry(archive, path)).unwrap();
+        let mut reader = Reader::from_str(&xml);
+        let mut stack = Vec::new();
+        let mut anchors = HashSet::new();
+        loop {
+            let event = reader.read_event().expect("output must be well-formed XML");
+            let empty = matches!(event, Event::Empty(_));
+            match event {
+                Event::Start(e) | Event::Empty(e) => {
+                    let name = e.name().as_ref().to_string();
+                    if matches!(name.as_str(), "p" | "li" | "blockquote" | "ul" | "div") {
+                        assert!(
+                            !stack.iter().any(|name| name == "span"),
+                            "block nested inside span"
+                        );
+                    }
+                    if name == "li" {
+                        assert!(stack.last().is_some_and(|p| p == "ul" || p == "ol"));
+                    }
+                    let mut local = HashSet::new();
+                    for attribute in e.attributes() {
+                        let attribute = attribute.unwrap();
+                        let value = attribute
+                            .normalized_value(XmlVersion::Implicit1_0)
+                            .unwrap()
+                            .into_owned();
+                        match attribute.key.as_ref() {
+                            "id" | "name" if local.insert(value.clone()) => {
+                                assert!(anchors.insert(value), "duplicate output anchor");
+                            }
+                            "href" => links.push((path.clone(), value)),
+                            _ => {}
+                        }
+                    }
+                    if !empty {
+                        stack.push(name);
+                    }
+                }
+                Event::End(_) => {
+                    stack.pop().unwrap();
+                }
+                Event::Eof => {
+                    assert!(stack.is_empty());
+                    break;
+                }
+                _ => {}
+            }
+        }
+        ids.insert(path.clone(), anchors);
+    }
+    for (path, href) in links {
+        if href.contains("://") {
+            continue;
+        }
+        let (file, anchor) = href
+            .split_once('#')
+            .map(|(f, a)| (f, Some(a)))
+            .unwrap_or((&href, None));
+        let target = if file.is_empty() {
+            path.clone()
+        } else {
+            crate::parser::normalize_zip_path(std::path::Path::new(&path).parent().unwrap(), file)
+        };
+        assert!(
+            archive.by_name(&target).is_ok(),
+            "missing link target {href}"
+        );
+        if let Some(anchor) = anchor {
+            assert!(ids[&target].contains(anchor), "broken link {href}");
+        }
+    }
+}
+
+const COVER_SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="160" height="220" viewBox="0 0 160 220"><rect width="160" height="220" fill="#a9bed6"/><text x="20" y="110" font-size="24">Bilingual</text></svg>"##;
+
+fn bilingual_source_epub() -> Vec<u8> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    let entries = [
+        ("mimetype", "application/epub+zip"),
+        (
+            "META-INF/container.xml",
+            r#"<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>"#,
+        ),
+        (
+            "OEBPS/content.opf",
+            r#"<package xmlns="http://www.idpf.org/2007/opf" xmlns:dc="http://purl.org/dc/elements/1.1/" version="3.0" unique-identifier="book"><metadata><dc:identifier id="book">bilingual-test</dc:identifier><dc:title>Bilingual sample</dc:title><dc:language>ja</dc:language><meta property="dcterms:modified">2026-09-20T00:00:00Z</meta></metadata><manifest><item id="main" href="main.xhtml" media-type="application/xhtml+xml"/><item id="notes" href="notes.xhtml" media-type="application/xhtml+xml"/><item id="appendix" href="appendix.xhtml" media-type="application/xhtml+xml"/><item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/><item id="cover" href="cover.svg" media-type="image/svg+xml" properties="cover-image"/></manifest><spine><itemref idref="main"/><itemref idref="notes"/></spine></package>"#,
+        ),
+        (
+            "OEBPS/main.xhtml",
+            r##"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja"><head><title>Chapter 1</title><style>body { line-height: 1.6; } .lead { color: #224; }</style></head><body><h1 id="top">Chapter 1</h1><div id="transitpls-source-1"><p class="lead" id="opening"><ruby>彼女<rp>（</rp><rt>かのじょ</rt><rp>）</rp></ruby>は窓を開けた。<a id="ref" name="ref" epub:type="noteref" href="notes.xhtml#note">[1]</a>夜風が部屋に入ってきた。<img id="illustration" src="cover.svg" alt="cover"/></p><ul><li>リストの項目。</li><li><p>入れ子の段落。</p></li></ul><blockquote><p>引用された文章。</p></blockquote><p><a href="appendix.xhtml#static-note">別紙</a>を参照。<a href="#top">章頭</a></p></div></body></html>"##,
+        ),
+        (
+            "OEBPS/notes.xhtml",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja"><head><title>Notes</title></head><body><aside id="note" epub:type="footnote"><p>脚注の説明。<a href="main.xhtml#ref">戻る</a></p></aside></body></html>"#,
+        ),
+        (
+            "OEBPS/appendix.xhtml",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Appendix</title></head><body><p id="static-note">Untranslated appendix outside the spine.</p></body></html>"#,
+        ),
+        (
+            "OEBPS/nav.xhtml",
+            r#"<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops"><head><title>Contents</title></head><body><nav epub:type="toc"><ol><li><a href="main.xhtml#top">Chapter 1</a></li></ol></nav></body></html>"#,
+        ),
+        ("OEBPS/cover.svg", COVER_SVG),
+    ];
+    for (path, content) in entries {
+        writer
+            .start_file(
+                path,
+                SimpleFileOptions::default().compression_method(CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(content.as_bytes()).unwrap();
+    }
+    writer.finish().unwrap().into_inner()
+}
+
 fn source_epub() -> Vec<u8> {
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
     writer
