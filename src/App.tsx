@@ -1033,26 +1033,38 @@ export default function App() {
             <EmptyState onImport={importFile} />
           )}
         </main>
-        {view === "workspace" && detail && inspectorOpen && (
-          <Inspector
-            config={bootstrap.config}
-            detail={detail}
-            busy={busy}
-            retranslationProgress={retranslationProgress}
-            translationTiming={activeTiming}
-            now={now}
-            draft={taskDraft}
-            onDraftChange={setTaskDraft}
-            onPolish={savePipeline}
-            onPolishStart={(retryFailed) => void startPolish(retryFailed)}
-            onCancel={() => void cancelTask()}
-            polishing={busy === "润色" || busy === "重试润色"}
-            onInitialize={initializeTask}
-            onReanalyze={reanalyze}
-            onOpenTerms={() => setView("terms")}
-            onOpenSettings={() => setView("settings")}
-            onClose={() => setInspectorOpen(false)}
-          />
+        {view === "workspace" && detail && (
+          <div
+            id="task-inspector"
+            className={`inspector-slot ${inspectorOpen ? "open" : ""}`}
+            inert={!inspectorOpen}
+            aria-hidden={!inspectorOpen}
+          >
+            <Inspector
+              config={bootstrap.config}
+              detail={detail}
+              busy={busy}
+              retranslationProgress={retranslationProgress}
+              translationTiming={activeTiming}
+              now={now}
+              draft={taskDraft}
+              onDraftChange={setTaskDraft}
+              onPolish={savePipeline}
+              onPolishStart={(retryFailed) => void startPolish(retryFailed)}
+              onCancel={() => void cancelTask()}
+              polishing={busy === "润色" || busy === "重试润色"}
+              onInitialize={initializeTask}
+              onReanalyze={reanalyze}
+              onOpenTerms={() => setView("terms")}
+              onOpenSettings={() => setView("settings")}
+              onClose={() => {
+                document.querySelector<HTMLButtonElement>(
+                  '[aria-controls="task-inspector"]',
+                )?.focus();
+                setInspectorOpen(false);
+              }}
+            />
+          </div>
         )}
       </div>
       <footer className="statusbar">
@@ -1689,7 +1701,10 @@ function Workspace({
           <button
             type="button"
             className={`btn btn-quiet sm ${inspectorOpen ? "active" : ""}`}
+            aria-label="任务配置"
             aria-pressed={inspectorOpen}
+            aria-expanded={inspectorOpen}
+            aria-controls="task-inspector"
             onClick={onToggleInspector}
           >
             <SlidersHorizontal />
@@ -1804,8 +1819,8 @@ function Tray({
   return (
     <section
       ref={drawerRef}
-      className={`drawer ${open ? "open" : ""}`}
-      style={open ? { height } : undefined}
+      className={`drawer ${open ? "open" : ""} ${dragging ? "dragging" : ""}`}
+      style={{ height: open ? height : 37 }}
     >
       {open && (
         <div
@@ -1853,20 +1868,29 @@ function Tray({
             运行日志
           </button>
         </div>
-        <button type="button" className="drawer-toggle" onClick={onToggle}>
+        <button
+          type="button"
+          className="drawer-toggle"
+          aria-expanded={open}
+          aria-controls="activity-tray"
+          onClick={onToggle}
+        >
           {open ? <ChevronDown /> : <ChevronUp />}
           {open ? "收起" : "展开"}
         </button>
       </header>
-      {open && (
-        <div className="drawer-body">
-          {tray === "tasks" && <TaskTable detail={detail} />}
-          {tray === "issues" && (
-            <IssueList detail={detail} onOpenTerms={onOpenTerms} />
-          )}
-          {tray === "logs" && <LogList logs={detail.logs} />}
-        </div>
-      )}
+      <div
+        id="activity-tray"
+        className="drawer-body"
+        inert={!open}
+        aria-hidden={!open}
+      >
+        {tray === "tasks" && <TaskTable detail={detail} />}
+        {tray === "issues" && (
+          <IssueList detail={detail} onOpenTerms={onOpenTerms} />
+        )}
+        {tray === "logs" && <LogList logs={detail.logs} />}
+      </div>
     </section>
   );
 }

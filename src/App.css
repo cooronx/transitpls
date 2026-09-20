@@ -33,7 +33,11 @@
     --r-card: 18px;
     --r-pill: 9999px;
     --titlebar-h: 40px;
-    --nav-h: 40px
+    --nav-h: 40px;
+    --inspector-width: 288px;
+    --motion-fast: 150ms;
+    --motion-normal: 220ms;
+    --motion-ease: cubic-bezier(.22, 1, .36, 1)
 }
 
 * {
@@ -1295,7 +1299,17 @@ p {
     background: var(--layer-alt);
     border-top: 1px solid var(--stroke);
     display: flex;
-    flex-direction: column
+    flex-direction: column;
+    overflow: hidden;
+    transition: height var(--motion-normal) var(--motion-ease)
+}
+
+.drawer.dragging {
+    transition: none
+}
+
+.drawer:not(.open) .drawer-body {
+    visibility: hidden
 }
 
 .drawer-resize {
@@ -1538,8 +1552,28 @@ p {
 
 /* ---------- Inspector ---------- */
 
+.inspector-slot {
+    display: flex;
+    flex: none;
+    width: 0;
+    min-height: 0;
+    overflow: hidden;
+    opacity: 0;
+    visibility: hidden;
+    transition: width var(--motion-normal) var(--motion-ease),
+        opacity var(--motion-fast) ease,
+        visibility 0s var(--motion-normal)
+}
+
+.inspector-slot.open {
+    width: var(--inspector-width);
+    opacity: 1;
+    visibility: visible;
+    transition-delay: 0s
+}
+
 .inspector {
-    width: 288px;
+    width: var(--inspector-width);
     flex: none;
     display: flex;
     flex-direction: column;
@@ -1773,7 +1807,7 @@ p {
     height: 12px;
     border-radius: 50%;
     background: var(--layer);
-    transition: left .15s ease, background-color .15s ease
+    transition: transform var(--motion-normal) var(--motion-ease), background-color var(--motion-fast) ease
 }
 
 .toggle.on {
@@ -1782,7 +1816,7 @@ p {
 }
 
 .toggle.on i {
-    left: 23px;
+    transform: translateX(20px);
     background: #fff
 }
 
@@ -2068,7 +2102,8 @@ p {
     border: 1px solid var(--stroke);
     border-radius: var(--r-card);
     overflow: hidden;
-    transition: border-color .12s ease, background-color .12s ease
+    transition: border-color var(--motion-fast) ease, background-color var(--motion-fast) ease,
+        transform var(--motion-normal) var(--motion-ease), box-shadow var(--motion-normal) ease
 }
 
 .project-tile:hover {
@@ -2935,13 +2970,75 @@ p {
     height: 14px
 }
 
-/* ---------- Responsive ---------- */
+/* ---------- Motion ---------- */
+
+.titlebar-nav button,
+.icon-button,
+.project-trigger,
+.project-option,
+.chapter-item,
+.drawer-tabs button,
+.drawer-toggle,
+.inspector-tabs button,
+.settings-nav button,
+.load-more-segments,
+.toast-close {
+    transition: background-color var(--motion-fast) ease,
+        border-color var(--motion-fast) ease, color var(--motion-fast) ease,
+        transform var(--motion-fast) var(--motion-ease)
+}
+
+.main-panel > .page-view,
+.main-panel > .editor-layout,
+.main-panel > .empty-state,
+.settings-card,
+.segment-history {
+    animation: surface-enter var(--motion-normal) var(--motion-ease)
+}
+
+.project-menu,
+.export-dialog[open],
+.toast {
+    animation: surface-enter var(--motion-normal) var(--motion-ease)
+}
+
+/* Opacity preserves the dock's positioning transform and pointer coordinates. */
+.activity-dock,
+.export-dialog[open]::backdrop {
+    animation: fade-in var(--motion-normal) ease
+}
+
+@keyframes surface-enter {
+    from {
+        opacity: 0;
+        transform: translateY(6px)
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0)
+    }
+}
+
+@keyframes fade-in {
+    from { opacity: 0 }
+    to { opacity: 1 }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .project-tile:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, .06)
+    }
+}
 
 @media (prefers-reduced-motion: reduce) {
-    .btn,
-    .toggle,
-    .toggle i {
-        transition: none
+    *,
+    *::before,
+    *::after,
+    dialog::backdrop {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important
     }
 
     .btn:active:not(:disabled),
@@ -2951,6 +3048,8 @@ p {
         transform: none
     }
 }
+
+/* ---------- Responsive ---------- */
 
 @media (max-width:1400px) {
     .btn-label {
@@ -2983,8 +3082,8 @@ p {
         width: 232px
     }
 
-    .inspector {
-        width: 272px
+    :root {
+        --inspector-width: 272px
     }
 
     .titlebar-nav button {
