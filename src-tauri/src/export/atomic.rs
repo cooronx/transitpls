@@ -30,20 +30,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
             .map_err(|error| format!("failed to write output file: {error}"))?;
         file.sync_all()
             .map_err(|error| format!("failed to sync output file: {error}"))?;
-        replace_file(&temp, path)
+        fs::rename(&temp, path).map_err(|error| format!("failed to publish output file: {error}"))
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
-}
-
-fn replace_file(temp: &Path, destination: &Path) -> Result<(), String> {
-    // Windows 不允许 rename 覆盖已存在文件，先删除目标。
-    #[cfg(windows)]
-    if destination.exists() {
-        fs::remove_file(destination)
-            .map_err(|error| format!("failed to replace existing output file: {error}"))?;
-    }
-    fs::rename(temp, destination).map_err(|error| format!("failed to publish output file: {error}"))
 }

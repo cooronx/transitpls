@@ -186,6 +186,30 @@ fn export_options_validate_order_and_keep_default_paths_distinct() {
 }
 
 #[test]
+fn atomic_export_replaces_existing_files_and_preserves_failed_destinations() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/atomic-export-fixture");
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = dir.join("book.txt");
+    super::write_atomic(&output, b"old").unwrap();
+    super::write_atomic(&output, b"complete new export").unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"complete new export");
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&output)
+            .unwrap();
+        assert!(super::write_atomic(&output, b"failed export").is_err());
+        assert_eq!(std::fs::read(&output).unwrap(), b"complete new export");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        drop(locked);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn epub_rewrite_keeps_translated_toc_text_inside_original_markup() {
     let xhtml = r#"<div><p><span class="title">Contents</span></p><p><a href="chapter.xhtml">Chapter</a></p></div>"#;
     let replacements = [(1, "目录".to_string()), (2, "第一章".to_string())]
