@@ -24,6 +24,7 @@ import {
   Eye,
   EyeOff,
   FolderKanban,
+  GripVertical,
   Languages,
   LibraryBig,
   LoaderCircle,
@@ -1176,6 +1177,17 @@ function ProgressBar({
     </div>
   );
 }
+function clampActivityPosition(
+  position: { x: number; y: number },
+  size: { width: number; height: number },
+  viewport: { width: number; height: number },
+) {
+  return {
+    x: Math.max(8, Math.min(position.x, viewport.width - size.width - 8)),
+    y: Math.max(8, Math.min(position.y, viewport.height - size.height - 8)),
+  };
+}
+
 function ActivityDock({
   label,
   detail,
@@ -1189,8 +1201,88 @@ function ActivityDock({
   cancellable: boolean;
   onCancel: () => void;
 }) {
+  const dockRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const clampPosition = (next: { x: number; y: number }) =>
+    clampActivityPosition(next, dockRef.current!.getBoundingClientRect(), {
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+
+  useEffect(() => {
+    const keepVisible = () => setPosition((current) => {
+      if (!current) return current;
+      const next = clampPosition(current);
+      return next.x === current.x && next.y === current.y ? current : next;
+    });
+    const observer = new ResizeObserver(keepVisible);
+    observer.observe(dockRef.current!);
+    window.addEventListener("resize", keepVisible);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", keepVisible);
+    };
+  }, []);
+
+  const endDrag = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (dragRef.current?.pointerId !== event.pointerId) return;
+    dragRef.current = null;
+    setDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
   return (
-    <div className="activity-dock" role="status" aria-live="polite">
+    <div
+      ref={dockRef}
+      className={`activity-dock ${dragging ? "dragging" : ""}`}
+      style={position ? { left: position.x, top: position.y, bottom: "auto", transform: "none" } : undefined}
+      role="status"
+      aria-live="polite"
+    >
+      <button
+        type="button"
+        className="activity-drag-handle"
+        aria-label="移动进度框"
+        title="拖动移动进度框；方向键微调，Home 键复位"
+        onPointerDown={(event) => {
+          if (event.button !== 0 || !event.isPrimary) return;
+          const rect = dockRef.current!.getBoundingClientRect();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          dragRef.current = {
+            pointerId: event.pointerId,
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+          };
+          setDragging(true);
+        }}
+        onPointerMove={(event) => {
+          const drag = dragRef.current;
+          if (!drag || drag.pointerId !== event.pointerId) return;
+          setPosition(clampPosition({ x: event.clientX - drag.x, y: event.clientY - drag.y }));
+        }}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
+        onKeyDown={(event) => {
+          if (event.key === "Home") {
+            event.preventDefault();
+            setPosition(null);
+          } else if (["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+            event.preventDefault();
+            const rect = dockRef.current!.getBoundingClientRect();
+            setPosition(clampPosition({
+              x: rect.left + (event.key === "ArrowLeft" ? -10 : event.key === "ArrowRight" ? 10 : 0),
+              y: rect.top + (event.key === "ArrowUp" ? -10 : event.key === "ArrowDown" ? 10 : 0),
+            }));
+          }
+        }}
+      >
+        <GripVertical aria-hidden="true" />
+      </button>
       <LoaderCircle className="spin" aria-hidden="true" />
       <div className="activity-info">
         <b>{label}</b>

@@ -2779,8 +2779,8 @@ p {
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 360px;
-    max-width: 560px;
+    min-width: min(360px, calc(100vw - 16px));
+    max-width: min(560px, calc(100vw - 16px));
     padding: 12px 12px 12px 16px;
     border: 1px solid var(--stroke);
     border-radius: var(--r-card);
@@ -2794,6 +2794,39 @@ p {
     height: 16px;
     flex: none;
     color: var(--accent)
+}
+
+.activity-drag-handle {
+    display: grid;
+    place-items: center;
+    align-self: stretch;
+    flex: none;
+    width: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-control);
+    background: transparent;
+    color: var(--text-tertiary);
+    cursor: grab;
+    touch-action: none
+}
+
+.activity-drag-handle:hover {
+    background: var(--subtle-hover);
+    color: var(--text-secondary)
+}
+
+.activity-drag-handle svg {
+    width: 16px;
+    height: 16px
+}
+
+.activity-dock.dragging .activity-drag-handle {
+    cursor: grabbing
+}
+
+.activity-dock.dragging {
+    user-select: none
 }
 
 .activity-info {
