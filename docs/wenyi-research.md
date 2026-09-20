@@ -60,3 +60,14 @@ Wenyi 同时提供 CLI 和可部署 Web 服务，采用 FastAPI、PostgreSQL、R
 - 上游提示词是仓库内的任务/语言资源，未发现可视化自定义提示模板编辑器，不能把“源码中有模板”当作成熟的用户模板管理功能。来源：[提示资源](https://github.com/BigDawnGhost/wenyi/tree/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/i18n/data/tasks)。
 
 建议先补真实审校和人工修订，再做分阶段模型分配与双语导出；DOCX/PDF/字幕和多目标语言按实际用户需求决定。这个顺序优先把现有小说翻译流程从“能生成译文”补到“能检查、修正并交付”。
+
+## 补充：Wenyi 双语导出的实际实现
+
+- 双语是导出层的排版选项，复用已保存原译文；按原始逻辑段落相邻排列，可选译文在前或原文在前，不是左右两栏，也不需要再调用翻译模型。
+- 先合并翻译时拆开的 `cont` 续段，再输出一组原译文；TXT/Markdown 用空行分隔。空原文或与最终输出文本相同的原文不重复输出；未译内容回退原文时也避免重复。
+- 标题段明确排除双语副本，只输出译文标题（缺译文时回退原文）。EPUB 目录沿用标题翻译逻辑；不会因为双语模式再复制一套目录。
+- EPUB 按原书物理 XHTML 资源、原段落锚点回填译文，随后在前/后插入原文块。普通段落插入相邻 `p`；列表项和引用内部插入 `div`，换行片段使用 `span`，避免破坏列表等结构。
+- 原文副本不是无差别克隆全部 HTML：普通行内格式会展平成文字；有注释链接或日文 ruby 时保留这些标记及必要子节点，去除副本的原 `id/name`，不复制图片、脚本等内容。
+- 原文侧脚注链接保留源书准确位置，无需使用译文侧注释定位结果。副本分配不冲突的 `tn-source-*` 锚点；全书建立资源/片段映射，将有对应原文块的注释链接重定向到原文副本，支持跨 XHTML；无映射则保留原链接。译文侧保留原锚点身份。
+- 默认原文块字体稍小、颜色弱化、带浅色背景并支持深色模式；开启 `preserve_source_style` 时复用原块的 class/style，不注入弱化 CSS。这不是完整保留所有原文行内样式的承诺。
+- 对应源码：[合并与去重](https://github.com/BigDawnGhost/wenyi/blob/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/assemble/writer_common.py)、[TXT/Markdown](https://github.com/BigDawnGhost/wenyi/blob/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/assemble/text_writer.py)、[HTML 插入](https://github.com/BigDawnGhost/wenyi/blob/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/assemble/html_renderer.py)、[注释、ruby 与原文样式](https://github.com/BigDawnGhost/wenyi/blob/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/assemble/html_bilingual.py)、[全书锚点映射](https://github.com/BigDawnGhost/wenyi/blob/5f206257ddc05b113b0ec224518e31cb5d7b62ad/packages/core/wenyi_core/assemble/epub_resources.py#L153)。
