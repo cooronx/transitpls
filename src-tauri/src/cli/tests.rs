@@ -163,6 +163,47 @@ fn accepts_export_format_and_output_path() {
     assert_eq!(args.format, ExportFormatArg::Epub);
     assert_eq!(args.out, Some(PathBuf::from("dist/book.epub")));
     assert_eq!(args.input, PathBuf::from("book.txt"));
+    assert!(!args.bilingual);
+    assert!(args.order.is_none());
+    let cli = Cli::try_parse_from([
+        "transitpls-cli",
+        "export",
+        "book.txt",
+        "--format",
+        "txt",
+        "--bilingual",
+        "--order",
+        "source-first",
+    ])
+    .unwrap();
+    let Command::Export(args) = cli.command else {
+        panic!("export expected")
+    };
+    assert!(args.bilingual);
+    assert_eq!(args.order, Some(crate::export::ExportOrder::SourceFirst));
+    assert!(Cli::try_parse_from([
+        "transitpls-cli",
+        "export",
+        "book.txt",
+        "--format",
+        "txt",
+        "--bilingual",
+        "--order",
+        "invalid"
+    ])
+    .is_err());
+    let error = export_file(
+        ExportArgs {
+            format: ExportFormatArg::Txt,
+            out: None,
+            input: PathBuf::from("missing.txt"),
+            bilingual: false,
+            order: args.order,
+        },
+        std::path::Path::new("missing"),
+    )
+    .unwrap_err();
+    assert!(error.contains("requires bilingual"));
 }
 
 #[test]
@@ -197,7 +238,9 @@ fn txt_export_overwrites_output_without_changing_project_log() {
         ExportArgs {
             format: ExportFormatArg::Txt,
             out: None,
-            input: source,
+            bilingual: false,
+            order: None,
+            input: source.clone(),
         },
         &state_dir,
     )
@@ -212,6 +255,37 @@ fn txt_export_overwrites_output_without_changing_project_log() {
         fs::read(&log_path).expect("log should remain readable"),
         log_before
     );
+    let saved = serde_json::to_value(state::load_chapters(&state_dir, &project).unwrap()).unwrap();
+    for order in [None, Some(crate::export::ExportOrder::SourceFirst)] {
+        let custom = order.map(|_| dir.join("custom.txt"));
+        export_file(
+            ExportArgs {
+                format: ExportFormatArg::Txt,
+                out: custom.clone(),
+                input: source.clone(),
+                bilingual: true,
+                order,
+            },
+            &state_dir,
+        )
+        .unwrap();
+        let contents =
+            fs::read_to_string(custom.unwrap_or_else(|| dir.join("output/book.zh-bi.txt")))
+                .unwrap();
+        assert_eq!(
+            contents,
+            if order.is_some() {
+                "第一章\n\nHello, world!\n你好， 世界！\n"
+            } else {
+                "第一章\n\n你好， 世界！\nHello, world!\n"
+            }
+        );
+    }
+    assert_eq!(
+        serde_json::to_value(state::load_chapters(&state_dir, &project).unwrap()).unwrap(),
+        saved
+    );
+    assert_eq!(fs::read(&log_path).unwrap(), log_before);
     fs::remove_dir_all(dir).expect("temp directory should be removed");
 }
 

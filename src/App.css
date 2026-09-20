@@ -1596,6 +1596,32 @@ p {
     border-top: 1px solid var(--stroke-soft)
 }
 
+.export-dialog {
+    width: min(400px, calc(100vw - 32px));
+    padding: 24px;
+    color: var(--text);
+    background: var(--layer);
+    border: 1px solid var(--stroke);
+    border-radius: var(--r-card);
+    box-shadow: 0 16px 48px #0003
+}
+
+.export-dialog::backdrop {
+    background: #0006
+}
+
+.export-dialog h2 {
+    margin-bottom: 16px;
+    font-size: 18px
+}
+
+.export-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px
+}
+
 .field>b {
     display: block;
     margin-bottom: 6px;

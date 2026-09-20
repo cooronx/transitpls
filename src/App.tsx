@@ -47,6 +47,10 @@ import providerPresets from "./provider-presets.json";
 
 type Status = "initialized" | "translating" | "translated" | "failed";
 type ItemStatus = "pending" | "translated" | "failed";
+type ExportOptions = {
+  bilingual: boolean;
+  order?: "target-first" | "source-first";
+};
 type PolishStatus = "pending" | "succeeded" | "failed";
 interface Project {
   id: string;
@@ -241,6 +245,7 @@ const isMac =
   typeof navigator !== "undefined" && /Mac/i.test(navigator.userAgent);
 
 export default function App() {
+  const [exportFormat, setExportFormat] = useState<"txt" | "epub" | null>(null);
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [chapterIndex, setChapterIndex] = useState(0);
@@ -777,7 +782,7 @@ export default function App() {
       setBusy(null);
     }
   };
-  const exportBook = async (format: "txt" | "epub") => {
+  const exportBook = async (format: "txt" | "epub", options: ExportOptions) => {
     if (!detail) return [];
     const polish = detail.polish;
     if (polish && !(polish.finished && polish.failed === 0)) {
@@ -792,6 +797,7 @@ export default function App() {
       const output = await invoke<string>("ui_export", {
         projectId: detail.project.id,
         format,
+        options,
       });
       setNotice(`已导出至 ${output}`);
       await openPath(output);
@@ -982,7 +988,7 @@ export default function App() {
               inspectorOpen={inspectorOpen}
               onToggleInspector={() => setInspectorOpen((open) => !open)}
               onTranslate={() => translate(chapterIndex)}
-              onExport={exportBook}
+              onExport={setExportFormat}
               onOpenTerms={() => setView("terms")}
             />
           )}
@@ -1068,6 +1074,16 @@ export default function App() {
           onCancel={() => void cancelTask()}
         />
       )}
+      {exportFormat && (
+        <ExportDialog
+          format={exportFormat}
+          onClose={() => setExportFormat(null)}
+          onExport={(options) => {
+            setExportFormat(null);
+            void exportBook(exportFormat, options);
+          }}
+        />
+      )}
       {notice && (
         <div className="toast" role="status">
           <span>{notice}</span>
@@ -1081,6 +1097,45 @@ export default function App() {
         </div>
       )}
     </div>
+  );
+}
+
+function ExportDialog({ format, onClose, onExport }: {
+  format: "txt" | "epub";
+  onClose: () => void;
+  onExport: (options: ExportOptions) => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [bilingual, setBilingual] = useState(false);
+  const [order, setOrder] = useState<ExportOptions["order"]>("target-first");
+  useEffect(() => { dialog.current?.showModal(); }, []);
+  return (
+    <dialog ref={dialog} className="export-dialog" onCancel={onClose} aria-labelledby="export-title">
+      <form onSubmit={(event) => { event.preventDefault(); onExport(bilingual ? { bilingual, order } : { bilingual }); }}>
+        <h2 id="export-title">导出 {format.toUpperCase()}</h2>
+        <label className="field">
+          <b>导出内容</b>
+          <select value={bilingual ? "bilingual" : "target"} onChange={(event) => setBilingual(event.target.value === "bilingual")}>
+            <option value="target">仅译文</option>
+            <option value="bilingual">双语对照</option>
+          </select>
+        </label>
+        {bilingual && (
+          <label className="field">
+            <b>段落顺序</b>
+            <select value={order} onChange={(event) => setOrder(event.target.value as ExportOptions["order"])}>
+              <option value="target-first">译文在前</option>
+              <option value="source-first">原文在前</option>
+            </select>
+            <small>每段原文与当前译文上下排列，标题仅保留译文。</small>
+          </label>
+        )}
+        <div className="export-dialog-actions">
+          <button type="button" className="btn btn-quiet" onClick={onClose}>取消</button>
+          <button type="submit" className="btn btn-primary"><Download />导出</button>
+        </div>
+      </form>
+    </dialog>
   );
 }
 

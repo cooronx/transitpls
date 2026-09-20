@@ -1,6 +1,6 @@
 //! 命令行参数定义。
 
-use crate::export::ExportFormat;
+use crate::export::{ExportFormat, ExportOrder};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -109,6 +109,12 @@ pub(crate) struct ExportArgs {
     pub(crate) format: ExportFormatArg,
     #[arg(long)]
     pub(crate) out: Option<PathBuf>,
+    /// 按原段落导出原文和当前译文。
+    #[arg(long)]
+    pub(crate) bilingual: bool,
+    /// 双语顺序，默认译文在前；仅适用于 --bilingual。
+    #[arg(long, value_enum)]
+    pub(crate) order: Option<ExportOrder>,
     pub(crate) input: PathBuf,
 }
 
