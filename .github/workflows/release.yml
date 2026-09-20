@@ -53,6 +53,8 @@ jobs:
         with:
           targets: ${{ matrix.targets }}
       - run: yarn install --frozen-lockfile
+      - name: Stamp version from tag
+        run: node .github/scripts/stamp-version.cjs
       - uses: tauri-apps/tauri-action@action-v1.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
