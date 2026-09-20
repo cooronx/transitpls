@@ -2,6 +2,9 @@
 
 mod bilingual;
 mod generate;
+mod layout;
+
+pub(super) use layout::apply_layout;
 mod package;
 mod rewrite;
 

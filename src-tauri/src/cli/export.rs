@@ -10,6 +10,7 @@ pub(super) fn run(args: ExportArgs, state_dir: &Path) -> Result<i32, String> {
     let options = ExportOptions {
         bilingual: args.bilingual,
         order: args.order,
+        ..Default::default()
     };
     options.validate()?;
     let output = args

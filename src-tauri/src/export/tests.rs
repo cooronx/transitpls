@@ -90,6 +90,7 @@ fn bilingual(order: ExportOrder) -> ExportOptions {
     ExportOptions {
         bilingual: true,
         order: Some(order),
+        ..Default::default()
     }
 }
 
@@ -176,6 +177,7 @@ fn export_options_validate_order_and_keep_default_paths_distinct() {
     let invalid = ExportOptions {
         bilingual: false,
         order: Some(ExportOrder::SourceFirst),
+        ..Default::default()
     };
     assert!(render_txt(&snapshot(), invalid)
         .unwrap_err()
@@ -621,4 +623,60 @@ fn read_entry<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>, name: &str) 
     let mut bytes = Vec::new();
     entry.read_to_end(&mut bytes).expect("entry should read");
     bytes
+}
+
+#[test]
+fn epub_layout_applies_to_both_sources_and_bilingual_exports() {
+    use super::ExportLayout;
+    for source_epub_input in [false, true] {
+        let mut snapshot = snapshot();
+        let chapter_path = if source_epub_input {
+            snapshot.project.source_file = "book.epub".into();
+            snapshot.chapters[0].segments[1].source = "Hello world!".into();
+            snapshot.source_bytes = source_epub();
+            "OEBPS/chapter.xhtml"
+        } else {
+            snapshot.source_bytes = b"Chapter 1\n\nHello, world!".to_vec();
+            snapshot.chapters[0].segments.remove(0);
+            "OEBPS/chapter-0001.xhtml"
+        };
+        for bilingual in [false, true] {
+            for (layout, mode, direction) in [
+                (ExportLayout::Preserve, None, None),
+                (ExportLayout::Vertical, Some("vertical-rl"), Some("rtl")),
+                (ExportLayout::Horizontal, Some("horizontal-tb"), Some("ltr")),
+            ] {
+                let bytes = render_epub(
+                    &snapshot,
+                    ExportOptions {
+                        bilingual,
+                        layout,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+                let chapter = String::from_utf8(read_entry(&mut archive, chapter_path)).unwrap();
+                let nav = String::from_utf8(read_entry(&mut archive, "OEBPS/nav.xhtml")).unwrap();
+                let opf = String::from_utf8(read_entry(&mut archive, "OEBPS/content.opf")).unwrap();
+                if let Some(mode) = mode {
+                    for document in [&chapter, &nav] {
+                        assert!(document.contains(&format!("writing-mode: {mode} !important")));
+                    }
+                } else {
+                    assert!(!chapter.contains("writing-mode"));
+                    assert!(!nav.contains("writing-mode"));
+                }
+                if let Some(direction) = direction {
+                    assert!(opf.contains(&format!("page-progression-direction=\"{direction}\"")));
+                } else {
+                    assert!(!opf.contains("page-progression-direction"));
+                }
+                if source_epub_input {
+                    assert_eq!(read_entry(&mut archive, "OEBPS/image.bin"), b"image-bytes");
+                    assert_eq!(read_entry(&mut archive, "OEBPS/style.css"), b"h1{}");
+                }
+            }
+        }
+    }
 }

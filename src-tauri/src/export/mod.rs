@@ -25,6 +25,7 @@ pub use txt::render_txt;
 pub struct ExportOptions {
     pub bilingual: bool,
     pub order: Option<ExportOrder>,
+    pub layout: ExportLayout,
 }
 
 #[derive(
@@ -43,6 +44,15 @@ pub enum ExportOrder {
     #[default]
     TargetFirst,
     SourceFirst,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExportLayout {
+    #[default]
+    Preserve,
+    Vertical,
+    Horizontal,
 }
 
 impl ExportOptions {
@@ -128,11 +138,12 @@ pub fn validate_snapshot(snapshot: &ExportSnapshot) -> Result<(), String> {
 pub fn render_epub(snapshot: &ExportSnapshot, options: ExportOptions) -> Result<Vec<u8>, String> {
     options.validate()?;
     validate_snapshot(snapshot)?;
-    if source_is_epub(snapshot) {
-        epub::refill_epub(snapshot, options)
+    let bytes = if source_is_epub(snapshot) {
+        epub::refill_epub(snapshot, options)?
     } else {
-        epub::generate_epub(snapshot, options)
-    }
+        epub::generate_epub(snapshot, options)?
+    };
+    epub::apply_layout(bytes, options.layout)
 }
 
 fn source_is_epub(snapshot: &ExportSnapshot) -> bool {

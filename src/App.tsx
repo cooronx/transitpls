@@ -53,6 +53,7 @@ type ItemStatus = "pending" | "translated" | "failed";
 type ExportOptions = {
   bilingual: boolean;
   order?: "target-first" | "source-first";
+  layout?: "preserve" | "vertical" | "horizontal";
 };
 type PolishStatus = "pending" | "succeeded" | "failed";
 interface Project {
@@ -1122,10 +1123,11 @@ function ExportDialog({ format, onClose, onExport }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const [bilingual, setBilingual] = useState(false);
   const [order, setOrder] = useState<ExportOptions["order"]>("target-first");
+  const [layout, setLayout] = useState<ExportOptions["layout"]>("preserve");
   useEffect(() => { dialog.current?.showModal(); }, []);
   return (
     <dialog ref={dialog} className="export-dialog" onCancel={onClose} aria-labelledby="export-title">
-      <form onSubmit={(event) => { event.preventDefault(); onExport(bilingual ? { bilingual, order } : { bilingual }); }}>
+      <form onSubmit={(event) => { event.preventDefault(); onExport({ bilingual, ...(bilingual ? { order } : {}), ...(format === "epub" ? { layout } : {}) }); }}>
         <h2 id="export-title">导出 {format.toUpperCase()}</h2>
         <label className="field">
           <b>导出内容</b>
@@ -1142,6 +1144,16 @@ function ExportDialog({ format, onClose, onExport }: {
               <option value="source-first">原文在前</option>
             </select>
             <small>每段原文与当前译文上下排列，标题仅保留译文。</small>
+          </label>
+        )}
+        {format === "epub" && (
+          <label className="field">
+            <b>排版</b>
+            <select value={layout} onChange={(event) => setLayout(event.target.value as ExportOptions["layout"])}>
+              <option value="preserve">保持原书</option>
+              <option value="vertical">竖排</option>
+              <option value="horizontal">横排</option>
+            </select>
           </label>
         )}
         <div className="export-dialog-actions">
