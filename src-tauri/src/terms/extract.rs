@@ -1,6 +1,6 @@
 //! 术语抽取：调用模型从原文/译文中提取术语，并对空响应做降级处理。
 
-use super::matching::is_untranslated_source;
+use super::matching::{is_untranslated_source, matches_text};
 use super::sqlite::validate_term;
 use super::{Term, TermPolicy, TermStatus};
 use crate::llm::{TranslationClient, EMPTY_COMPLETION_ERROR};
@@ -89,8 +89,11 @@ const EXTRACTION_SYSTEM_PROMPT: &str = concat!(
     "Report the target wording actually present in the supplied translation, even when it differs from known_terms. ",
     "known_terms is reference data for identifying entities and aliases, not an answer to copy: ",
     "never replace observed wording with the glossary target or invent a preferred translation. ",
-    "When an alias unambiguously refers to a known entity, use that entity's canonical source. ",
-    "Return a separate entry for each distinct target wording observed for the same source. ",
+    "Use the exact source wording actually present in the supplied source text. ",
+    "Never replace an observed alias, short name, or form of address with a canonical entity name from known_terms. ",
+    "Different source forms must remain separate entries even when they refer to the same character. ",
+    "For example, しまむら妹 -> 岛村妹妹 and 妹 -> 妹妹 are separate source forms, not conflicting translations. ",
+    "Return a separate entry for each distinct target wording observed for the same exact source form. ",
     "Omit a term if no corresponding wording can be identified in the supplied translation. ",
     "Return only JSON as {\"terms\":[{\"source\":\"...\",\"target\":\"...\",\"reading\":null,\"type\":\"person\",\"gender\":null,\"aliases\":[],\"note\":null}]}. ",
     "The type value must be exactly one of these literals: person, place, organization, term, appellation, speech, fixed_expr. ",
@@ -148,6 +151,10 @@ pub async fn extract_terms<C: TranslationClient + ?Sized>(
                         .into_iter()
                         .map(|term| term.into_term(chapter))
                         .filter(|term| !is_untranslated_source(&term.source, &term.target))
+                        // Entity aliases may inform extraction, but cannot stand in for
+                        // source wording that is absent from the supplied text.
+                        .filter(|term| matches_text(source_text, &term.source))
+                        .filter(|term| matches_text(target_text, &term.target))
                         .collect::<Vec<_>>();
                     match terms.iter().try_for_each(validate_term) {
                         Ok(()) => return Ok(terms),

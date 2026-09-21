@@ -617,7 +617,7 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     store.insert(&alice).unwrap();
     let terms = extract_terms(
         &PromptCaptureClient(Arc::clone(&prompt)),
-        "Alicia arrived.",
+        "Alice arrived.",
         "艾莉丝到了。",
         &[alice],
         0,
@@ -628,7 +628,7 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     assert_eq!(terms[0].target, "艾莉丝");
     assert_eq!(
         store
-            .insert_with_evidence(&terms[0], "Alicia arrived.", "艾莉丝到了。")
+            .insert_with_evidence(&terms[0], "Alice arrived.", "艾莉丝到了。")
             .unwrap(),
         TermStatus::Conflict
     );
@@ -643,6 +643,9 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     assert!(system.contains("Report the target wording actually present"));
     assert!(!system.contains("reuse its target exactly"));
     assert!(system.contains("Extract only terminology"));
+    assert!(system.contains("Use the exact source wording actually present"));
+    assert!(system.contains("Different source forms must remain separate entries"));
+    assert!(!system.contains("use that entity's canonical source"));
     assert!(system.contains("Exclude ordinary nouns"));
     assert!(system.contains("Return an empty array when nothing qualifies"));
     let value: serde_json::Value = serde_json::from_str(user).unwrap();
@@ -650,6 +653,73 @@ async fn extraction_preserves_observed_target_and_records_glossary_conflict() {
     assert_eq!(value["known_terms"][0]["target"], "爱丽丝");
     assert_eq!(value["known_terms"][0]["aliases"][0], "Alicia");
     assert_eq!(value["target"], "艾莉丝到了。");
+    drop(store);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn extraction_rejects_a_canonical_name_absent_from_the_source() {
+    let mut known = term("しまむら妹", "岛村妹妹");
+    known.aliases.push("妹".into());
+    let extracted = extract_terms(
+        &FixedTermClient("しまむら妹", "妹妹"),
+        "先に約束したわけだし、妹に諦めてもらうしかない。",
+        "毕竟是我先约好的，也只能让妹妹死心了。",
+        &[known],
+        3,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(
+        extracted.is_empty(),
+        "a character identity is not the observed source wording"
+    );
+}
+
+#[tokio::test]
+async fn extraction_keeps_distinct_source_forms_out_of_translation_conflicts() {
+    let (store, path) = store("distinct-source-forms");
+    let mut known = term("しまむら妹", "岛村妹妹");
+    known.aliases.push("妹".into());
+    store.insert(&known).unwrap();
+    let extracted = extract_terms(
+        &FixedTermClient("妹", "妹妹"),
+        "妹に諦めてもらう。",
+        "让妹妹死心。",
+        &[known],
+        3,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(extracted.len(), 1);
+    store
+        .insert_with_evidence(&extracted[0], "妹に諦めてもらう。", "让妹妹死心。")
+        .unwrap();
+    assert!(store.conflicts().unwrap().is_empty());
+    assert_eq!(store.list().unwrap().len(), 2);
+    // The same source form with a different translation still needs review.
+    let extracted = extract_terms(
+        &FixedTermClient("しまむら妹", "岛村小妹"),
+        "しまむら妹が来た。",
+        "岛村小妹来了。",
+        &store.list().unwrap(),
+        4,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        store
+            .insert_with_evidence(&extracted[0], "しまむら妹が来た。", "岛村小妹来了。")
+            .unwrap(),
+        TermStatus::Conflict
+    );
+    assert_eq!(
+        store.conflict_details(false).unwrap()[0].source,
+        "しまむら妹"
+    );
     drop(store);
     std::fs::remove_file(path).unwrap();
 }
