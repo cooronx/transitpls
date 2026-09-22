@@ -11,7 +11,9 @@
   <p>
     面向长篇文档的 AI 翻译工作台
     <br />
-    <a href="https://github.com/cooronx/transitpls"><strong>查看项目 »</strong></a>
+    <a href="https://linux.do/">
+      Linux.do
+    </a>
     ·
     <a href="https://github.com/cooronx/transitpls/issues">报告问题</a>
   </p>
