@@ -576,6 +576,9 @@ async fn single_chapter_translation_does_not_auto_polish() {
         state::load_chapters(&state_dir, &initialized.project).expect("chapters should reload");
     assert!(chapters[0].segments[0].target.is_some());
     assert!(chapters[1].segments[0].target.is_none());
+    // 单章正文完成后立即翻译该章标题；未完成的章节标题不动。
+    assert!(chapters[0].target_title.is_some());
+    assert!(chapters[1].target_title.is_none());
     assert!(
         polish::read_summary(&state_dir, &initialized.project.id, &chapters)
             .expect("summary should load")
@@ -1027,9 +1030,9 @@ async fn selected_chapter_leaves_other_chapters_untouched() {
 
     assert!(chapters[0].segments[0].target.is_none());
     assert!(chapters[1].segments[0].target.is_some());
-    assert!(chapters
-        .iter()
-        .all(|chapter| chapter.target_title.is_none()));
+    // 正文完成的章节补齐标题，其余章节标题保持未翻译。
+    assert!(chapters[0].target_title.is_none());
+    assert!(chapters[1].target_title.is_some());
     assert_eq!(project.chapters_completed, 1);
     assert_eq!(project.status, ProjectStatus::Translating);
     drop(store);

@@ -3584,6 +3584,10 @@ function countTranslationRequests(
   const selected = chapterId
     ? chapters.filter((chapter) => chapter.id === chapterId)
     : chapters;
+  const bodyComplete = (chapter: Chapter) =>
+    chapter.segments.every(
+      (segment) => segment.status === "translated" && segment.target !== null,
+    );
   let total = selected.reduce(
     (sum, chapter) =>
       sum +
@@ -3596,22 +3600,17 @@ function countTranslationRequests(
       ),
     0,
   );
-  const completesBook = chapters.every(
-    (chapter) =>
-      chapter.id === chapterId ||
-      chapter.segments.every(
-        (segment) => segment.status === "translated" && segment.target !== null,
-      ),
+  total += countPendingBatches(
+    chapters.map((chapter) => ({
+      source: chapter.title,
+      pending:
+        !chapter.target_title &&
+        (chapterId === undefined ||
+          chapter.id === chapterId ||
+          bodyComplete(chapter)),
+    })),
+    maxChars,
   );
-  if (!chapterId || completesBook) {
-    total += countPendingBatches(
-      chapters.map((chapter) => ({
-        source: chapter.title,
-        pending: !chapter.target_title,
-      })),
-      maxChars,
-    );
-  }
   return total;
 }
 function countPendingBatches(

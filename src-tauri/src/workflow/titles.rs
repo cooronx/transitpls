@@ -1,6 +1,6 @@
-//! 章节标题翻译：全书正文完成后补齐缺失的译文标题，并同步章节内标题段落。
+//! 章节标题翻译：正文已完成的章节补齐缺失的译文标题，并同步章节内标题段落。
 
-use super::common::save_project_progress;
+use super::common::{chapter_body_complete, save_project_progress};
 use crate::analysis::BookAnalysis;
 use crate::config::AppConfig;
 use crate::llm::{self, TranslationClient};
@@ -10,7 +10,7 @@ use crate::state;
 use crate::terms::TermStore;
 use std::path::Path;
 
-/// 翻译缺失的章节标题。
+/// 翻译正文已完成的章节中缺失的标题。
 ///
 /// 先按批次翻译；整批失败时回退到逐章翻译。已存在的标题会同步到章节内
 /// 与标题同名的标题段落，保证正文与目录一致。
@@ -49,7 +49,9 @@ pub(super) async fn translate_missing_titles<C: TranslationClient + ?Sized>(
         .collect::<Vec<_>>();
     for range in pipeline::batch_ranges(&title_segments, config.segment.max_chars_per_batch) {
         let indices = range
-            .filter(|&index| chapters[index].target_title.is_none())
+            .filter(|&index| {
+                chapters[index].target_title.is_none() && chapter_body_complete(&chapters[index])
+            })
             .collect::<Vec<_>>();
         if indices.is_empty() {
             continue;

@@ -149,7 +149,7 @@ pub(crate) async fn transit(
     Ok(project)
 }
 
-/// 翻译指定章节（或全书），最后补齐章节标题。
+/// 翻译指定章节（或全书），并补齐正文已完成章节的标题。
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_transit(
     client: Arc<dyn TranslationClient>,
@@ -207,18 +207,16 @@ pub(crate) async fn run_transit(
         .await?;
     }
 
-    if chapters.iter().all(chapter_body_complete) {
-        translate_missing_titles(
-            client.as_ref(),
-            store,
-            state_dir,
-            project,
-            chapters,
-            analysis,
-            config,
-        )
-        .await?;
-    }
+    translate_missing_titles(
+        client.as_ref(),
+        store,
+        state_dir,
+        project,
+        chapters,
+        analysis,
+        config,
+    )
+    .await?;
 
     let failed_segments = chapters
         .iter()
